@@ -200,3 +200,109 @@
 .am-verify summary { cursor: pointer; font-size: .84rem; color: var(--sc-action); }
 .am-verify pre { margin: 4px 0; padding: 6px 8px; font-family: var(--sc-mono); font-size: .78rem; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sc-inset); border-radius: 3px; }
 @media (forced-colors: active) { .am-line-range { border: 1px solid CanvasText; } }
+
+/* ===== NeuroSwarm identity for the Activity map (fold study: warm stock, carbon ink, copper registration) =====
+   Index tabs and a ruler instead of pills; drawn step glyphs instead of coloured dots; frames registered by a top rule
+   and a copper corner instead of a coloured left edge; orthogonal runs in the graph. Motion only on transform/opacity. */
+#activity-map { --ap-ease: cubic-bezier(.22, 1, .36, 1); --ap-cap: 600 .68rem/1.3 var(--sc-mono); }
+
+/* index tabs with a sliding copper rule */
+#activity-map .ap-tabs { padding: 0; gap: 0; border: 0; border-bottom: 1px solid var(--rule, var(--sc-line)); border-radius: 0; background: none; }
+#activity-map .ap-tab { position: relative; border-radius: 0; padding: 9px 14px 10px; font: var(--ap-cap); letter-spacing: .1em; text-transform: uppercase; color: var(--sc-muted); box-shadow: none; }
+#activity-map .ap-tab::after { content: ""; position: absolute; left: 14px; right: 14px; bottom: -1px; height: 2px; background: var(--copper, var(--sc-action));
+  transform: scaleX(0); transform-origin: left; transition: transform 260ms var(--ap-ease); }
+#activity-map .ap-tab:hover { background: none; color: var(--carbon, var(--sc-ink)); }
+#activity-map .ap-tab:hover::after { transform: scaleX(.35); }
+#activity-map .ap-tab.on { background: none; color: var(--carbon, var(--sc-ink)); box-shadow: none; }
+#activity-map .ap-tab.on::after { transform: scaleX(1); }
+
+/* time window as a ruler: one bar, hairline divisions, the chosen span inked */
+#activity-map .ap-spans { display: inline-flex; gap: 0; border: 1px solid var(--carbon, var(--sc-ink)); margin: 0 0 12px; }
+#activity-map .ap-spans .am-chip { border: 0; border-radius: 0; padding: 6px 13px; font: var(--ap-cap); letter-spacing: .08em; background: none; color: var(--carbon, var(--sc-ink)); }
+#activity-map .ap-spans .am-chip + .am-chip { box-shadow: inset 1px 0 var(--rule, var(--sc-line)); }
+#activity-map .ap-spans .am-chip:hover { transform: none; background: var(--sc-inset); }
+#activity-map .ap-spans .am-chip.on { background: var(--carbon, var(--sc-ink)); color: var(--sc-mint); }
+#activity-map .ap-search input { border-radius: 2px; border-color: var(--rule, var(--sc-line)); background: var(--stock, var(--sc-paper)); }
+#activity-map .ap-search input:focus { border-color: var(--carbon, var(--sc-ink)); box-shadow: 0 0 0 3px rgba(168, 68, 35, .14); }
+
+/* machines: registered frames with a status mark and a mono caption */
+#activity-map .ap-hosts li { border: 1px solid var(--rule, var(--sc-line)); border-top: 2px solid var(--rule, var(--sc-line)); border-radius: 2px; background: var(--stock, var(--sc-paper)); padding: 11px 13px 12px; }
+#activity-map .ap-hosts li.on { border-top-color: var(--carbon, var(--sc-ink));
+  background-image: linear-gradient(135deg, var(--copper, var(--sc-action)) 0 5px, transparent 5.5px); background-repeat: no-repeat; background-size: 10px 10px; }
+#activity-map .ap-hosts li:hover { transform: translateY(-2px); box-shadow: 0 10px 22px -16px rgba(25, 40, 35, .55); }
+#activity-map .ap-host-cap { display: inline-flex; align-items: center; gap: 7px; font: var(--ap-cap); letter-spacing: .1em; text-transform: uppercase; color: var(--sc-muted); }
+#activity-map .ap-host-mark { width: 8px; height: 8px; border: 1.5px solid var(--sc-control); }
+#activity-map .ap-hosts li.on .ap-host-mark { background: var(--sc-action); border-color: var(--sc-action); }
+#activity-map .ap-hosts strong { font: 400 1.18rem/1.15 Georgia, serif; letter-spacing: -.02em; }
+#activity-map .ap-share { display: none; }                       /* the caption says it, once */
+#activity-map .ap-root { border-radius: 0; font-family: var(--sc-mono); font-size: .72rem; }
+
+/* counts: a ledger line, serif numerals over mono captions */
+#activity-map .am-stats { border-top: 2px solid var(--carbon, var(--sc-ink)); border-bottom: 1px solid var(--rule, var(--sc-line)); border-radius: 0; background: none; }
+#activity-map .am-stats > div { border: 0; box-shadow: inset 1px 0 var(--rule, var(--sc-line)); background: none; }
+#activity-map .am-stats > div:first-child { box-shadow: none; }
+#activity-map .am-stats b { font: 400 2rem/1 Georgia, serif; letter-spacing: -.04em; }
+#activity-map .am-stats span { font: var(--ap-cap); letter-spacing: .08em; text-transform: uppercase; color: var(--sc-muted); }
+
+/* step glyphs */
+.ap-glyph { display: inline-block; flex: none; width: 12px; height: 12px; margin-right: 6px; vertical-align: -1px; fill: none; stroke: currentColor;
+  stroke-width: 1.5; stroke-linecap: square; stroke-linejoin: miter; background: none !important; }
+.ap-glyph.c-file_edit { color: var(--sc-action); } .ap-glyph.c-shell { color: var(--carbon, var(--sc-ink)); } .ap-glyph.c-file_read { color: #4F8A6B; }
+.ap-glyph.c-plan { color: var(--copper, #a84423); } .ap-glyph.c-think { color: #6E8175; } .ap-glyph.c-web { color: #2F6A8A; }
+.ap-glyph.c-coordination { color: #7A5C2E; } .ap-glyph.c-visual { color: #8A4E6B; } .ap-glyph.c-other { color: var(--sc-control); }
+.am-legend .ap-glyph { margin-right: 5px; }
+
+/* timeline: glyph tiles on hairline lanes */
+#activity-map .ap-dot { cursor: pointer; transform-box: fill-box; }
+#activity-map .ap-dot .ap-plate { fill: var(--stock, var(--sc-paper)); stroke: currentColor; stroke-width: 1.2; transition: fill 160ms var(--ap-ease); }
+#activity-map .ap-dot .ap-mark { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: square; pointer-events: none; }
+#activity-map .ap-dot.c-file_edit { color: var(--sc-action); } #activity-map .ap-dot.c-shell { color: var(--carbon, var(--sc-ink)); }
+#activity-map .ap-dot.c-file_read { color: #4F8A6B; } #activity-map .ap-dot.c-plan { color: var(--copper, #a84423); }
+#activity-map .ap-dot.c-web { color: #2F6A8A; } #activity-map .ap-dot.c-coordination { color: #7A5C2E; } #activity-map .ap-dot.c-visual { color: #8A4E6B; }
+#activity-map .ap-dot.c-think, #activity-map .ap-dot.c-other { color: #6E8175; }
+#activity-map .ap-dot:hover .ap-plate, #activity-map .ap-dot:focus-visible .ap-plate { fill: currentColor; }
+#activity-map .ap-dot:hover .ap-mark, #activity-map .ap-dot:focus-visible .ap-mark { stroke: var(--stock, var(--sc-paper)); }
+#activity-map .ap-dot.is-error .ap-plate { fill: var(--sc-critical-bg); stroke: var(--sc-critical-fg); }
+#activity-map .ap-dot:focus-visible { outline: none; }
+#activity-map .ap-burst rect { rx: 0; }
+#activity-map .ap-lane-line { stroke: var(--rule, var(--sc-line)); stroke-dasharray: 2 4; }
+#activity-map .ap-lane-name { font-family: Georgia, serif; font-size: 13px; font-weight: 400; }
+#activity-map .ap-tick { stroke: var(--rule, var(--sc-line)); }
+
+/* graph: orthogonal runs ending on a square port */
+#activity-map .am-flow { border-radius: 0; border-color: var(--rule, var(--sc-line)); border-top: 2px solid var(--carbon, var(--sc-ink)); background: var(--stock, var(--sc-paper));
+  background-image: radial-gradient(var(--rule, var(--sc-line)) .7px, transparent .8px); background-size: 14px 14px; }
+#activity-map .am-node rect { rx: 1; }
+#activity-map .am-node.selected rect { fill: var(--carbon, var(--sc-ink)); }
+#activity-map .am-col { font-family: var(--sc-mono); font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase; fill: var(--sc-muted); }
+#activity-map .am-link { stroke-linejoin: round; }
+#activity-map .am-port { fill: var(--stock, var(--sc-paper)); stroke: var(--sc-control); stroke-width: 1.2; transition: opacity 240ms var(--ap-ease); }
+#activity-map .am-port.on { stroke: var(--sc-action); }
+#activity-map .am-port.off, #activity-map .ap-hovering .am-port { opacity: .25; }
+@media (prefers-reduced-motion: no-preference) {
+  #activity-map .am-link.on { stroke-dasharray: 5 4; animation: ap-flow 1.6s linear infinite; }
+  @keyframes ap-flow { to { stroke-dashoffset: -18; } }
+}
+
+/* sessions: registered frames, open state marked by the copper corner and an inked top rule */
+#activity-map .am-session, #activity-map .am-session.active { border: 1px solid var(--rule, var(--sc-line)); border-top: 2px solid var(--rule, var(--sc-line)); border-radius: 2px; }
+#activity-map .am-session.active { border-top-color: var(--sc-action); }
+#activity-map .am-session[open] { border-inline-start: 1px solid var(--rule, var(--sc-line)); border-top-color: var(--carbon, var(--sc-ink));
+  background-image: linear-gradient(135deg, var(--copper, var(--sc-action)) 0 6px, transparent 6.5px); background-repeat: no-repeat; background-size: 12px 12px; }
+#activity-map .am-session > summary::after { content: "+"; font: 400 1.1rem/1 var(--sc-mono); transition: transform 220ms var(--ap-ease); }
+#activity-map .am-session[open] > summary::after { content: "+"; transform: rotate(45deg); }
+#activity-map .am-session h4, #activity-map .am-grid h4 { font: var(--ap-cap); letter-spacing: .1em; text-transform: uppercase; color: var(--sc-muted); }
+
+/* step detail: an evidence plate with a mono header band */
+#activity-map + dialog.am-detail { border-radius: 2px; border: 1px solid var(--carbon, var(--sc-ink)); border-top-width: 3px; }
+#activity-map + dialog.am-detail h3 { font: 400 1.6rem/1.1 Georgia, serif; letter-spacing: -.03em; }
+#activity-map + dialog.am-detail .am-detail-kind { font: var(--ap-cap); letter-spacing: .08em; text-transform: uppercase; }
+#activity-map + dialog.am-detail .am-detail-summary { border-left: 0; border-top: 1px solid var(--rule, var(--sc-line)); background: none; padding-left: 0; }
+#activity-map + dialog.am-detail .am-survival, #activity-map + dialog.am-detail .am-term { border-radius: 2px; }
+@media (forced-colors: active) { .ap-glyph, #activity-map .ap-dot .ap-mark { stroke: CanvasText; } #activity-map .ap-host-mark { border-color: CanvasText; } }
+
+/* NeuroSwarm console icon set (index.html sidebar): drawn on a 16 grid, square caps; it shifts a step when hovered. */
+.section-nav .ns-icon { width: 16px; height: 16px; transition: transform 220ms cubic-bezier(.22, 1, .36, 1); }
+.section-nav a:hover .ns-icon, .section-nav a.is-active .ns-icon { transform: translateX(2px); color: var(--copper, var(--sc-action)); }
+@media (prefers-reduced-motion: reduce) { .section-nav .ns-icon { transition: none; } .section-nav a:hover .ns-icon { transform: none; } }
+@media (max-width: 560px) { #activity-map .ap-tab { padding: 9px 9px 10px; letter-spacing: .07em; } #activity-map .ap-tab::after { left: 9px; right: 9px; } }

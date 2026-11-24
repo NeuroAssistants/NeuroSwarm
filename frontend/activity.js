@@ -80,6 +80,20 @@
   };
   const clock = iso => String(iso || "").slice(11, 16);
   const cat = c => CAT_ALIAS[c] || (CAT_LABEL[c] ? c : "other");
+  /* NeuroSwarm step glyphs: one drawn mark per kind of work, on a 12-unit grid with square caps, so a step reads by
+     shape before colour (and in forced colours). Drawn for this product; no icon library. */
+  const GLYPH = {
+    file_edit: "M2 10 9.5 2.5M7.5 2.5h2v2M2 10h3.5",
+    shell: "M2 3l3.5 3L2 9M7 9.5h3",
+    file_read: "M2.5 1.5h5l2 2v7h-7zM4.5 5.5h3M4.5 8h3",
+    plan: "M2 3h1M5 3h5M2 6h1M5 6h5M2 9h1M5 9h3",
+    think: "M2 6a4 4 0 1 0 8 0a4 4 0 1 0-8 0M6 6h.5",
+    web: "M6 1.5v9M1.5 6h9M2.5 3.5c2 1 5 1 7 0M2.5 8.5c2-1 5-1 7 0",
+    coordination: "M1.5 3h3v3h-3zM7.5 6h3v3h-3zM4.5 4.5h1.5v3h1.5",
+    visual: "M1.5 2.5h9v7h-9zM1.5 8l3-3 2.5 2.5 1.5-1.5 2 2",
+    other: "M6 3l3 3-3 3-3-3z",
+  };
+  const glyph = (c, extra = "") => `<svg class="ap-glyph c-${H(c)}${extra}" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="${GLYPH[c] || GLYPH.other}"/></svg>`;
   const agentKey = s => `${s.host_id || ""}|${s.agent_id || s.agent_name || s.harness}`;
   /* Names that share a long prefix ("team-research-alpha", "team-research-beta") are shown by what differs ("alpha"). */
   let SHORT = new Map();
@@ -184,7 +198,10 @@
       if (pos[from] === undefined || pos[to] === undefined) continue;
       const x1 = colX[colOf(from)] + boxW, x2 = colX[colOf(to)], y1 = pos[from] + boxH / 2, y2 = pos[to] + boxH / 2;
       const on = state.agent === "all" || l.includes(`a:${state.agent}`) ? "on" : "off";
-      paths += `<path class="am-link ${on}" data-from="${H(from)}" data-to="${H(to)}" d="M${x1} ${y1} C${(x1 + x2) / 2} ${y1} ${(x1 + x2) / 2} ${y2} ${x2} ${y2}"/>`;
+      const xm = Math.round((x1 + x2) / 2), r = Math.min(6, Math.abs(y2 - y1) / 2), dir = y2 > y1 ? 1 : -1;
+      const run = Math.abs(y2 - y1) < 1 ? `M${x1} ${y1} H${x2}`
+        : `M${x1} ${y1} H${xm - r} Q${xm} ${y1} ${xm} ${y1 + dir * r} V${y2 - dir * r} Q${xm} ${y2} ${xm + r} ${y2} H${x2}`;
+      paths += `<path class="am-link ${on}" data-from="${H(from)}" data-to="${H(to)}" d="${run}"/><rect class="am-port ${on}" x="${x2 - 3}" y="${y2 - 3}" width="6" height="6"/>`;
     }
     const nodes = cols.flatMap((c, ci) => c.map(n => `<g class="am-node ${n.cls}" data-node="${H(n.id)}" transform="translate(${colX[ci]} ${pos[n.id]})"${n.agent ? ` data-agent="${H(n.agent)}" tabindex="0" role="button" aria-pressed="${state.agent === n.agent}" aria-label="Show only ${H(n.title)}"` : ""}>
       <rect width="${boxW}" height="${boxH}" rx="5"/>${n.s ? providerMark(n.s, true) : `<circle cx="15" cy="${boxH / 2}" r="4.5"/>`}
@@ -201,7 +218,7 @@
     if (!total) return '<p class="muted small">No tool steps in the latest part of this session.</p>';
     const keys = CAT_ORDER.filter(k => counts[k]);
     return `<div class="am-bar" role="img" aria-label="${H(keys.map(k => `${CAT_LABEL[k]} ${counts[k]}`).join(", "))}">${keys.map(k => `<span class="am-seg c-${k}" style="flex:${counts[k]}"></span>`).join("")}</div>
-      <div class="am-legend">${keys.map(k => `<span><i class="c-${k}" aria-hidden="true"></i>${CAT_LABEL[k]} ${counts[k]}</span>`).join("")}</div>`;
+      <div class="am-legend">${keys.map(k => `<span>${glyph(k)}${CAT_LABEL[k]} ${counts[k]}</span>`).join("")}</div>`;
   }
   function fileList(title, list, d, cls, basis) {
     if (!list || !list.length) return "";
@@ -220,7 +237,7 @@
     const icon = { completed: "✓", in_progress: "◐", pending: "○" };
     const plan = s.plan.length ? `<ul class="am-plan">${s.plan.map((p, i) => `<li class="${H(p.status)}"><span aria-hidden="true">${icon[p.status] || "○"}</span>${btn(s, d, "plan", i, p.text)}<span class="sr-only"> (${H(String(p.status).replace("_", " "))})</span></li>`).join("")}</ul>`
       : '<p class="muted small">No checklist recorded in this session.</p>';
-    const steps = s.steps.length ? `<ol class="am-steps">${s.steps.map((st, i) => `<li><i class="c-${H(st.category)}" aria-hidden="true"></i><span class="sr-only">${H(CAT_LABEL[st.category])}: </span><time>${H(clock(st.time))}</time>${btn(s, d, "step", i, st.label)}${st.status === "error" ? ' <span class="ap-evidence bad">Failed</span>' : ""}</li>`).join("")}</ol>` : "";
+    const steps = s.steps.length ? `<ol class="am-steps">${s.steps.map((st, i) => `<li>${glyph(st.category)}<span class="sr-only">${H(CAT_LABEL[st.category])}: </span><time>${H(clock(st.time))}</time>${btn(s, d, "step", i, st.label)}${st.status === "error" ? ' <span class="ap-evidence bad">Failed</span>' : ""}</li>`).join("")}</ol>` : "";
     const latestKey = s.latest_work && stepKey(s, s.latest_work);
     const matches = latestKey ? s.steps.filter(st => stepKey(s, st) === latestKey) : [];
     const wi = matches.length === 1 ? s.steps.indexOf(matches[0]) : -1;
@@ -458,6 +475,7 @@
   }
   function hostStrip(d) {
     return `<ul class="ap-hosts" aria-label="Machines">${d.hosts.map(h => `<li class="${h.activity_enabled ? "on" : "off"}">
+      <span class="ap-host-cap"><i class="ap-host-mark" aria-hidden="true"></i>${h.activity_enabled ? "Sharing activity" : "Health only"}</span>
       <strong>${H(machineLabel(h))}</strong><span class="muted small">${h.os_name ? H(h.os_name) + " · " : ""}seen <time data-ts="${h.updated_at || ""}">${H(ago(h.updated_at))}</time></span>
       <span class="ap-share ${h.activity_enabled ? "on" : ""}">${h.activity_enabled ? `Sharing ${h.activity_roots.length} folder${h.activity_roots.length === 1 ? "" : "s"}` : "Health only"}</span>
       ${h.activity_enabled ? rootList(d, h) : ""}</li>`).join("")}</ul>`;
@@ -512,14 +530,15 @@
       const dots = bursts.map(b => {
         const o = b.at(-1), fresh = b.some(q => state.fresh.has(stepKey(q.s, q.st))), err = b.some(q => q.st.status === "error");
         const attrs = `data-session="${d.sessions.indexOf(o.s)}" data-kind="step" data-index="${o.i}" tabindex="0" role="button"`;
-        if (b.length === 1) return `<circle class="ap-dot c-${H(o.st.category)}${fresh ? " is-new" : ""}${err ? " is-error" : ""}" cx="${x(o.t).toFixed(1)}" cy="${y}" r="5.5" ${attrs}
-          aria-label="${H(`${l.name}: ${o.st.label} at ${clock(o.st.time)}`)}"><title>${H(describe(o))}</title></circle>`;
+        if (b.length === 1) return `<g class="ap-dot c-${H(o.st.category)}${fresh ? " is-new" : ""}${err ? " is-error" : ""}" transform="translate(${x(o.t).toFixed(1)} ${y})" ${attrs}
+          aria-label="${H(`${l.name}: ${o.st.label} at ${clock(o.st.time)}`)}"><rect class="ap-plate" x="-7.5" y="-7.5" width="15" height="15"/>
+          <path class="ap-mark" transform="translate(-6 -6)" d="${GLYPH[o.st.category] || GLYPH.other}"/><title>${H(describe(o))}</title></g>`;
         const cats = b.reduce((m, q) => (m[q.st.category] = (m[q.st.category] || 0) + 1, m), {});
         const main = Object.entries(cats).sort((p, q) => q[1] - p[1])[0][0];
         const x1 = x(b[0].t) - 6, w = Math.max(x(o.t) - x(b[0].t) + 12, 22);
         return `<g class="ap-burst c-${H(main)}${fresh ? " is-new" : ""}${err ? " is-error" : ""}" ${attrs}
           aria-label="${H(`${l.name}: ${b.length} steps from ${clock(b[0].st.time)} to ${clock(o.st.time)}; opens the latest`)}">
-          <rect x="${x1.toFixed(1)}" y="${y - 7}" width="${w.toFixed(1)}" height="14" rx="7"/><text x="${(x1 + w / 2).toFixed(1)}" y="${y + 3.5}" text-anchor="middle">${b.length}</text>
+          <rect x="${x1.toFixed(1)}" y="${y - 7.5}" width="${w.toFixed(1)}" height="15"/><text x="${(x1 + w / 2).toFixed(1)}" y="${y + 3.5}" text-anchor="middle">${b.length}</text>
           <title>${H(b.slice(-8).map(describe).join("\n") + (b.length > 8 ? `\n… ${b.length - 8} earlier` : ""))}</title></g>`;
       }).join("");
       return `<g class="ap-lane"><line class="ap-lane-line" x1="${L}" x2="${W - R}" y1="${y}" y2="${y}"/>
@@ -527,7 +546,7 @@
         <text class="ap-lane-count" x="${L - 8}" y="${y + 4}" text-anchor="end">${l.dots.length}</text>${dots}</g>`;
     }).join("");
     const legend = CAT_ORDER.filter(c => rows.some(l => l.dots.some(o => o.st.category === c)))
-      .map(c => `<span><i class="c-${c}" aria-hidden="true"></i>${CAT_LABEL[c]}</span>`).join("");
+      .map(c => `<span>${glyph(c)}${CAT_LABEL[c]}</span>`).join("");
     return `${spans}<div class="ap-timeline"><svg viewBox="0 0 ${W} ${H2}" role="group" aria-label="Recorded steps per agent over time">${ticks}${lanesSvg}</svg></div>
       <div class="am-legend ap-legend">${legend}<span class="muted">Select a dot for the step, its files and evidence.</span></div>`;
   }
