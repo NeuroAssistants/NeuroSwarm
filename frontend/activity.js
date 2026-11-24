@@ -258,6 +258,100 @@
   });
   dialog.addEventListener("close", () => { state.opener?.focus?.(); state.opener = null; });
 
+  /* ---------- recorded detail of one step: command, output, files and images ----------
+     The map lists the latest steps of a session. The journal keeps every step as an event, with the detail the collector
+     was allowed to share. When a step is opened, it is matched to its event (same session, same action, ±2 s; a shared
+     file name breaks ties) and its evidence is fetched. Nothing heavy is downloaded until an operator opens a step. */
+  let evidenceSeq = 0;
+  const MATCH_SEC = 2;
+  const SOURCE_LABEL = { tool_result: "What the tool returned to the agent", workspace_snapshot: "Copy of the file read on the agent's machine" };
+  const SETTINGS_HELP = `Command text, output and file previews appear only when the observer on that machine enables them
+    (<code>SWARMCONTROL_SHARE_COMMANDS</code>, <code>SWARMCONTROL_SHARE_COMMAND_OUTPUT</code>, <code>SWARMCONTROL_SHARE_FILE_PREVIEWS</code>). All are off by default.`;
+  async function getJSON(url) {
+    const r = await fetch(url, { credentials: "same-origin", headers: { Accept: "application/json" } });
+    if (!r.ok) throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status });
+    return r.json();
+  }
+  async function findStepEvent(s, st) {
+    const t = Date.parse(st.time) / 1000;
+    if (!s.session_id || !s.host_id || !s.agent_name || !s.harness || !Number.isFinite(t)) return null;
+    const qs = new URLSearchParams({ session: s.session_id, host: s.host_id, agent: s.agent_name, runtime: s.harness,
+      before: `${t + MATCH_SEC}|Event|9223372036854775807` });
+    const page = await getJSON(`/api/v1/live-records?${qs}`);
+    const base = f => String(f || "").split(/[\\/]/).pop();
+    const names = new Set((st.files || []).map(base).filter(Boolean));
+    let best = null, bestScore = Infinity;
+    for (const r of page.records || []) {
+      const ts = Number(r.ts);
+      if (ts < t - MATCH_SEC) break;                       // newest first: everything after this is older
+      if (r.kind !== "Event" || r.source !== "observed_step") continue;
+      const w = r.work || {};
+      if (cat(w.action) !== st.category) continue;
+      const fileHit = names.size > 0 && (w.files || []).some(f => names.has(base(f)));
+      const score = Math.abs(ts - t) - (fileHit ? MATCH_SEC : 0);
+      if (score < bestScore) { best = r; bestScore = score; }
+    }
+    return best ? { id: Number(best.id), organization: page.organization } : null;
+  }
+  const kb = n => n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`;
+  function evidenceHtml(ev, liveHref, hadStepFiles, d) {
+    const out = [];
+    const ran = ev.command_input != null || ev.command_output != null || ev.exit_code != null;
+    if (ran) {
+      const code = ev.exit_code == null ? '<span class="am-exit">exit code not recorded</span>'
+        : `<span class="am-exit ${ev.exit_code === 0 ? "ok" : "bad"}">exit ${H(ev.exit_code)}</span>`;
+      const input = ev.command_input != null ? `<span class="am-prompt" aria-hidden="true">$ </span>${H(ev.command_input)}`
+        : `<span class="muted">${H(ev.program ? `${ev.program} …` : "Command")} (full text not shared)</span>`;
+      const output = ev.command_output == null ? '<p class="muted small am-term-note">Output not shared by this machine.</p>'
+        : `<pre class="am-term-out" tabindex="0" aria-label="Command output">${ev.command_output ? H(ev.command_output) : '<span class="muted">(no output)</span>'}</pre>
+           ${ev.output_truncated ? '<p class="muted small am-term-note">Output shortened to its first 4,096 characters.</p>' : ""}`;
+      out.push(`<section class="am-term" aria-label="Command and result"><div class="am-term-head"><h4>Command and result</h4>${code}</div>
+        <pre class="am-term-in" tabindex="0" aria-label="Command">${input}</pre>${output}</section>`);
+    }
+    const images = (ev.images || []).filter(im => typeof im.url === "string" && im.url.startsWith("/api/v1/events/"));
+    if (images.length) {
+      out.push(`<section class="am-shots"><h4>Images the agent saw <span class="muted">${images.length}</span></h4><div class="am-shot-grid">${images.map(im => {
+        const when = im.captured_at ? new Date(im.captured_at * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC" : "";
+        return `<figure class="am-shot"><a href="${H(im.url)}" target="_blank" rel="noopener" title="Open full size">
+          <img src="${H(im.url)}" alt="${H(im.path)}" loading="lazy" decoding="async"></a>
+          <figcaption><strong>${H(String(im.path).split("/").pop())}</strong><span>${H(SOURCE_LABEL[im.source] || "Recorded image")}</span>
+          <span class="muted">${H([when, im.size_bytes ? kb(im.size_bytes) : ""].filter(Boolean).join(" · "))}</span></figcaption></figure>`;
+      }).join("")}</div></section>`);
+    }
+    const texts = (ev.text_previews || []).filter(t => typeof t.excerpt === "string" || typeof t.text === "string");
+    if (texts.length) {
+      out.push(`<section class="am-texts"><h4>File contents the agent read <span class="muted">${texts.length}</span></h4>${texts.map((t, i) => `
+        <details class="am-text"${i === 0 ? " open" : ""}><summary><code>${H(t.path)}</code>${t.truncated ? ' <span class="muted small">(first 4,096 characters)</span>' : ""}</summary>
+        <pre tabindex="0">${H(t.excerpt ?? t.text)}</pre></details>`).join("")}</section>`);
+    }
+    if (!hadStepFiles && Array.isArray(ev.files) && ev.files.length) out.push(fileList("Files recorded for this step", ev.files, d, "", evidence("recorded")));
+    const open = `<a class="link-hop-btn" href="${H(liveHref)}">Open this event in Live events ↗</a>`;
+    if (!out.length) return `<p class="muted small">This step is in the journal, but the machine did not share its command text, output or file contents.</p>
+      <p class="muted small">${SETTINGS_HELP}</p>${open}`;
+    return out.join("") + open;
+  }
+  async function loadEvidence(slot, s, st, d, firstFile, hadStepFiles) {
+    const seq = ++evidenceSeq;
+    // A newer request or a re-rendered dialog (the slot left the page) makes this answer stale.
+    const settle = html => { if (seq === evidenceSeq && slot.isConnected) { slot.innerHTML = html; slot.removeAttribute("aria-busy"); } };
+    try {
+      const hit = await findStepEvent(s, st);
+      if (seq !== evidenceSeq) return;
+      if (!hit) {
+        settle(`<p class="muted small">No journal entry matches this step yet. The journal stores the agents and folders the operator selected; a step from the last few seconds can take one scan to appear.</p>`);
+        return;
+      }
+      const qs = hit.organization != null ? `?${new URLSearchParams({ organization_id: hit.organization })}` : "";
+      const ev = await getJSON(`/api/v1/events/${hit.id}/evidence${qs}`);
+      const liveHref = `${liveHrefForSession(s, firstFile)}&event=${encodeURIComponent(`event:${hit.id}`)}`;
+      settle(evidenceHtml(ev, liveHref, hadStepFiles, d));
+    } catch (err) {
+      settle(err.status === 409 ? '<p class="muted small">The organization changed. Close this window and open the step again.</p>'
+        : err.status === 401 || err.status === 403 ? '<p class="muted small">Your session cannot read event details. Sign in again or ask an admin.</p>'
+        : '<p class="muted small">The recorded detail could not be loaded. Try again in a moment.</p>');
+    }
+  }
+
   function showDetail(button) {
     const d = state.data, s = d?.sessions[Number(button.dataset.session)];
     if (!s) return;
@@ -281,16 +375,19 @@
       ${detailLinkBar}
       <div class="am-detail-summary"><h4>What the agent did in this session</h4><p>${H(s.what_done)}</p></div>
       ${stepFiles || '<p class="muted small">No file inside the shared folders is tied to this single step.</p>'}
+      ${isPlan ? "" : `<div class="am-evidence" data-evidence aria-live="polite" aria-busy="true"><p class="muted small am-loading">Loading the recorded command, output and files…</p></div>`}
       <dl class="ap-facts"><dt>Folder</dt><dd><code>${H(rel(s.workspace, d) || "unreported")}</code></dd>
         <dt>Agent identity</dt><dd>From the shared folder name${s.owner_basis && s.owner_basis !== "workspace" ? ` (${H(s.owner_basis)})` : ""}</dd>
         <dt>Provider</dt><dd>${H(s.provider_basis === "recorded" ? "Recorded by the harness" : s.provider_basis === "model" ? "Inferred from the model name" : "Not recorded")}</dd></dl>
       <details class="am-context"${stepFiles ? "" : " open"}><summary>All files in this session</summary>${sessionFiles || "<p class='muted small'>None recorded.</p>"}</details>`;
     dialog.showModal();
     dialog.querySelector("[data-close]").focus();
+    const slot = dialog.querySelector("[data-evidence]");
+    if (slot) loadEvidence(slot, s, item, d, firstStepFile, Boolean(stepFiles));
   }
 
   /* ---------- empty and privacy states ---------- */
-  const PRIVACY = `<p class="muted small ap-privacy">Each machine reads only the folders its operator lists. Summaries are cleaned on that machine before sending; prompts, command arguments and file contents never leave it.</p>`;
+  const PRIVACY = `<p class="muted small ap-privacy">Each machine reads only the folders its operator lists. Summaries are cleaned on that machine before sending. Prompts never leave it; command text, output and file previews leave it only if its operator turns them on.</p>`;
   function emptyState(d) {
     const hosts = d.hosts;
     if (!hosts.length) {
