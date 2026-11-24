@@ -5,11 +5,10 @@ import base64
 import binascii
 import hashlib
 import json
-import math
 import re
 import zlib
 
-from activity_inspector import evidence_text, is_sensitive_path
+from activity_inspector import evidence_text, is_sensitive_path, protected_command
 
 MAX_IMAGE_BYTES = 160 * 1024
 WORK_FIELDS = ("session", "parent_session", "workspace", "tool", "action", "basis", "outcome",
@@ -181,11 +180,13 @@ def complete_recorded_result(conn, step, shared_paths, stamp, ref):
     results = [item for item in shared_paths if item[1].get("source") == "tool_result"]
     if not ref or (not results and step.get("command_output") is None and type(step.get("exit_code")) is not int):
         return
-    row = conn.execute("""SELECT o.event_id,e.metadata_json,x.command_output IS NULL,x.exit_code IS NULL
+    row = conn.execute("""SELECT o.event_id,e.metadata_json,x.command_output IS NULL,x.exit_code IS NULL,x.command_input
                           FROM event_origins o JOIN events e ON e.id=o.event_id
                           LEFT JOIN event_execution x ON x.event_id=o.event_id WHERE o.ref=?""", (ref,)).fetchone()
     if row is None:
         return
+    if protected_command(row[4]):
+        step = {**step, "command_output": None}
     missing_output = row[2] and isinstance(step.get("command_output"), str)
     missing_exit = row[3] and type(step.get("exit_code")) is int
     if not (results or missing_output or missing_exit):
@@ -208,7 +209,8 @@ def store(conn, event_id, step, shared_paths, stamp, ref=None):
         conn.execute("INSERT INTO event_origins(event_id,ref) VALUES(?,?)", (event_id, ref))
     if step.get("category") in ("shell", "file_read"):
         inp, _ = evidence_text(step.get("command_input"), 1024)
-        out, cut = evidence_text(step.get("command_output"), 4096)
+        raw_output = None if protected_command(step.get("command_input")) else step.get("command_output")
+        out, cut = evidence_text(raw_output, 4096)
         code = step.get("exit_code")
         if type(code) is not int or not -(2**31) <= code < 2**31:
             code = None
@@ -243,7 +245,7 @@ def store(conn, event_id, step, shared_paths, stamp, ref=None):
         if len(data) > MAX_IMAGE_BYTES or not mime or mime != preview.get("mime_type"):
             continue
         captured = preview.get("captured_at", stamp)
-        if type(captured) not in (float, int) or not math.isfinite(captured):
+        if type(captured) not in (float, int) or not 0 <= captured <= 253402300799:
             continue
         conn.execute("INSERT OR IGNORE INTO event_images VALUES(?,?,?,?,?,?,?)",
                      (event_id, display, hashlib.sha256(data).hexdigest(), mime, preview["source"], captured, data))

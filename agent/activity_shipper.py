@@ -87,7 +87,7 @@ SKIP_WALK_DIRS = {
 
 
 def is_sensitive_path(path_str: str) -> bool:
-    p = Path(str(path_str))
+    p = Path(str(path_str).replace("\\", "/"))
     if any(part.lower() in SENSITIVE_DIRS for part in p.parts):
         return True
     return bool(SENSITIVE_FILE_RE.search(p.name))
@@ -262,11 +262,6 @@ def command_kind(cmd: Any) -> str:
     return "Run a shell command"
 
 
-def _shorten_cmd_path(raw: str) -> str:
-    parts = [p for p in re.split(r"[\\/]+", raw.strip()) if p]
-    return ".../" + "/".join(parts[-2:]) if len(parts) >= 2 else raw
-
-
 def command_info(cmd: Any) -> dict[str, str]:
     """Extract {'program': <name>} plus redacted opt-in 'command' when SWARMCONTROL_SHARE_COMMANDS=1."""
     c = str(cmd or "").strip()
@@ -288,19 +283,9 @@ def command_info(cmd: Any) -> dict[str, str]:
             break
     out = {"program": program} if program else {}
     if os.environ.get("SWARMCONTROL_SHARE_COMMANDS") == "1" and c:
-        shown = re.sub(
-            r"(?<![\w.])/(?:var|home|opt|tmp|etc|usr|root|srv|mnt|Users)/\S+",
-            lambda m: _shorten_cmd_path(m.group(0)),
-            c,
-        )
-        shown = re.sub(r"(?<![\w.])[A-Za-z]:\\\S+", lambda m: _shorten_cmd_path(m.group(0)), shown)
-        shown = CLI_SECRET_RE.sub(r"\1[redacted]", shown)
+        shown = CLI_SECRET_RE.sub(r"\1[redacted]", c)
         shown = redact_local_text(shown, 4000)
-        shown = re.sub(
-            r"(?<![\w-])[^\s'\"=-][^\s'\"=]*",
-            lambda m: "[protected file]" if ("/" in m.group(0) or "\\" in m.group(0) or "." in m.group(0)) and is_sensitive_path(m.group(0)) else m.group(0),
-            shown,
-        )
+        shown = _PATH_FIELDS.sub(_mask_evidence_path, shown)
         out["command"] = shown if len(shown) <= 160 else shown[:159].rstrip() + "…"
     return out
 
@@ -339,21 +324,55 @@ def _redact_secrets_preserve_ws(text: str) -> str:
     return INLINE_SECRET_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", clean)
 
 
+_PATH_FIELDS = re.compile(r"""[^\s"'=<>()|;&\[\]{}]+""")
+
+
+def _mask_evidence_path(match):
+    token = match.group()
+    path = token.rstrip(".,:").replace("\\", "/")
+    # Preserve assignment labels such as api_key=[redacted], while hiding a file named api_key.
+    if "/" not in path and "." not in path:
+        suffix = match.string[match.end():match.end() + 12].lstrip(" \t'\"")
+        if token.endswith(":") or suffix.startswith(("=", ":")):
+            return token
+    looks_like_path = any(mark in path for mark in ("/", ".", "_", "-"))
+    if looks_like_path and not token.startswith("-") and is_sensitive_path(path):
+        return "[protected file]"
+    if (path.startswith("/") and path.count("/") >= 2) or re.match(r"^[a-zA-Z]:/", path):
+        return ".../" + path.rsplit("/", 1)[-1]
+    return token
+
+
+def protected_command(command):
+    """Suppress output when a command explicitly requests private files or environment values."""
+    if not isinstance(command, str):
+        return False
+    if "[protected file]" in command or re.search(r"(?i)(?:^|[;&|\s])(?:env|set|printenv|export)(?:$|[;&|\s])", command):
+        return True
+    for field in _PATH_FIELDS.finditer(command):
+        token = field.group().rstrip(".,:")
+        if token and not token.startswith("-") and is_sensitive_path(token):
+            return True
+    return False
+
+
 def evidence_text(value: Any, limit: int) -> tuple[str | None, bool]:
     """Bound an explicitly shared text excerpt and preserve line breaks after redaction."""
     if not isinstance(value, str):
         return None, False
     if "PRIVATE KEY-----" in value or "\x00" in value:
         return "[protected content]", False
-    value = _CONTROL_SEQ.sub("", value)
+    scan_limit = limit * 2 + 1024
+    capped = len(value) > scan_limit
+    value = _CONTROL_SEQ.sub("", value[:scan_limit])
     value = _EVIDENCE_SECRET_ARGS.sub(r"\1 [redacted]", value)
     value = _EVIDENCE_SECRET_VALUE.sub(r"\1[redacted]", value)
     cleaned = []
     for line in value.split("\n"):
         safe = "".join(c for c in line if c == "\t" or (c.isprintable() and ord(c) != 127))
         cleaned.append(_redact_secrets_preserve_ws(safe))
-    excerpt = "\n".join(cleaned)
-    return excerpt[:limit], len(excerpt) > limit
+    excerpt = _PATH_FIELDS.sub(_mask_evidence_path, "\n".join(cleaned))
+    return excerpt[:limit], capped or len(excerpt) > limit
 
 
 def execution_detail(command: Any, output: Any, code: Any, *, capture_mode: bool = False) -> dict[str, Any]:
@@ -368,12 +387,7 @@ def execution_detail(command: Any, output: Any, code: Any, *, capture_mode: bool
         if text is not None:
             info["command_input"] = text
     if os.environ.get("SWARMCONTROL_SHARE_COMMAND_OUTPUT") == "1":
-        if re.search(r"(?i)(?:^|[;&|\s])(?:env|set|printenv|export)(?:$|[;&|\s])", str(command)) or any(
-            not part.startswith("-") and is_sensitive_path(part)
-            for raw_tok in str(command).split()
-            for part in (raw_tok.strip(" \"'").split("=", 1) if "=" in raw_tok else [raw_tok.strip(" \"'")])
-            if part
-        ):
+        if protected_command(command):
             return info
         text, cut = evidence_text(output, 4096)
         if text is not None:

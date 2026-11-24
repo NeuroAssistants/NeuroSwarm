@@ -18,6 +18,7 @@ except ImportError:
     from test_capture_incremental import CaptureHarness, append, stamp
 
 import activity_inspector as inspector
+import activity_shipper as shipper
 import event_evidence
 import step_journal
 
@@ -147,6 +148,24 @@ class EvidenceHTTPTests(ServerHarness):
         self.assertEqual(status, 200)
         self.assertTrue(all("event_id" not in step for step in activity()))
 
+    def test_private_file_command_cannot_supply_output_through_ingestion_or_a_late_reply(self):
+        self.login()
+        sender = self.bearer(self.token("private-path"))
+        step = {"tool": "exec_command", "category": "shell", "program": "cat", "label": "Read config",
+                "time": datetime.now(timezone.utc).isoformat(), "src": "privatepath:71:0",
+                "command_input": "cat config/.env", "command_output": "PRIVATE_RESULT"}
+        session = {"session_id": "private-path-test", "workspace": "/work", "steps": [step], "capture_steps": [step]}
+        payload = {"host_id": "demo", "activity_enabled": True, "activity_roots": ["/work"], "sessions": [session]}
+        self.assertEqual(self.req("POST", "/api/v1/ingest/activity", payload, headers=sender, cookie=False)[0], 200)
+        event = self.req("GET", "/api/v1/activity")[1]["sessions"][0]["steps"][0]["event_id"]
+        step.pop("command_input")
+        step["command_output"] = "LATE_PRIVATE_RESULT"
+        self.assertEqual(self.req("POST", "/api/v1/ingest/activity", payload, headers=sender, cookie=False)[0], 200)
+        detail = self.req("GET", f"{BASE}/{event}/evidence")[1]
+        self.assertEqual(detail["command_input"], "cat [protected file]")
+        self.assertIsNone(detail["command_output"])
+        self.assertNotIn("PRIVATE_RESULT", json.dumps(detail))
+
     def test_large_unrelated_metadata_retains_files_and_legacy_details_are_explicitly_absent(self):
         self.login()
         with self.ctx.db.transaction() as conn:
@@ -178,6 +197,18 @@ class EvidenceHTTPTests(ServerHarness):
 
 
 class SourceEvidenceTests(CaptureHarness):
+    def test_both_source_readers_hide_private_windows_and_relative_file_names(self):
+        with patch.dict(os.environ, {"SWARMCONTROL_SHARE_COMMANDS": "1", "SWARMCONTROL_SHARE_COMMAND_OUTPUT": "1"}):
+            for reader in (inspector, shipper):
+                with self.subTest(reader=reader.__name__):
+                    for raw in ("cat config/.env", r"type C:\Demo\.ssh\keys\account.pub"):
+                        self.assertTrue(reader.protected_command(raw))
+                        self.assertIn("[protected file]", reader.evidence_text(raw, 1024)[0])
+                        self.assertNotIn("account.pub", reader.command_info(raw)["command"])
+                    self.assertEqual(reader.evidence_text("type C:\\Demo\\src\\stats.py", 1024)[0], "type .../stats.py")
+                    self.assertEqual(reader.evidence_text("cat src/stats.py", 1024)[0], "cat src/stats.py")
+                    self.assertFalse(reader.protected_command("pytest -q --password DEMO_VALUE"))
+
     def test_claude_result_arriving_on_a_later_scan_completes_only_its_call(self):
         root = str(self.roots["claude-team"])
         label = stamp()

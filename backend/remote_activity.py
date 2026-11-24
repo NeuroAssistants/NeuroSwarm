@@ -21,6 +21,7 @@ from collections import Counter
 from typing import Any
 
 import step_journal
+from activity_inspector import mask_evidence_paths
 from event_evidence import SOURCE_POSITION as SRC_RE
 from validation import ValidationError, validate_host_id
 
@@ -91,8 +92,6 @@ CLI_SECRET_RE = re.compile(
     r"(?i)((?:^|\s)(?:-u|-p|--user|--password|--passwd|--pass|--token|--secret|--api[-_]?key|--auth|--header|-H)\s+)"
     r"(?:\"[^\"]*\"|'[^']*'|\S+)"
 )
-UNIX_ABS_PREFIX_RE = re.compile(r"(?<![\w.])/(?:var|home|opt|tmp|etc|usr|root|srv|mnt|Users)/\S+")
-WIN_ABS_PREFIX_RE = re.compile(r"(?<![\w.])[A-Za-z]:\\\S+")
 
 
 def is_sensitive_path(path_str: str) -> bool:
@@ -120,11 +119,6 @@ def _redact_str(value: Any, max_len: int = 240, default: str = "") -> str:
     return text
 
 
-def _shorten_abs_path(raw: str) -> str:
-    parts = [p for p in re.split(r"[\\/]+", raw.strip()) if p]
-    return ".../" + "/".join(parts[-2:]) if len(parts) >= 2 else raw
-
-
 def _redact_command(value: Any) -> str:
     if value is None:
         return ""
@@ -133,15 +127,9 @@ def _redact_command(value: Any) -> str:
     text = "".join(ch for ch in str(value) if ch == "\t" or ord(ch) >= 32).strip()
     if not text:
         return ""
-    text = UNIX_ABS_PREFIX_RE.sub(lambda m: _shorten_abs_path(m.group(0)), text)
-    text = WIN_ABS_PREFIX_RE.sub(lambda m: _shorten_abs_path(m.group(0)), text)
     text = CLI_SECRET_RE.sub(r"\1[redacted]", text)
     text = _redact_str(text, 4000)
-    text = re.sub(
-        r"(?<![\w-])[^\s'\"=-][^\s'\"=]*",
-        lambda m: "[protected file]" if ("/" in m.group(0) or "\\" in m.group(0) or "." in m.group(0)) and is_sensitive_path(m.group(0)) else m.group(0),
-        text,
-    )
+    text = mask_evidence_paths(text)
     return text if len(text) <= 160 else text[:159].rstrip() + "…"
 
 
