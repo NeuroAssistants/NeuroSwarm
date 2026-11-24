@@ -764,6 +764,10 @@ function renderTokens(tokens) {
     btn.addEventListener("click", async () => {
       try {
         await api(`/api/v1/tokens/${encodeURIComponent(btn.dataset.revoke)}`, { method: "DELETE" });
+        sessionState.lastCreatedToken = null;
+        document.getElementById("install-output")?.classList.add("hidden");
+        const cmdEl = document.getElementById("install-cmd");
+        if (cmdEl) cmdEl.textContent = "";
         showToast("Token revoked.");
         loadAll();
       } catch (err) {
@@ -1654,6 +1658,42 @@ document.getElementById("mfa-disable-form")?.addEventListener("submit", async (e
   targets.forEach((t) => io.observe(t));
 })();
 
+function expandSectionFold(target) {
+  if (!target) return;
+  const fold = target.matches?.("details.section-fold")
+    ? target
+    : target.querySelector?.("details.section-fold") || target.closest?.("details.section-fold");
+  if (fold) fold.open = true;
+}
+
+(function initSectionFolds() {
+  const syncCue = (fold) => {
+    const cue = fold.querySelector(".section-fold-cue");
+    if (cue) cue.textContent = fold.open ? "Hide" : "Expand";
+  };
+  document.querySelectorAll("details.section-fold").forEach((fold) => {
+    syncCue(fold);
+    fold.addEventListener("toggle", () => syncCue(fold));
+  });
+  document.addEventListener("click", (e) => {
+    const link = e.target.closest('a[href^="#"]');
+    if (!link) return;
+    const hash = link.getAttribute("href");
+    if (!hash || hash === "#") return;
+    const target = document.getElementById(hash.slice(1));
+    if (target) expandSectionFold(target);
+  });
+  const openHashTarget = () => {
+    const h = window.location.hash;
+    if (h && h.length > 1 && !h.startsWith("#invite=")) {
+      const target = document.getElementById(h.slice(1));
+      if (target) expandSectionFold(target);
+    }
+  };
+  window.addEventListener("hashchange", openHashTarget);
+  openHashTarget();
+})();
+
 (function initCommandPalette() {
   const overlay = document.getElementById("cmdk-overlay");
   const input = document.getElementById("cmdk-input");
@@ -1666,6 +1706,7 @@ document.getElementById("mfa-disable-form")?.addEventListener("submit", async (e
   const jumpTo = (hash) => {
     const target = document.querySelector(hash);
     if (target) {
+      expandSectionFold(target);
       target.scrollIntoView({ behavior: "smooth", block: "start" });
       if (history.replaceState) history.replaceState(null, "", hash);
     }

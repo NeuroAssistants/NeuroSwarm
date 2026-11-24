@@ -1,4 +1,5 @@
-# ![NeuroSwarm](docs/wordmark.svg)
+<p align="center"><img src="docs/brand-mark.svg" alt="" width="72" height="72"></p>
+<h1 align="center">NeuroSwarm</h1>
 
 **NeuroSwarm shows what your coding agents are doing across your machines.** See which agent ran a command, which file it changed and when the machine reported a problem. Host it yourself and choose which project folders to share.
 

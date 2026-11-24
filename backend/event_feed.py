@@ -15,6 +15,9 @@ import re
 import time
 from typing import Any
 
+from event_evidence import work_summary
+from step_journal import command_form
+
 FEED_VERSION = "1"
 GRACE = 2.0
 DEFAULT_LIMIT = 500
@@ -42,11 +45,24 @@ def _sev(value: Any) -> str:
 
 
 def _event(r: dict[str, Any]) -> dict[str, Any]:
+    raw = r.get("metadata_json")
+    if r["event_type"] == "observed_step":
+        try:
+            metadata = json.loads(raw or "{}")
+        except (ValueError, TypeError):
+            metadata = {}
+        details = work_summary(metadata)
+        if isinstance(metadata, dict):
+            command = command_form(details.get("program"), metadata.get("command"))
+            if command:
+                details["command"] = command
+    else:
+        details = _json(raw)
     return {"key": f"event:{r['id']}", "kind": "event", "id": r["id"], "ts": r["created_at"],
             "created_at": r["created_at"], "updated_at": r["created_at"], "severity": _sev(r["severity"]),
             "state": "RECORDED", "host_id": r["host_id"], "harness": r["harness"], "agent": r["agent_name"],
             "source": r["event_type"], "title": r["message"], "summary": "", "acked_by": None, "acked_at": None,
-            "details": _json(r.get("metadata_json"))}
+            "details": details}
 
 
 def _alert(r: dict[str, Any]) -> dict[str, Any]:
@@ -100,8 +116,10 @@ def feed(db: Any, cursor: str | None = None, limit: int | str | None = None) -> 
         # First read: the newest window of each kind, plus a cursor at the current end of both.
         events = db.query_all("SELECT * FROM events ORDER BY id DESC LIMIT ?", (INITIAL_WINDOW,))
         alerts = db.query_all("SELECT * FROM incident_cases ORDER BY updated_at DESC, id DESC LIMIT ?", (INITIAL_WINDOW,))
-        top = db.query_all("SELECT COALESCE(MAX(id), 0) AS e FROM events")[0]["e"]
-        a_top = float(db.query_all("SELECT COALESCE(MAX(updated_at), 0) AS a FROM incident_cases")[0]["a"])
+        # Advance only over rows returned here. A concurrent insert after the
+        # window query must still be delivered on the next poll.
+        top = events[0]["id"] if events else 0
+        a_top = float(alerts[0]["updated_at"]) if alerts else 0.0
         records = [_event(r) for r in events] + [_alert(r) for r in alerts]
         records.sort(key=lambda x: (x["ts"], x["key"]))
         return {"version": FEED_VERSION, "reset": True, "cursor": make_cursor(top, a_top, 0, "c"), "more": False,

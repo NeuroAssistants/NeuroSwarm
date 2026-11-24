@@ -53,6 +53,23 @@ class EventFeedTests(unittest.TestCase):
         self.assertEqual(ef.feed(self.db, page["cursor"])["records"][0]["kind"], "alert",
                          "only the alert re-sent inside the grace window; no event repeats")
 
+    def test_first_window_does_not_skip_a_concurrent_insert(self):
+        from unittest.mock import patch
+
+        add_event(self.db, 1)
+        query = self.db.query_all
+
+        def interleaved(sql, *params):
+            rows = query(sql, *params)
+            if sql.startswith("SELECT * FROM events ORDER BY id DESC"):
+                add_event(self.db, 2)
+            return rows
+
+        with patch.object(self.db, "query_all", side_effect=interleaved):
+            initial = ef.feed(self.db)
+        delta = ef.feed(self.db, initial["cursor"])
+        self.assertEqual([record["title"] for record in delta["records"]], ["event 2"])
+
     def test_burst_larger_than_any_page_is_delivered_completely(self):
         cursor = ef.feed(self.db)["cursor"]
         now = time.time()

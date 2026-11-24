@@ -21,6 +21,8 @@ from collections import Counter
 from typing import Any
 
 import step_journal
+from activity_inspector import mask_evidence_paths
+from event_evidence import SOURCE_POSITION as SRC_RE
 from validation import ValidationError, validate_host_id
 
 MAX_ACTIVITY_SESSIONS = 200
@@ -34,7 +36,6 @@ MAX_ACTIVITY_PLAN_ITEMS = 20
 MAX_ACTIVITY_FILES = 25
 STEP_RETENTION_SEC = step_journal.RETENTION
 
-SRC_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}:[0-9]{1,12}:[0-9]{1,6}$")
 SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
 
 CATEGORY_LABEL = {
@@ -91,8 +92,6 @@ CLI_SECRET_RE = re.compile(
     r"(?i)((?:^|\s)(?:-u|-p|--user|--password|--passwd|--pass|--token|--secret|--api[-_]?key|--auth|--header|-H)\s+)"
     r"(?:\"[^\"]*\"|'[^']*'|\S+)"
 )
-UNIX_ABS_PREFIX_RE = re.compile(r"(?<![\w.])/(?:var|home|opt|tmp|etc|usr|root|srv|mnt|Users)/\S+")
-WIN_ABS_PREFIX_RE = re.compile(r"(?<![\w.])[A-Za-z]:\\\S+")
 
 
 def is_sensitive_path(path_str: str) -> bool:
@@ -120,11 +119,6 @@ def _redact_str(value: Any, max_len: int = 240, default: str = "") -> str:
     return text
 
 
-def _shorten_abs_path(raw: str) -> str:
-    parts = [p for p in re.split(r"[\\/]+", raw.strip()) if p]
-    return ".../" + "/".join(parts[-2:]) if len(parts) >= 2 else raw
-
-
 def _redact_command(value: Any) -> str:
     if value is None:
         return ""
@@ -133,15 +127,9 @@ def _redact_command(value: Any) -> str:
     text = "".join(ch for ch in str(value) if ch == "\t" or ord(ch) >= 32).strip()
     if not text:
         return ""
-    text = UNIX_ABS_PREFIX_RE.sub(lambda m: _shorten_abs_path(m.group(0)), text)
-    text = WIN_ABS_PREFIX_RE.sub(lambda m: _shorten_abs_path(m.group(0)), text)
     text = CLI_SECRET_RE.sub(r"\1[redacted]", text)
     text = _redact_str(text, 4000)
-    text = re.sub(
-        r"(?<![\w-])[^\s'\"=-][^\s'\"=]*",
-        lambda m: "[protected file]" if ("/" in m.group(0) or "\\" in m.group(0) or "." in m.group(0)) and is_sensitive_path(m.group(0)) else m.group(0),
-        text,
-    )
+    text = mask_evidence_paths(text)
     return text if len(text) <= 160 else text[:159].rstrip() + "…"
 
 
@@ -185,7 +173,7 @@ def _clean_path_list(items: Any, limit: int = MAX_ACTIVITY_FILES) -> list[str]:
     return out
 
 
-def _clean_step(raw: Any) -> dict[str, Any]:
+def _clean_step(raw: Any, *, capture=False) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
     step: dict[str, Any] = {
@@ -197,6 +185,12 @@ def _clean_step(raw: Any) -> dict[str, Any]:
         step["time"] = _redact_str(raw.get("time"), 40)
     if raw.get("status"):
         step["status"] = _redact_str(raw.get("status"), 24)
+    if capture and isinstance(raw.get("cwd"), str):
+        step["cwd"] = _redact_str(raw["cwd"], 320)
+    if capture:
+        for field in ("command_input", "command_output", "exit_code", "output_truncated", "image_previews", "text_previews"):
+            if field in raw:
+                step[field] = raw[field]
     files = _clean_path_list(raw.get("files"), 12)
     if files:
         step["files"] = files
@@ -264,7 +258,7 @@ def _clean_session(raw: Any, host_id: str) -> dict[str, Any]:
     cap_raw = raw.get("capture_steps")
     capture_steps = None
     if isinstance(cap_raw, list):
-        capture_steps = [s for s in (_clean_step(x) for x in cap_raw[:MAX_CAPTURE_STEPS_PER_SESSION]) if s]
+        capture_steps = [s for s in (_clean_step(x, capture=True) for x in cap_raw[:MAX_CAPTURE_STEPS_PER_SESSION]) if s]
 
     plan_raw = raw.get("plan") if isinstance(raw.get("plan"), list) else (raw.get("plan_items") or [])
     plan = [p for p in (_clean_plan_item(x) for x in plan_raw[:MAX_ACTIVITY_PLAN_ITEMS]) if p and p.get("text")]

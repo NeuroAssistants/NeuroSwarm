@@ -48,3 +48,16 @@ if path == "/api/v1/event-feed":
 - An acknowledgement after the cursor arrives as an update of the same key with `acked_by`.
 - A write committed with the same timestamp as the cursor is still delivered (alerts of the last 2 s are re-sent).
 - Bad or tampered cursors and limits are rejected; organizations are separate databases.
+
+## Open one event
+
+Each event keeps its numeric ID when it moves from the live stream into history. Its row contains the workspace and up to twelve file paths relative to the folders the operator shared. A relative source path requires a recorded working directory inside those folders.
+
+A signed-in member or a read token can request `GET /api/v1/events/{id}/evidence?organization_id={org}`. The response includes `event_id`, `organization`, `files`, `session`, `workspace`, `program`, `command_input`, `command_output`, `exit_code`, `output_truncated`, `images`, and `text_previews`. Each text preview contains the recorded relative path, redacted plain text, its source and a truncation flag. Missing text or an unknown exit code is JSON `null`. An empty string means the collector recorded empty output. Clients should render command text as plain text and fetch evidence only after an operator opens the event.
+
+Each image entry includes its relative `path`, `source`, `captured_at` (Unix seconds), `mime_type`, `size_bytes`, SHA-256 digest and a same-origin `url`. A `tool_result` contains the bytes recorded by the tool. A `workspace_snapshot` contains the bytes the collector found in a shared file after the read. The collector skips snapshots with a later modification or change time and refuses symlinks. The image URL retrieves stored bytes under the same event and organization. No request takes a filesystem path. Both responses use `Cache-Control: no-store`. A missing event or image returns 404. An explicit organization that differs from the active one returns 409.
+
+The event and its evidence are written in the same transaction. If a later scan supplies a tool result, it may fill missing output on the same recorded call. Replaying a capture does not replace stored output or an existing image. Pruning the event also removes its command and images. Existing events keep their file lists and may have no detailed capture.
+
+
+The activity map includes `event_id` and `event_org` on a step when its source record matches a journal entry. Both the map and the journal use the host, full session, log position and the action’s order within the record. Use these two fields to open the same detail endpoint. Steps from older collectors or before this release may have no link. In that case show the session history without choosing a nearby event. Two identical commands can run in the same second and return different results.

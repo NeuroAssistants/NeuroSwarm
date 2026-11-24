@@ -28,6 +28,8 @@ $HostId = if ($env:SWARMCONTROL_HOST_ID) { $env:SWARMCONTROL_HOST_ID } elseif ($
 $ActivityRoots = if ($env:SWARMCONTROL_ACTIVITY_ROOTS) { $env:SWARMCONTROL_ACTIVITY_ROOTS } elseif ($Saved.ContainsKey('SWARMCONTROL_ACTIVITY_ROOTS')) { $Saved['SWARMCONTROL_ACTIVITY_ROOTS'] } else { "" }
 $AgentLabels = if ($env:SWARMCONTROL_AGENT_LABELS) { $env:SWARMCONTROL_AGENT_LABELS } elseif ($Saved.ContainsKey('SWARMCONTROL_AGENT_LABELS')) { $Saved['SWARMCONTROL_AGENT_LABELS'] } else { "" }
 $ShareCommands = if ($env:SWARMCONTROL_SHARE_COMMANDS) { $env:SWARMCONTROL_SHARE_COMMANDS } elseif ($Saved.ContainsKey('SWARMCONTROL_SHARE_COMMANDS') -and $Saved['SWARMCONTROL_SHARE_COMMANDS']) { $Saved['SWARMCONTROL_SHARE_COMMANDS'] } else { "0" }
+$ShareCommandOutput = if ($env:SWARMCONTROL_SHARE_COMMAND_OUTPUT) { $env:SWARMCONTROL_SHARE_COMMAND_OUTPUT } elseif ($Saved.ContainsKey('SWARMCONTROL_SHARE_COMMAND_OUTPUT') -and $Saved['SWARMCONTROL_SHARE_COMMAND_OUTPUT']) { $Saved['SWARMCONTROL_SHARE_COMMAND_OUTPUT'] } else { "0" }
+$ShareFilePreviews = if ($env:SWARMCONTROL_SHARE_FILE_PREVIEWS) { $env:SWARMCONTROL_SHARE_FILE_PREVIEWS } elseif ($Saved.ContainsKey('SWARMCONTROL_SHARE_FILE_PREVIEWS') -and $Saved['SWARMCONTROL_SHARE_FILE_PREVIEWS']) { $Saved['SWARMCONTROL_SHARE_FILE_PREVIEWS'] } else { "0" }
 $StateDir = if ($env:SWARMCONTROL_STATE_DIR) { $env:SWARMCONTROL_STATE_DIR } elseif ($Saved.ContainsKey('SWARMCONTROL_STATE_DIR')) { $Saved['SWARMCONTROL_STATE_DIR'] } else { "" }
 
 if (-not $Token) {
@@ -40,6 +42,14 @@ if ($Token -notmatch '^[A-Za-z0-9_-]{8,128}$') {
 }
 if ($ShareCommands -ne "0" -and $ShareCommands -ne "1") {
     Write-Error -ErrorAction Continue "ERROR: SWARMCONTROL_SHARE_COMMANDS must be 0 or 1."
+    exit 2
+}
+if ($ShareCommandOutput -ne "0" -and $ShareCommandOutput -ne "1") {
+    Write-Error -ErrorAction Continue "ERROR: SWARMCONTROL_SHARE_COMMAND_OUTPUT must be 0 or 1."
+    exit 2
+}
+if ($ShareFilePreviews -ne "0" -and $ShareFilePreviews -ne "1") {
+    Write-Error -ErrorAction Continue "ERROR: SWARMCONTROL_SHARE_FILE_PREVIEWS must be 0 or 1."
     exit 2
 }
 if ($AgentLabels -and $AgentLabels -notmatch '^[A-Za-z0-9._:@,/=+ -]{1,512}$') {
@@ -143,7 +153,7 @@ foreach ($f in @("detector.py", "activity_shipper.py", "activity_core.py", "swar
 }
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $StageDir
 
-$HasOverrides = [bool]($env:SWARMCONTROL_SERVER -or $env:SWARMCONTROL_TOKEN -or $env:SWARMCONTROL_INTERVAL -or $env:SWARMCONTROL_HOST_ID -or $env:SWARMCONTROL_ACTIVITY_ROOTS -or $env:SWARMCONTROL_AGENT_LABELS -or $env:SWARMCONTROL_SHARE_COMMANDS -or $env:SWARMCONTROL_STATE_DIR)
+$HasOverrides = [bool]($env:SWARMCONTROL_SERVER -or $env:SWARMCONTROL_TOKEN -or $env:SWARMCONTROL_INTERVAL -or $env:SWARMCONTROL_HOST_ID -or $env:SWARMCONTROL_ACTIVITY_ROOTS -or $env:SWARMCONTROL_AGENT_LABELS -or $env:SWARMCONTROL_SHARE_COMMANDS -or $env:SWARMCONTROL_SHARE_COMMAND_OUTPUT -or $env:SWARMCONTROL_SHARE_FILE_PREVIEWS -or $env:SWARMCONTROL_STATE_DIR)
 if ($Upgrade -ne "1" -or $HasOverrides -or -not (Test-Path $EnvPath)) {
     $EnvLines = @(
         "SWARMCONTROL_SERVER=$ServerUrl",
@@ -152,7 +162,9 @@ if ($Upgrade -ne "1" -or $HasOverrides -or -not (Test-Path $EnvPath)) {
         "SWARMCONTROL_HOST_ID=$HostId",
         "SWARMCONTROL_ACTIVITY_ROOTS=$ActivityRoots",
         "SWARMCONTROL_AGENT_LABELS=$AgentLabels",
-        "SWARMCONTROL_SHARE_COMMANDS=$ShareCommands"
+        "SWARMCONTROL_SHARE_COMMANDS=$ShareCommands",
+        "SWARMCONTROL_SHARE_COMMAND_OUTPUT=$ShareCommandOutput",
+        "SWARMCONTROL_SHARE_FILE_PREVIEWS=$ShareFilePreviews"
     )
     if ($StateDir) { $EnvLines += "SWARMCONTROL_STATE_DIR=$StateDir" }
     Set-Content -Path $EnvPath -Value ($EnvLines -join "`r`n") -Encoding UTF8
@@ -162,6 +174,8 @@ Write-Host "[NeuroSwarm] Running initial passive detection & heartbeat test..."
 $env:SWARMCONTROL_TOKEN = $Token
 $env:SWARMCONTROL_AGENT_LABELS = $AgentLabels
 $env:SWARMCONTROL_SHARE_COMMANDS = $ShareCommands
+$env:SWARMCONTROL_SHARE_COMMAND_OUTPUT = $ShareCommandOutput
+$env:SWARMCONTROL_SHARE_FILE_PREVIEWS = $ShareFilePreviews
 if ($StateDir) { $env:SWARMCONTROL_STATE_DIR = $StateDir }
 $DiagArgs = @((Join-Path $InstallDir "swarmcontrol_agent.py"), "--diagnose")
 $AgentArgs = @((Join-Path $InstallDir "swarmcontrol_agent.py"), "--server", $ServerUrl, "--once")
@@ -219,6 +233,8 @@ $RunnerBody = @"
 `$env:SWARMCONTROL_ACTIVITY_ROOTS = '$ActivityRoots'
 `$env:SWARMCONTROL_AGENT_LABELS = '$AgentLabels'
 `$env:SWARMCONTROL_SHARE_COMMANDS = '$ShareCommands'
+`$env:SWARMCONTROL_SHARE_COMMAND_OUTPUT = '$ShareCommandOutput'
+`$env:SWARMCONTROL_SHARE_FILE_PREVIEWS = '$ShareFilePreviews'
 $(if ($StateDir) { "`$env:SWARMCONTROL_STATE_DIR = '$StateDir'" } else { "" })
 & '$PyExe' '$(Join-Path $InstallDir "swarmcontrol_agent.py")'
 "@

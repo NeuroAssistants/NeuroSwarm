@@ -22,9 +22,21 @@
   const syncEl = el("sync");
   const toastEl = el("toast");
   const caseDialog = el("incident-dialog");
+  const eventDialog = el("event-dialog");
   let caseView = null;
 
   const MAX_RECORDS = 5000;
+  const DEFAULT_RENDER_LIMIT = 120;
+  const RICH_POLL_MS = 30000;
+  const OVERVIEW_POLL_MS = 60000;
+  const ALLOWED_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+  const TIME_FMT = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
   const SEV_RANK = { CRITICAL: 5, ERROR: 4, WARNING: 3, INFO: 2, NORMAL: 1 };
   const CAT_LABELS = {
     file_edit: "Edit files",
@@ -51,6 +63,8 @@
     workMap: new Map(),       // work:* (from /activity steps & plans)
     collabMap: new Map(),     // collab:* (from /work-board collaboration)
     auditMap: new Map(),      // audit:* (admin only from /overview)
+    mergedCache: [],
+    mergedDirty: true,
     feedCursor: null,
     historyCursor: null,
     useEventFeed: true,
@@ -87,6 +101,18 @@
     intervalMs: 2500,
     timer: null,
     pollSeq: 0,
+    lastRichAt: 0,
+    lastOverviewAt: 0,
+    lastExplorerSig: "",
+    lastExplorerAt: 0,
+    lastSyncedUrl: "",
+    renderLimit: DEFAULT_RENDER_LIMIT,
+    renderedFilteredTotal: 0,
+    evidenceCache: new Map(),
+    eventModalKey: "",
+    eventModalOrg: "",
+    eventModalOpener: null,
+    zoomOverlay: null,
     generation: 0,
     busy: false,
     searchDebounce: null,
@@ -154,9 +180,7 @@
     const n = Number(ts);
     if (!Number.isFinite(n) || n <= 0) return "—";
     const d = new Date(n * 1000);
-    return Number.isNaN(d.getTime())
-      ? "—"
-      : d.toLocaleString([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return Number.isNaN(d.getTime()) ? "—" : TIME_FMT.format(d);
   }
 
   function fmtAge(ts) {
@@ -207,7 +231,10 @@
 
   function syncLiveUrl() {
     if (!window.history?.replaceState) return;
-    window.history.replaceState(null, "", currentLiveUrl());
+    const nextUrl = currentLiveUrl();
+    if (nextUrl === state.lastSyncedUrl) return;
+    state.lastSyncedUrl = nextUrl;
+    window.history.replaceState(null, "", nextUrl);
   }
 
   function applyUrlParams() {
@@ -405,6 +432,8 @@
         next.set(k, {
           key: k,
           rawId: k,
+          evidenceEventId: st.event_id || null,
+          evidenceEventOrg: st.event_org ?? null,
           kind: "Agent Work",
           severity: sev,
           status: stStatus,
@@ -459,6 +488,8 @@
         next.set(k, {
           key: k,
           rawId: k,
+          evidenceEventId: p.event_id || null,
+          evidenceEventOrg: p.event_org ?? null,
           kind: "Agent Work",
           severity: pStatus === "RESOLVED" ? "NORMAL" : "INFO",
           status: pStatus,
@@ -575,24 +606,77 @@
     return next;
   }
 
+  function markPoolDirty() {
+    state.mergedDirty = true;
+  }
+
+  function getSearchHay(r) {
+    if (r._hay === undefined) {
+      r._hay = `${r.message} ${r.summary} ${r.host_id} ${r.agent} ${r.harness} ${r.workspace} ${r.where} ${(r.files || []).join(" ")} ${r.source} ${r.severity} ${r.status} ${r.program || ""} ${r.command || ""}`.toLowerCase();
+    }
+    return r._hay;
+  }
+
+  function getShortFiles(r) {
+    if (r._shortFiles === undefined) {
+      r._shortFiles = (r.files || []).map((f) => shortPath(f).toLowerCase()).filter(Boolean);
+    }
+    return r._shortFiles;
+  }
+
+  function getRecordByKey(key) {
+    if (!key) return null;
+    if (state.paused && Array.isArray(state.displaySnapshot)) {
+      return state.displaySnapshot.find((r) => r.key === key) || null;
+    }
+    return (
+      state.feedMap.get(key) ||
+      state.historyMap.get(key) ||
+      state.workMap.get(key) ||
+      state.collabMap.get(key) ||
+      state.auditMap.get(key) ||
+      null
+    );
+  }
+
+  function getEvidenceEventId(item) {
+    if (!item) return "";
+    if (typeof item.key === "string" && item.key.startsWith("event:") && /^[1-9]\d{0,18}$/.test(String(item.rawId))) {
+      return String(item.rawId);
+    }
+    if (item.evidenceEventId && /^[1-9]\d{0,18}$/.test(String(item.evidenceEventId))) {
+      if (item.evidenceEventOrg === null || item.evidenceEventOrg === undefined || sameActiveOrg(item.evidenceEventOrg)) {
+        return String(item.evidenceEventId);
+      }
+    }
+    return "";
+  }
+
+  function isNumericEventId(item) {
+    return Boolean(getEvidenceEventId(item));
+  }
+
   function allMergedRecords() {
     if (state.paused && Array.isArray(state.displaySnapshot)) return state.displaySnapshot;
+    if (!state.mergedDirty && Array.isArray(state.mergedCache)) return state.mergedCache;
     const byKey = new Map();
     for (const r of state.historyMap.values()) byKey.set(r.key, r);
     for (const r of state.feedMap.values()) byKey.set(r.key, r);
 
     // Deduplicate live activity tail steps already persisted as observed_step journal events
-    const journalSigs = new Set();
-    for (const r of byKey.values()) {
-      if (r.kind === "Agent Work" && r.sessionId) {
-        const f0 = shortPath((r.files && r.files[0]) || "");
-        journalSigs.add(`${r.sessionId}|${r.category}|${Math.round(r.ts / 2)}|${f0}`);
+    if (state.workMap.size > 0) {
+      const journalSigs = new Set();
+      for (const r of byKey.values()) {
+        if (r.kind === "Agent Work" && r.sessionId) {
+          const f0 = shortPath((r.files && r.files[0]) || "");
+          journalSigs.add(`${r.sessionId}|${r.category}|${Math.round(r.ts / 2)}|${f0}`);
+        }
       }
-    }
-    for (const r of state.workMap.values()) {
-      const f0 = shortPath((r.files && r.files[0]) || "");
-      const sig = `${r.sessionId}|${r.category}|${Math.round(r.ts / 2)}|${f0}`;
-      if (!journalSigs.has(sig)) byKey.set(r.key, r);
+      for (const r of state.workMap.values()) {
+        const f0 = shortPath((r.files && r.files[0]) || "");
+        const sig = `${r.sessionId}|${r.category}|${Math.round(r.ts / 2)}|${f0}`;
+        if (!journalSigs.has(sig)) byKey.set(r.key, r);
+      }
     }
     for (const r of state.collabMap.values()) byKey.set(r.key, r);
     for (const r of state.auditMap.values()) byKey.set(r.key, r);
@@ -602,15 +686,19 @@
       merged.sort((a, b) => b.ts - a.ts);
       merged.length = MAX_RECORDS;
     }
+    state.mergedCache = merged;
+    state.mergedDirty = false;
     return merged;
   }
 
   /* ---------- Multi-Signal Correlation Engine ---------- */
   function findCorrelations(item, pool) {
     if (!item) return [];
-    const itemFiles = new Set((item.files || []).map((f) => shortPath(f).toLowerCase()).filter(Boolean));
+    const sf = getShortFiles(item);
+    const itemFiles = sf.length ? new Set(sf) : null;
     const hits = [];
-    for (const other of pool) {
+    for (let i = 0; i < pool.length; i++) {
+      const other = pool[i];
       if (other.key === item.key) continue;
       const reasons = [];
       let score = 0;
@@ -623,14 +711,19 @@
         reasons.push("Same change");
         score += 5;
       }
-      if (itemFiles.size && other.files && other.files.length) {
-        const shared = other.files.find((f) => itemFiles.has(shortPath(f).toLowerCase()));
-        if (shared) {
-          reasons.push(`Same file: ${shortPath(shared)}`);
-          score += 6;
+      let matchedFile = false;
+      if (itemFiles && other.files && other.files.length) {
+        const osf = getShortFiles(other);
+        for (let j = 0; j < osf.length; j++) {
+          if (itemFiles.has(osf[j])) {
+            reasons.push(`Same file: ${shortPath(other.files[j])}`);
+            score += 6;
+            matchedFile = true;
+            break;
+          }
         }
       }
-      if (item.workspace && other.workspace && item.workspace === other.workspace && !reasons.some((r) => r.startsWith("Same file"))) {
+      if (item.workspace && other.workspace && item.workspace === other.workspace && !matchedFile) {
         reasons.push("Same workspace");
         score += 3;
       }
@@ -652,56 +745,73 @@
   }
 
   /* ---------- Filtering & Sorting ---------- */
+  function buildFilterContext() {
+    return {
+      q: state.search.trim().toLowerCase(),
+      nowSec: Date.now() / 1000,
+      winSec: state.windowSec === "all" ? 0 : Number(state.windowSec) || 0,
+      wantFile: state.scopeFile ? state.scopeFile.toLowerCase() : "",
+      linkedForTask: state.scopeTask ? state.linksByTask[state.scopeTask] : null,
+    };
+  }
+
+  function recordMatchesFilter(r, ctx) {
+    if (ctx.winSec > 0 && r.ts > 0 && ctx.nowSec - r.ts > ctx.winSec) return false;
+    const persp = state.perspective;
+    if (persp === "open_alerts" && !(r.kind === "Alert" && r.status === "OPEN")) return false;
+    if (persp === "crit_warn" && r.severity !== "CRITICAL" && r.severity !== "ERROR" && r.severity !== "WARNING") return false;
+    if (persp === "agent_work" && r.kind !== "Agent Work") return false;
+    if (persp === "file_edits" && r.category !== "file_edit") return false;
+    if (persp === "files_touched" && !((r.files && r.files.length > 0) || r.category === "file_edit" || r.category === "file_read" || r.category === "visual")) return false;
+    if (persp === "shell_cmds" && r.category !== "shell") return false;
+    if (persp === "collab" && r.kind !== "Collaboration") return false;
+    if (persp === "events" && r.kind !== "Event") return false;
+    if (persp === "audit" && r.kind !== "Audit") return false;
+
+    if (state.scopeHost && r.host_id !== state.scopeHost) return false;
+    if (state.scopeAgent && r.agent !== state.scopeAgent) return false;
+    if (state.scopeWorkspace && r.workspace !== state.scopeWorkspace) return false;
+    if (state.scopeTask) {
+      const linkedForTask = ctx.linkedForTask;
+      const explicitMatch = r.taskId === state.scopeTask || (r.kind === "Collaboration" && r.rawId === state.scopeTask);
+      const turnMatch =
+        linkedForTask &&
+        linkedForTask.status === "linked" &&
+        linkedForTask.basis === "explicit_turn_session" &&
+        linkedForTask.session_id &&
+        r.sessionId === linkedForTask.session_id &&
+        (!r.taskId || r.taskId === state.scopeTask);
+      if (!explicitMatch && !turnMatch) return false;
+    }
+    if (state.scopeSession && r.sessionId !== state.scopeSession) return false;
+    if (ctx.wantFile) {
+      const files = r.files || [];
+      let matchesFile = false;
+      for (let i = 0; i < files.length; i++) {
+        const f = String(files[i]).toLowerCase();
+        if (f === ctx.wantFile || f.endsWith("/" + ctx.wantFile) || ctx.wantFile.endsWith("/" + f)) {
+          matchesFile = true;
+          break;
+        }
+      }
+      if (!matchesFile) return false;
+    }
+
+    if (state.filterSev && r.severity !== state.filterSev) return false;
+    if (state.filterKind && r.kind !== state.filterKind) return false;
+    if (state.filterCat && r.category !== state.filterCat) return false;
+    if (state.filterStatus && r.status !== state.filterStatus) return false;
+
+    if (ctx.q && !getSearchHay(r).includes(ctx.q)) return false;
+    return true;
+  }
+
   function getFiltered(pool) {
-    const q = state.search.trim().toLowerCase();
-    const nowSec = Date.now() / 1000;
-    const winSec = state.windowSec === "all" ? 0 : Number(state.windowSec) || 0;
-
-    const list = pool.filter((r) => {
-      if (winSec > 0 && r.ts > 0 && nowSec - r.ts > winSec) return false;
-      if (state.perspective === "open_alerts" && !(r.kind === "Alert" && r.status === "OPEN")) return false;
-      if (state.perspective === "crit_warn" && !["CRITICAL", "ERROR", "WARNING"].includes(r.severity)) return false;
-      if (state.perspective === "agent_work" && r.kind !== "Agent Work") return false;
-      if (state.perspective === "file_edits" && r.category !== "file_edit") return false;
-      if (state.perspective === "shell_cmds" && r.category !== "shell") return false;
-      if (state.perspective === "collab" && r.kind !== "Collaboration") return false;
-      if (state.perspective === "events" && r.kind !== "Event") return false;
-      if (state.perspective === "audit" && r.kind !== "Audit") return false;
-
-      if (state.scopeHost && r.host_id !== state.scopeHost) return false;
-      if (state.scopeAgent && r.agent !== state.scopeAgent) return false;
-      if (state.scopeWorkspace && r.workspace !== state.scopeWorkspace) return false;
-      if (state.scopeTask) {
-        const linkedForTask = state.linksByTask[state.scopeTask];
-        const explicitMatch = r.taskId === state.scopeTask || (r.kind === "Collaboration" && r.rawId === state.scopeTask);
-        const turnMatch =
-          linkedForTask &&
-          linkedForTask.status === "linked" &&
-          linkedForTask.basis === "explicit_turn_session" &&
-          linkedForTask.session_id &&
-          r.sessionId === linkedForTask.session_id &&
-          (!r.taskId || r.taskId === state.scopeTask);
-        if (!explicitMatch && !turnMatch) return false;
-      }
-      if (state.scopeSession && r.sessionId !== state.scopeSession) return false;
-      if (state.scopeFile) {
-        const wantFile = state.scopeFile.toLowerCase();
-        const fileList = (r.files || []).map((f) => String(f).toLowerCase());
-        const matchesFile = fileList.some((f) => f === wantFile || f.endsWith("/" + wantFile) || wantFile.endsWith("/" + f));
-        if (!matchesFile) return false;
-      }
-
-      if (state.filterSev && r.severity !== state.filterSev) return false;
-      if (state.filterKind && r.kind !== state.filterKind) return false;
-      if (state.filterCat && r.category !== state.filterCat) return false;
-      if (state.filterStatus && r.status !== state.filterStatus) return false;
-
-      if (q) {
-        const hay = `${r.message} ${r.summary} ${r.host_id} ${r.agent} ${r.harness} ${r.workspace} ${r.where} ${(r.files || []).join(" ")} ${r.source} ${r.severity} ${r.status}`.toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
-    });
+    const ctx = buildFilterContext();
+    const list = [];
+    for (let i = 0; i < pool.length; i++) {
+      if (recordMatchesFilter(pool[i], ctx)) list.push(pool[i]);
+    }
 
     const dir = state.sortDir === "asc" ? 1 : -1;
     list.sort((a, b) => {
@@ -715,38 +825,102 @@
   }
 
   /* ---------- Render View Explorer ---------- */
-  function renderExplorer(pool) {
+  function renderExplorer(pool, force = false) {
+    let agentWorkCnt = 0;
+    let fileEditsCnt = 0;
+    let filesTouchedCnt = 0;
+    let shellCmdsCnt = 0;
+    let openAlertsCnt = 0;
+    let critWarnCnt = 0;
+    let collabCnt = 0;
+    let eventsCnt = 0;
+    let auditCnt = 0;
+
+    const hCounts = new Map();
+    const hCrit = new Set();
+    const hWarn = new Set();
+    const aCounts = new Map();
+    const wCounts = new Map();
+    const fCounts = new Map();
+
+    for (let i = 0; i < pool.length; i++) {
+      const r = pool[i];
+      if (r.kind === "Agent Work") agentWorkCnt++;
+      else if (r.kind === "Collaboration") collabCnt++;
+      else if (r.kind === "Event") eventsCnt++;
+      else if (r.kind === "Audit") auditCnt++;
+      else if (r.kind === "Alert" && r.status === "OPEN") openAlertsCnt++;
+
+      if (r.category === "file_edit") fileEditsCnt++;
+      if (r.category === "shell") shellCmdsCnt++;
+      if ((r.files && r.files.length > 0) || r.category === "file_edit" || r.category === "file_read" || r.category === "visual") {
+        filesTouchedCnt++;
+      }
+      if (r.severity === "CRITICAL" || r.severity === "ERROR" || r.severity === "WARNING") critWarnCnt++;
+
+      if (r.host_id) {
+        hCounts.set(r.host_id, (hCounts.get(r.host_id) || 0) + 1);
+        if (r.status === "OPEN") {
+          if (r.severity === "CRITICAL" || r.severity === "ERROR") hCrit.add(r.host_id);
+          else if (r.severity === "WARNING") hWarn.add(r.host_id);
+        }
+      }
+      if (r.agent && (r.kind === "Agent Work" || r.kind === "Collaboration")) {
+        aCounts.set(r.agent, (aCounts.get(r.agent) || 0) + 1);
+      }
+      if (r.workspace) wCounts.set(r.workspace, (wCounts.get(r.workspace) || 0) + 1);
+      if (r.files && r.files.length) {
+        for (let j = 0; j < r.files.length; j++) {
+          const fp = String(r.files[j] || "").trim();
+          if (fp) fCounts.set(fp, (fCounts.get(fp) || 0) + 1);
+        }
+      }
+    }
+
+    const hosts = [...new Set([...state.hosts.map((h) => h.host_id), ...hCounts.keys()])].filter(Boolean);
+    const agents = [...aCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14);
+    const wsList = [...wCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
+    const fileList = [...fCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+
+    const sig = [
+      pool.length, agentWorkCnt, fileEditsCnt, filesTouchedCnt, shellCmdsCnt, openAlertsCnt, critWarnCnt, collabCnt, eventsCnt, auditCnt,
+      state.perspective, state.scopeHost, state.scopeAgent, state.scopeWorkspace, state.scopeFile,
+      hosts.map((h) => `${h}:${hCounts.get(h) || 0}:${hCrit.has(h) ? 2 : hWarn.has(h) ? 1 : 0}`).join(","),
+      agents.map(([a, c]) => `${a}:${c}`).join(","),
+      wsList.map(([w, c]) => `${w}:${c}`).join(","),
+      fileList.map(([f, c]) => `${f}:${c}`).join(","),
+    ].join("|");
+
+    if (!force && sig === state.lastExplorerSig) return;
+    state.lastExplorerSig = sig;
+    state.lastExplorerAt = Date.now();
+
     const persp = [
       { id: "all", label: "All Live Stream", count: pool.length, dot: "online" },
-      { id: "agent_work", label: "Agent Work (All)", count: pool.filter((r) => r.kind === "Agent Work").length, dot: "work" },
-      { id: "file_edits", label: "File Edits Only", count: pool.filter((r) => r.category === "file_edit").length, dot: "online" },
-      { id: "shell_cmds", label: "Commands & Tests", count: pool.filter((r) => r.category === "shell").length, dot: "work" },
-      { id: "open_alerts", label: "Open Alerts", count: pool.filter((r) => r.kind === "Alert" && r.status === "OPEN").length, dot: "warn" },
-      { id: "crit_warn", label: "Critical & Warning", count: pool.filter((r) => ["CRITICAL", "ERROR", "WARNING"].includes(r.severity)).length, dot: "crit" },
-      { id: "collab", label: "Collaboration", count: pool.filter((r) => r.kind === "Collaboration").length, dot: "online" },
-      { id: "events", label: "System Events", count: pool.filter((r) => r.kind === "Event").length, dot: "online" },
+      { id: "agent_work", label: "Agent Work (All)", count: agentWorkCnt, dot: "work" },
+      { id: "file_edits", label: "File Edits Only", count: fileEditsCnt, dot: "online" },
+      { id: "files_touched", label: "Files & Media", count: filesTouchedCnt, dot: "online" },
+      { id: "shell_cmds", label: "Commands & Tests", count: shellCmdsCnt, dot: "work" },
+      { id: "open_alerts", label: "Open Alerts", count: openAlertsCnt, dot: "warn" },
+      { id: "crit_warn", label: "Critical & Warning", count: critWarnCnt, dot: "crit" },
+      { id: "collab", label: "Collaboration", count: collabCnt, dot: "online" },
+      { id: "events", label: "System Events", count: eventsCnt, dot: "online" },
     ];
-    if (isAdmin()) persp.push({ id: "audit", label: "Audit Trail", count: pool.filter((r) => r.kind === "Audit").length, dot: "" });
+    if (isAdmin()) persp.push({ id: "audit", label: "Audit Trail", count: auditCnt, dot: "" });
 
     el("perspectives").innerHTML = persp
       .map(
-        (p) => `<li><button type="button" class="tree-btn${state.perspective === p.id && !state.scopeHost && !state.scopeAgent && !state.scopeWorkspace ? " active" : ""}" data-persp="${esc(p.id)}">
+        (p) => `<li><button type="button" class="tree-btn${state.perspective === p.id && !state.scopeHost && !state.scopeAgent && !state.scopeWorkspace && !state.scopeFile ? " active" : ""}" data-persp="${esc(p.id)}">
           <span class="tree-name"><i class="dot ${p.dot}" aria-hidden="true"></i>${esc(p.label)}</span>
           <span class="tree-cnt">${p.count}</span>
         </button></li>`
       )
       .join("");
 
-    // Hosts
-    const hCounts = new Map();
-    for (const r of pool) if (r.host_id) hCounts.set(r.host_id, (hCounts.get(r.host_id) || 0) + 1);
-    const hosts = [...new Set([...state.hosts.map((h) => h.host_id), ...hCounts.keys()])].filter(Boolean);
     el("host-tree").innerHTML = hosts.length
       ? hosts
           .map((hid) => {
-            const hasCrit = pool.some((r) => r.host_id === hid && ["CRITICAL", "ERROR"].includes(r.severity) && r.status === "OPEN");
-            const hasWarn = pool.some((r) => r.host_id === hid && r.severity === "WARNING" && r.status === "OPEN");
-            const dot = hasCrit ? "crit" : hasWarn ? "warn" : "online";
+            const dot = hCrit.has(hid) ? "crit" : hWarn.has(hid) ? "warn" : "online";
             return `<li><button type="button" class="tree-btn${state.scopeHost === hid ? " active" : ""}" data-scope-host="${esc(hid)}">
               <span class="tree-name"><i class="dot ${dot}" aria-hidden="true"></i>${esc(hid)}</span>
               <span class="tree-cnt">${hCounts.get(hid) || 0}</span>
@@ -755,14 +929,6 @@
           .join("")
       : '<li class="muted" style="padding:4px 8px;font-size:.76rem;">No hosts reporting</li>';
 
-    // Agents
-    const aCounts = new Map();
-    for (const r of pool) {
-      if (r.agent && (r.kind === "Agent Work" || r.kind === "Collaboration")) {
-        aCounts.set(r.agent, (aCounts.get(r.agent) || 0) + 1);
-      }
-    }
-    const agents = [...aCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14);
     el("agent-tree").innerHTML = agents.length
       ? agents
           .map(
@@ -774,10 +940,6 @@
           .join("")
       : '<li class="muted" style="padding:4px 8px;font-size:.76rem;">No agent activity yet</li>';
 
-    // Workspaces
-    const wCounts = new Map();
-    for (const r of pool) if (r.workspace) wCounts.set(r.workspace, (wCounts.get(r.workspace) || 0) + 1);
-    const wsList = [...wCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
     el("workspace-tree").innerHTML = wsList.length
       ? wsList
           .map(
@@ -788,6 +950,20 @@
           )
           .join("")
       : '<li class="muted" style="padding:4px 8px;font-size:.76rem;">No shared workspaces</li>';
+
+    const fileTree = el("file-tree");
+    if (fileTree) {
+      fileTree.innerHTML = fileList.length
+        ? fileList
+            .map(
+              ([fp, cnt]) => `<li><button type="button" class="tree-btn${state.scopeFile === fp ? " active" : ""}" data-scope-file="${esc(fp)}" title="${esc(fp)}">
+                <span class="tree-name"><i class="dot online" aria-hidden="true"></i>${esc(shortPath(fp))}</span>
+                <span class="tree-cnt">${cnt}</span>
+              </button></li>`
+            )
+            .join("")
+        : '<li class="muted" style="padding:4px 8px;font-size:.76rem;">No files recorded yet</li>';
+    }
   }
 
   /* ---------- Render Main Table & Status Bar ---------- */
@@ -818,7 +994,7 @@
     if (state.perspective !== "all") chips.push({ id: "perspective", label: `Perspective: ${state.perspective.replace(/_/g, " ")}` });
     if (state.scopeTask) chips.push({ id: "scopeTask", label: `Assignment: ${state.scopeTask}` });
     if (state.scopeSession) chips.push({ id: "scopeSession", label: `Session: ${state.scopeSession}` });
-    if (state.scopeFile) chips.push({ id: "scopeFile", label: `File: ${state.scopeFile}` });
+    if (state.scopeFile) chips.push({ id: "scopeFile", label: `File: ${shortPath(state.scopeFile)}` });
     if (state.scopeHost) chips.push({ id: "scopeHost", label: `Host: ${state.scopeHost}` });
     if (state.scopeAgent) chips.push({ id: "scopeAgent", label: `Agent: ${state.scopeAgent}` });
     if (state.scopeWorkspace) chips.push({ id: "scopeWorkspace", label: `Folder: ${state.scopeWorkspace}` });
@@ -843,14 +1019,139 @@
     banner.classList.remove("hidden");
   }
 
-  function render() {
+  function updateStatusBar(pool, filteredTotal, shownCount) {
+    let crit = 0, warn = 0, info = 0, norm = 0, openAlerts = 0, workCnt = 0, recent5m = 0;
+    const cutoff5m = Date.now() / 1000 - 300;
+    for (let i = 0; i < pool.length; i++) {
+      const r = pool[i];
+      if (r.severity === "CRITICAL" || r.severity === "ERROR") crit++;
+      else if (r.severity === "WARNING") warn++;
+      else if (r.severity === "INFO") info++;
+      else if (r.severity === "NORMAL") norm++;
+      if (r.kind === "Alert" && r.status === "OPEN") openAlerts++;
+      if (r.kind === "Agent Work") workCnt++;
+      if (r.ts > cutoff5m) recent5m++;
+    }
+    el("count").textContent =
+      shownCount < filteredTotal
+        ? `${shownCount} shown · ${filteredTotal} of ${pool.length} records`
+        : `${filteredTotal} of ${pool.length} records`;
+    el("cnt-critical").textContent = String(crit);
+    el("cnt-warning").textContent = String(warn);
+    el("cnt-info").textContent = String(info);
+    el("cnt-normal").textContent = String(norm);
+    el("open-alerts-cnt").textContent = `${openAlerts} open alert${openAlerts === 1 ? "" : "s"}`;
+    el("work-steps-cnt").textContent = `${workCnt} agent action${workCnt === 1 ? "" : "s"}`;
+    const rateEl = el("rate-badge");
+    if (rateEl) rateEl.textContent = `${recent5m} / 5m`;
+
+    const moreBtn = el("show-more-rows");
+    if (moreBtn) {
+      const hasMore = filteredTotal > shownCount;
+      moreBtn.classList.toggle("hidden", !hasMore);
+      if (hasMore) {
+        moreBtn.textContent = `Show more (${shownCount}/${filteredTotal})`;
+      }
+    }
+  }
+
+  function selectRowKey(key, opts = {}) {
+    if (!key) return;
+    const prevKey = state.selectedKey;
+    state.selectedKey = key;
+    if (prevKey && prevKey !== key) {
+      const prevRow = tbody.querySelector(`tr[data-key="${CSS.escape(prevKey)}"]`);
+      if (prevRow) {
+        prevRow.classList.remove("selected");
+        prevRow.setAttribute("aria-selected", "false");
+      }
+    }
+    const nextRow = tbody.querySelector(`tr[data-key="${CSS.escape(key)}"]`);
+    if (nextRow) {
+      nextRow.classList.add("selected");
+      nextRow.setAttribute("aria-selected", "true");
+      if (opts.scrollIntoView) nextRow.scrollIntoView({ block: "nearest" });
+    }
+    const sel = getRecordByKey(key);
+    el("ack-selected").classList.toggle("hidden", !(sel && sel.canAck));
+    renderDetails(sel, allMergedRecords());
+    syncLiveUrl();
+  }
+
+  function applyIncrementalUpdate(addedRecords, updatedRecords) {
+    const pool = allMergedRecords();
+    const ctx = buildFilterContext();
+    const matchingAdded = [];
+    for (let i = 0; i < addedRecords.length; i++) {
+      if (recordMatchesFilter(addedRecords[i], ctx)) matchingAdded.push(addedRecords[i]);
+    }
+    matchingAdded.sort((a, b) => b.ts - a.ts);
+
+    let domMutated = false;
+    if (matchingAdded.length) {
+      const toInsert = [];
+      for (let i = 0; i < matchingAdded.length; i++) {
+        const rec = matchingAdded[i];
+        const existing = tbody.querySelector(`tr[data-key="${CSS.escape(rec.key)}"]`);
+        if (existing) {
+          existing.outerHTML = renderRow(rec);
+          domMutated = true;
+        } else {
+          toInsert.push(rec);
+        }
+      }
+      if (toInsert.length) {
+        emptyEl.hidden = true;
+        tbody.insertAdjacentHTML("afterbegin", toInsert.map(renderRow).join(""));
+        state.renderedFilteredTotal += toInsert.length;
+        domMutated = true;
+      }
+      while (tbody.children.length > state.renderLimit) {
+        tbody.lastElementChild.remove();
+      }
+      if (!state.selectedKey && toInsert.length) {
+        selectRowKey(toInsert[0].key);
+      }
+    }
+
+    let selectedTouched = false;
+    for (let i = 0; i < updatedRecords.length; i++) {
+      const rec = updatedRecords[i];
+      if (rec.key === state.selectedKey) selectedTouched = true;
+      const existing = tbody.querySelector(`tr[data-key="${CSS.escape(rec.key)}"]`);
+      if (existing) {
+        existing.outerHTML = renderRow(rec);
+        domMutated = true;
+      }
+    }
+
+    if (domMutated || addedRecords.length || updatedRecords.length) {
+      const shownCount = tbody.querySelectorAll("tr[data-key]").length;
+      if (state.renderedFilteredTotal < shownCount) state.renderedFilteredTotal = shownCount;
+      updateStatusBar(pool, state.renderedFilteredTotal, shownCount);
+      if (Date.now() - state.lastExplorerAt >= 10000) {
+        renderExplorer(pool);
+      }
+      if (selectedTouched) {
+        const sel = getRecordByKey(state.selectedKey);
+        el("ack-selected").classList.toggle("hidden", !(sel && sel.canAck));
+        renderDetails(sel, pool);
+      }
+    }
+    if (caseView?.updated && state.feedMap.get(`alert:${caseView.id}`)?.ts > caseView.updated) {
+      el("incident-refresh").textContent = "Refresh · case updated";
+    }
+  }
+
+  function render(opts = {}) {
     appEl.classList.toggle("row-tint", state.rowTint);
     appEl.classList.toggle("comfortable", state.comfortable);
     const wrap = el("table-wrap");
     const prevScroll = wrap ? wrap.scrollTop : 0;
     const pool = allMergedRecords();
-    renderExplorer(pool);
+    if (!opts.skipExplorer) renderExplorer(pool);
     const filtered = getFiltered(pool);
+    state.renderedFilteredTotal = filtered.length;
     renderActiveChips();
 
     if (state.pendingEventKey && filtered.some((r) => r.key === state.pendingEventKey)) {
@@ -858,7 +1159,19 @@
       state.pendingEventKey = "";
     }
 
-    if (!filtered.length) {
+    let visible = filtered;
+    if (filtered.length > state.renderLimit) {
+      visible = filtered.slice(0, state.renderLimit);
+    }
+
+    const prevSelKey = state.selectedKey;
+    if (state.selectedKey && !filtered.some((r) => r.key === state.selectedKey)) {
+      state.selectedKey = visible[0]?.key || "";
+    } else if (!state.selectedKey && visible.length) {
+      state.selectedKey = visible[0].key;
+    }
+
+    if (!visible.length) {
       tbody.innerHTML = "";
       emptyEl.textContent = state.scopeTask
         ? `No confirmed steps or files explicitly linked to assignment "${state.scopeTask}" in this organization (link unknown).`
@@ -872,7 +1185,7 @@
         const order = ["CRITICAL", "ERROR", "WARNING", "INFO", "NORMAL"];
         let html = "";
         for (const sev of order) {
-          const grp = filtered.filter((r) => r.severity === sev);
+          const grp = visible.filter((r) => r.severity === sev);
           if (!grp.length) continue;
           html += `<tr class="group-row"><td colspan="10">Severity: ${esc(sev)} (${grp.length})</td></tr>`;
           html += grp.map(renderRow).join("");
@@ -881,7 +1194,7 @@
       } else if (state.groupMode === "agent" || state.groupMode === "workspace") {
         const field = state.groupMode === "agent" ? "agent" : "workspace";
         const groups = new Map();
-        for (const r of filtered) {
+        for (const r of visible) {
           const k = String(r[field] || "(unspecified)");
           if (!groups.has(k)) groups.set(k, []);
           groups.get(k).push(r);
@@ -893,38 +1206,305 @@
         }
         tbody.innerHTML = html;
       } else {
-        tbody.innerHTML = filtered.map(renderRow).join("");
+        tbody.innerHTML = visible.map(renderRow).join("");
       }
       if (wrap && prevScroll > 0) wrap.scrollTop = prevScroll;
     }
 
-    if (state.selectedKey && !filtered.some((r) => r.key === state.selectedKey)) {
-      state.selectedKey = filtered[0]?.key || "";
-    } else if (!state.selectedKey && filtered.length) {
-      state.selectedKey = filtered[0].key;
-    }
-    const sel = filtered.find((r) => r.key === state.selectedKey) || null;
+    const sel = (state.selectedKey && getRecordByKey(state.selectedKey)) || visible[0] || null;
     el("ack-selected").classList.toggle("hidden", !(sel && sel.canAck));
+    updateStatusBar(pool, filtered.length, visible.length);
 
-    // OMi Status Bar Counters + 5-min velocity
-    el("count").textContent = `${filtered.length} of ${pool.length} records`;
-    el("cnt-critical").textContent = pool.filter((r) => r.severity === "CRITICAL" || r.severity === "ERROR").length;
-    el("cnt-warning").textContent = pool.filter((r) => r.severity === "WARNING").length;
-    el("cnt-info").textContent = pool.filter((r) => r.severity === "INFO").length;
-    el("cnt-normal").textContent = pool.filter((r) => r.severity === "NORMAL").length;
-    const openAlerts = pool.filter((r) => r.kind === "Alert" && r.status === "OPEN").length;
-    const workCnt = pool.filter((r) => r.kind === "Agent Work").length;
-    el("open-alerts-cnt").textContent = `${openAlerts} open alert${openAlerts === 1 ? "" : "s"}`;
-    el("work-steps-cnt").textContent = `${workCnt} agent action${workCnt === 1 ? "" : "s"}`;
-    const recent5m = pool.filter((r) => r.ts > Date.now() / 1000 - 300).length;
-    const rateEl = el("rate-badge");
-    if (rateEl) rateEl.textContent = `${recent5m} / 5m`;
-
-    renderDetails(sel, pool);
+    if (!opts.skipDetails && !(opts.skipDetailsIfSame && prevSelKey && prevSelKey === state.selectedKey)) {
+      renderDetails(sel, pool);
+    }
     if (caseView?.updated && state.feedMap.get(`alert:${caseView.id}`)?.ts > caseView.updated) {
       el("incident-refresh").textContent = "Refresh · case updated";
     }
     syncLiveUrl();
+  }
+
+  /* ---------- On-Demand Event Evidence & Popup Investigation Modal ---------- */
+  const evidenceInFlight = new Map();
+
+  function isSafeRasterImage(img) {
+    if (!img || typeof img !== "object") return false;
+    const url = String(img.url || "").trim();
+    const mime = String(img.mime_type || "").toLowerCase().trim();
+    return url.startsWith("/api/v1/events/") && !url.startsWith("//") && !/[\r\n\0]/.test(url) && ALLOWED_IMAGE_MIMES.has(mime);
+  }
+
+  function formatBytes(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v) || v <= 0) return "";
+    if (v < 1024) return `${v} B`;
+    if (v < 1048576) return `${(v / 1024).toFixed(1)} KB`;
+    return `${(v / 1048576).toFixed(1)} MB`;
+  }
+
+  function fetchEventEvidence(item, orgId) {
+    const evId = getEvidenceEventId(item);
+    if (!evId || !orgId) return Promise.resolve(null);
+    const cacheKey = `${orgId}:${evId}`;
+    if (state.evidenceCache.has(cacheKey)) {
+      return Promise.resolve(state.evidenceCache.get(cacheKey));
+    }
+    if (evidenceInFlight.has(cacheKey)) {
+      return evidenceInFlight.get(cacheKey);
+    }
+    const qs = new URLSearchParams({ organization_id: String(orgId) });
+    const req = api(`/api/v1/events/${encodeURIComponent(evId)}/evidence?${qs.toString()}`)
+      .then((data) => {
+        if (data && String(data.organization) === String(orgId)) {
+          state.evidenceCache.set(cacheKey, data);
+          return data;
+        }
+        return null;
+      })
+      .finally(() => {
+        evidenceInFlight.delete(cacheKey);
+      });
+    evidenceInFlight.set(cacheKey, req);
+    return req;
+  }
+
+  function renderEvidenceHtml(ev, item, opts = {}) {
+    const sections = [];
+    const cmdIn = (ev && ev.command_input) || item.command || "";
+    const cmdOut = (ev && ev.command_output) || "";
+    const hasExit = ev && ev.exit_code !== null && ev.exit_code !== undefined;
+    const truncated = Boolean(ev && ev.output_truncated);
+
+    if (cmdIn || cmdOut || hasExit) {
+      const exitBadge = hasExit
+        ? `<span class="exit-pill ${Number(ev.exit_code) === 0 ? "ok" : "fail"}">Exit ${esc(ev.exit_code)}</span>`
+        : "";
+      const truncBadge = truncated ? '<span class="trunc-pill">Output truncated</span>' : "";
+      const progBadge = (ev && ev.program) || item.program ? `<span class="prog-badge">${esc((ev && ev.program) || item.program)}</span>` : "";
+      sections.push(`
+        <section class="ev-section" aria-label="Command input and output">
+          <h3>
+            <span>Command &amp; Output</span>
+            <span class="ev-cmd-badges">${progBadge}${exitBadge}${truncBadge}</span>
+          </h3>
+          <div class="ev-terminal">
+            <div class="ev-cmd-head">
+              <span>Redacted execution capture</span>
+              ${cmdIn ? `<button type="button" class="btn" data-act="copy-ev-cmd" data-ev-key="${esc(item.key)}">Copy command</button>` : ""}
+            </div>
+            ${cmdIn ? `<pre class="ev-cmd-in">$ ${esc(cmdIn)}</pre>` : ""}
+            ${cmdOut ? `<pre class="ev-cmd-out">${esc(cmdOut)}</pre>` : '<pre class="ev-cmd-out muted">(no command output captured)</pre>'}
+          </div>
+        </section>`);
+    }
+
+    const safeImages = Array.isArray(ev?.images) ? ev.images.filter(isSafeRasterImage) : [];
+    if (safeImages.length) {
+      sections.push(`
+        <section class="ev-section" aria-label="Captured images">
+          <h3><span>Captured Images (${safeImages.length})</span><span class="muted">Click any thumbnail to zoom</span></h3>
+          <div class="ev-images-grid">
+            ${safeImages
+              .map((img) => {
+                const isSnap = String(img.source || "").toLowerCase() === "workspace_snapshot";
+                const srcLabel = isSnap ? "Workspace snapshot at capture time" : "Captured from tool result";
+                const sizeTxt = formatBytes(img.size_bytes);
+                return `<div class="ev-image-card">
+                  <button type="button" class="ev-image-btn" data-zoom-src="${esc(img.url)}" data-zoom-label="${esc(img.path || "Captured image")}" data-zoom-source="${esc(srcLabel)}">
+                    <img class="ev-image-thumb" src="${esc(img.url)}" alt="${esc(img.path || "Captured event image")}" loading="lazy" />
+                  </button>
+                  <div class="ev-image-meta">
+                    <span class="ev-image-path" title="${esc(img.path || "")}">${esc(shortPath(img.path || "image"))}</span>
+                    <span class="ev-source-badge ${isSnap ? "snap" : "tool"}">${esc(srcLabel)}</span>
+                    ${sizeTxt ? `<span class="muted">${esc(img.mime_type)} · ${esc(sizeTxt)}</span>` : `<span class="muted">${esc(img.mime_type)}</span>`}
+                  </div>
+                </div>`;
+              })
+              .join("")}
+          </div>
+        </section>`);
+    }
+
+    const previews = Array.isArray(ev?.text_previews) ? ev.text_previews : [];
+    if (previews.length) {
+      sections.push(`
+        <section class="ev-section" aria-label="File text previews">
+          <h3><span>File &amp; Output Previews (${previews.length})</span></h3>
+          <div class="ev-text-list">
+            ${previews
+              .map((tp) => {
+                const isSnap = String(tp.source || "").toLowerCase() === "workspace_snapshot";
+                const srcLabel = isSnap ? "Workspace snapshot" : "Tool result";
+                return `<div class="ev-text-card">
+                  <div class="ev-text-head">
+                    <code title="${esc(tp.path || "")}">${esc(tp.path || "preview")}</code>
+                    <span class="ev-cmd-badges">
+                      <span class="ev-source-badge ${isSnap ? "snap" : "tool"}">${esc(srcLabel)}</span>
+                      ${tp.truncated ? '<span class="trunc-pill">Truncated</span>' : ""}
+                    </span>
+                  </div>
+                  <pre class="ev-text-pre">${esc(tp.text || "")}</pre>
+                </div>`;
+              })
+              .join("")}
+          </div>
+        </section>`);
+    }
+
+    const mergedFiles = [...new Set([...(Array.isArray(ev?.files) ? ev.files : []), ...(item.files || [])].map((f) => String(f || "").trim()).filter(Boolean))];
+    if (opts.includeFiles && mergedFiles.length) {
+      sections.push(`
+        <section class="ev-section" aria-label="Files touched or viewed">
+          <h3><span>Files Touched &amp; Viewed (${mergedFiles.length})</span><span class="muted">Click to filter stream</span></h3>
+          <div class="chips">
+            ${mergedFiles.map((f) => `<button type="button" class="chip-btn edited" data-scope-file="${esc(f)}" title="Filter by ${esc(f)}">${esc(f)}</button>`).join("")}
+          </div>
+        </section>`);
+    }
+
+    if (!sections.length && !opts.compact) {
+      return '<p class="muted" style="margin:0;">No captured command output, images, or file previews recorded for this event.</p>';
+    }
+    return sections.join("");
+  }
+
+  async function hydrateEvidenceSlot(item, slotEl, opts = {}) {
+    const evId = getEvidenceEventId(item);
+    if (!slotEl || !evId || !state.org) return;
+    const orgId = String(state.org.id);
+    const cacheKey = `${orgId}:${evId}`;
+    const expectedKey = item.key;
+    const gen = state.generation;
+    if (state.evidenceCache.has(cacheKey)) {
+      slotEl.innerHTML = renderEvidenceHtml(state.evidenceCache.get(cacheKey), item, opts);
+      return;
+    }
+    if (!opts.compact) {
+      slotEl.innerHTML = '<p class="ev-loading">Loading captured command output, images &amp; previews…</p>';
+    }
+    try {
+      const ev = await fetchEventEvidence(item, orgId);
+      if (gen !== state.generation || !slotEl.isConnected || slotEl.dataset.evKey !== expectedKey) return;
+      if (opts.dialog && (state.eventModalKey !== expectedKey || state.eventModalOrg !== orgId)) return;
+      slotEl.innerHTML = renderEvidenceHtml(ev, item, opts);
+    } catch (err) {
+      if (gen !== state.generation || !slotEl.isConnected || slotEl.dataset.evKey !== expectedKey) return;
+      if (!opts.compact) {
+        slotEl.innerHTML = `<p class="ev-error">Could not load detailed evidence (${esc(err.message || "request failed")}).</p>`;
+      }
+    }
+  }
+
+  function closeImageZoom() {
+    if (state.zoomOverlay) {
+      state.zoomOverlay.remove();
+      state.zoomOverlay = null;
+    }
+  }
+
+  function openImageZoom(src, label, sourceText) {
+    if (!src || !src.startsWith("/api/v1/events/") || src.startsWith("//")) return;
+    closeImageZoom();
+    const ov = document.createElement("div");
+    ov.className = "ev-zoom-overlay";
+    ov.setAttribute("role", "dialog");
+    ov.setAttribute("aria-modal", "true");
+    ov.setAttribute("aria-label", label || "Image preview");
+    ov.innerHTML = `
+      <div class="ev-zoom-card">
+        <div class="ev-zoom-bar">
+          <span><strong>${esc(label || "Image")}</strong>${sourceText ? ` · <span class="muted">${esc(sourceText)}</span>` : ""}</span>
+          <button type="button" class="btn" data-close-zoom="1">Close</button>
+        </div>
+        <img class="ev-zoom-img" src="${esc(src)}" alt="${esc(label || "Zoomed event image")}" />
+      </div>`;
+    ov.addEventListener("click", (e) => {
+      if (e.target === ov || e.target.closest("[data-close-zoom]")) closeImageZoom();
+    });
+    // Mount inside eventDialog when open so it renders above the native top-layer dialog
+    (eventDialog && eventDialog.open ? eventDialog : document.body).appendChild(ov);
+    state.zoomOverlay = ov;
+    ov.querySelector("[data-close-zoom]")?.focus();
+  }
+
+  function closeEventPopup(opts = {}) {
+    closeImageZoom();
+    const opener = state.eventModalOpener;
+    const prevKey = state.eventModalKey;
+    state.eventModalKey = "";
+    state.eventModalOrg = "";
+    state.eventModalOpener = null;
+    if (eventDialog && eventDialog.open && !opts.fromNativeClose) {
+      eventDialog.close();
+    }
+    if (!opts.skipFocus) {
+      if (opener && opener.isConnected) {
+        opener.focus();
+      } else if (prevKey) {
+        tbody.querySelector(`tr[data-key="${CSS.escape(prevKey)}"]`)?.focus();
+      }
+    }
+  }
+
+  function openEventPopup(key, openerEl = null) {
+    if (!eventDialog) return;
+    const item = getRecordByKey(key) || allMergedRecords().find((r) => r.key === key);
+    if (!item) return;
+    closeImageZoom();
+    state.eventModalKey = item.key;
+    state.eventModalOrg = String(state.org?.id || "");
+    state.eventModalOpener = openerEl || document.activeElement;
+
+    const titleEl = el("event-dialog-title");
+    const subEl = el("event-dialog-sub");
+    const bodyEl = el("event-dialog-body");
+    if (titleEl) titleEl.textContent = item.message || item.source || "Event details";
+    if (subEl) {
+      subEl.innerHTML = `
+        <span class="sev-pill ${safeCls(item.severity)}">${esc(item.severity)}</span>
+        <span class="kind-pill ${safeCls(item.kind.replace(/\s+/g, "-"))}">${esc(item.kind)}</span>
+        <span class="state-pill ${safeCls(item.status)}">${esc(item.status)}</span>
+        ${item.program ? `<span class="prog-badge">${esc(item.program)}</span>` : ""}
+        <span>${esc(item.agent)} · ${esc(item.host_id)} · ${esc(fmtTime(item.ts))}</span>`;
+    }
+
+    const evId = getEvidenceEventId(item);
+    const canFetchEv = Boolean(evId);
+    const cachedEv = canFetchEv && state.org ? state.evidenceCache.get(`${state.org.id}:${evId}`) : null;
+    const initialEvidence = cachedEv
+      ? renderEvidenceHtml(cachedEv, item, { includeFiles: true })
+      : canFetchEv
+        ? '<p class="ev-loading">Loading captured command output, images &amp; previews…</p>'
+        : renderEvidenceHtml(null, item, { includeFiles: true });
+
+    if (bodyEl) {
+      bodyEl.innerHTML = `
+        <section class="ev-section" aria-label="Event summary and metadata">
+          <h3><span>Summary &amp; Context</span><span><code>${esc(item.key)}</code></span></h3>
+          <p style="margin:0 0 10px;font-size:.86rem;">${esc(item.summary || item.sessionSummary || item.message)}</p>
+          <dl class="ev-meta-grid">
+            <div><dt>Agent</dt><dd><strong>${esc(item.agent)}</strong></dd></div>
+            <div><dt>Harness / Tool</dt><dd>${esc(item.harness)} <code>${esc(item.source)}</code></dd></div>
+            <div><dt>Host / Node</dt><dd><code>${esc(item.host_id)}</code></dd></div>
+            <div><dt>Workspace</dt><dd><code>${esc(item.workspace || "—")}</code></dd></div>
+            <div><dt>Session</dt><dd>${item.sessionId ? `<code>${esc(item.sessionId)}</code>` : '<span class="muted">None recorded</span>'}</dd></div>
+            <div><dt>Timestamp</dt><dd class="num">${esc(fmtTime(item.ts))} (${esc(fmtAge(item.ts))} ago)</dd></div>
+            <div><dt>Organization</dt><dd>${esc(state.org?.name || "Active organization")}</dd></div>
+          </dl>
+        </section>
+        <div id="event-dialog-evidence" data-ev-key="${esc(item.key)}">${initialEvidence}</div>
+        <details class="ev-section">
+          <summary style="cursor:pointer;font-size:.8rem;font-weight:700;color:var(--sc-muted);">Raw structured event metadata</summary>
+          <pre class="pre" style="margin-top:8px;">${esc(JSON.stringify(item.details || {}, null, 2))}</pre>
+        </details>`;
+    }
+
+    if (!eventDialog.open) eventDialog.showModal();
+    el("event-dialog-close")?.focus();
+
+    if (canFetchEv && !cachedEv) {
+      hydrateEvidenceSlot(item, el("event-dialog-evidence"), { includeFiles: true, dialog: true });
+    }
   }
 
   /* ---------- Bottom Split Inspector ---------- */
@@ -958,6 +1538,7 @@
     const sessionMapHref = item.sessionId ? `/?am_view=sessions&am_session=${encodeURIComponent(item.sessionId)}&return_to=${liveReturn}#activity` : "";
 
     detailQuick.innerHTML = `
+      <button type="button" class="btn primary" data-act="open-popup">Open popup</button>
       ${item.kind === "Alert" ? `<button type="button" class="btn primary" data-act="incident" data-id="${esc(item.rawId)}">Incident #${esc(item.rawId)} · History</button>` : ""}
       ${item.canAck ? `<button type="button" class="btn primary" data-act="ack" data-id="${esc(item.rawId)}">Acknowledge</button>` : ""}
       ${assignHref ? `<a href="${esc(assignHref)}" class="btn" id="detail-open-assignment">Open assignment ↗</a>` : ""}
@@ -989,28 +1570,37 @@
     if (state.detailTab === "files") {
       const grp = (title, arr, cls) =>
         arr && arr.length
-          ? `<div class="file-group"><h4>${esc(title)} (${arr.length})</h4><div class="chips">${arr.map((f) => `<span class="chip ${cls}" title="${esc(f)}">${esc(shortPath(f))}</span>`).join("")}</div></div>`
+          ? `<div class="file-group"><h4>${esc(title)} (${arr.length})</h4><div class="chips">${arr.map((f) => `<button type="button" class="chip-btn ${cls}" data-scope-file="${esc(f)}" title="Filter by ${esc(f)}">${esc(shortPath(f))}</button>`).join("")}</div></div>`
           : "";
       const body =
         (item.workspace ? `<p style="margin:0 0 8px;"><strong>Workspace:</strong> <code>${esc(item.workspace)}</code>${item.fileBasis ? ` <span class="muted">(${esc(item.fileBasis)})</span>` : ""}</p>` : "") +
         grp("Directly linked to this step / event", item.files, "edited") +
         grp("Session edited files", item.sessionFiles?.edited, "edited") +
         grp("Session delivered files", item.sessionFiles?.delivered, "") +
-        grp("Session read files", item.sessionFiles?.read, "");
+        grp("Session read files", item.sessionFiles?.read, "") +
+        (isNumericEventId(item) ? `<div id="detail-evidence-slot" class="detail-evidence-slot" data-ev-key="${esc(item.key)}"></div>` : "");
       detailEl.innerHTML = body || '<p class="muted">No file paths or workspace folder recorded for this item.</p>';
+      if (isNumericEventId(item)) {
+        hydrateEvidenceSlot(item, el("detail-evidence-slot"), { compact: true, includeFiles: false });
+      }
       return;
     }
 
     if (state.detailTab === "evidence") {
       detailEl.innerHTML = `
-        <p class="muted" style="margin:0 0 6px;">Redacted structured details for <code>${esc(item.key)}</code>:</p>
+        ${isNumericEventId(item) ? `<div id="detail-evidence-slot" class="detail-evidence-slot" data-ev-key="${esc(item.key)}"></div>` : ""}
+        <p class="muted" style="margin:8px 0 6px;">Redacted structured details for <code>${esc(item.key)}</code>:</p>
         <pre class="pre">${esc(JSON.stringify(item.details || {}, null, 2))}</pre>`;
+      if (isNumericEventId(item)) {
+        hydrateEvidenceSlot(item, el("detail-evidence-slot"), { includeFiles: true });
+      }
       return;
     }
 
     if (state.detailTab === "actions") {
       detailEl.innerHTML = `
         <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:8px;">
+          <button type="button" class="btn primary" data-act="open-popup">Open event popup</button>
           ${item.canAck ? `<button type="button" class="btn primary" data-act="ack" data-id="${esc(item.rawId)}">Acknowledge alert</button>` : `<span class="muted">${item.kind === "Alert" ? (canAck() ? "Alert already acknowledged/resolved." : "Viewer role is read-only.") : "Observation record (read-only)."}</span>`}
           <button type="button" class="btn" data-act="scope-host" data-val="${esc(item.host_id)}">Scope host: ${esc(item.host_id)}</button>
           <button type="button" class="btn" data-act="scope-agent" data-val="${esc(item.agent)}">Scope agent: ${esc(item.agent)}</button>
@@ -1019,6 +1609,7 @@
           <a href="/#agent-work" class="btn">Agent Work ↗</a>
         </div>
         <div class="keys-grid">
+          <div class="key-item"><kbd>Enter</kbd> / Double-click Open event popup</div>
           <div class="key-item"><kbd>⌘K</kbd> / <kbd>Ctrl+K</kbd> Quick jump palette</div>
           <div class="key-item"><kbd>↑</kbd> / <kbd>↓</kbd> Navigate rows</div>
           <div class="key-item"><kbd>/</kbd> Focus search</div>
@@ -1032,7 +1623,7 @@
 
     // General tab
     const fileChips = (item.files || []).length
-      ? `<div class="chips">${item.files.map((f) => `<span class="chip edited" title="${esc(f)}">${esc(shortPath(f))}</span>`).join("")}</div>`
+      ? `<div class="chips">${item.files.map((f) => `<button type="button" class="chip-btn edited" data-scope-file="${esc(f)}" title="Filter by ${esc(f)}">${esc(shortPath(f))}</button>`).join("")}</div>`
       : "";
     const cmdBlock = item.command
       ? `<div class="cmd-wrap"><div class="cmd-bar"><span>Redacted command</span><button type="button" class="btn" data-act="copy-cmd">Copy</button></div><pre class="cmd-preview">$ ${esc(item.command)}</pre></div>`
@@ -1052,6 +1643,7 @@
           ${cmdBlock}
           ${item.sessionSummary && item.summary && item.sessionSummary !== item.summary ? `<div class="muted" style="font-size:.78rem;margin-top:4px;"><strong>Session context:</strong> ${esc(item.sessionSummary)}</div>` : ""}
           ${fileChips}
+          ${isNumericEventId(item) ? `<div id="detail-evidence-slot" class="detail-evidence-slot" data-ev-key="${esc(item.key)}"></div>` : ""}
         </div>
         <dl class="kv">
           <dt>Agent</dt><dd><strong>${esc(item.agent)}</strong></dd>
@@ -1070,6 +1662,9 @@
           <dt>Organization</dt><dd>${esc(state.org?.name || "Active organization")}</dd>
         </dl>
       </div>`;
+    if (isNumericEventId(item)) {
+      hydrateEvidenceSlot(item, el("detail-evidence-slot"), { compact: true });
+    }
   }
 
 
@@ -1170,6 +1765,7 @@
         const visible = state.feedMap.get(record.key) || state.historyMap.get(record.key);
         if (visible && record.ts >= visible.ts) {
           state.feedMap.set(record.key, record);
+          markPoolDirty();
           if (!state.paused) render();
         }
       }
@@ -1228,15 +1824,27 @@
   /* ---------- Cursor Feed + Multi-Stream Polling ---------- */
   function clearState() {
     closeIncident();
+    closeEventPopup({ skipFocus: true });
     state.generation++;
     state.feedMap.clear();
     state.historyMap.clear();
     state.workMap.clear();
     state.collabMap.clear();
     state.auditMap.clear();
+    state.evidenceCache.clear();
+    evidenceInFlight.clear();
+    state.mergedCache = [];
+    state.mergedDirty = true;
     state.hosts = [];
     state.feedCursor = null;
     state.historyCursor = null;
+    state.lastRichAt = 0;
+    state.lastOverviewAt = 0;
+    state.lastExplorerSig = "";
+    state.lastExplorerAt = 0;
+    state.lastSyncedUrl = "";
+    state.renderLimit = DEFAULT_RENDER_LIMIT;
+    state.renderedFilteredTotal = 0;
     state.seenKeys = new Set();
     state.newKeys = new Set();
     state.bufferedWhilePaused = 0;
@@ -1253,6 +1861,7 @@
     state.linksByTask = {};
     state.linksBySession = {};
     el("load-older")?.classList.add("hidden");
+    el("show-more-rows")?.classList.add("hidden");
     syncLiveUrl();
     updatePauseUi();
     tbody.innerHTML = "";
@@ -1292,8 +1901,12 @@
       if (gen !== state.generation || !sameActiveOrg(data.organization)) return;
       for (const rec of data.records || []) {
         const norm = normalizeFeedRecord(rec);
-        if (!state.historyMap.has(norm.key)) state.historyMap.set(norm.key, norm);
+        if (!state.historyMap.has(norm.key)) {
+          state.historyMap.set(norm.key, norm);
+          state.seenKeys.add(norm.key);
+        }
       }
+      markPoolDirty();
       state.historyCursor = data.next || null;
       el("load-older")?.classList.toggle("hidden", !state.historyCursor);
     } catch (err) {
@@ -1302,9 +1915,10 @@
   }
 
   async function pullEventFeed(gen) {
-    if (!state.useEventFeed) return false;
+    if (!state.useEventFeed) return { used: false, added: [], updated: [], sawReset: false };
     let loops = 0;
-    let added = 0;
+    const added = [];
+    const updated = [];
     let sawReset = false;
     while (loops < 8) {
       loops++;
@@ -1316,7 +1930,7 @@
         if (err.status === 404) {
           state.useEventFeed = false;
           feedModeBadge.textContent = "POLL";
-          return false;
+          return { used: false, added: [], updated: [], sawReset: false };
         }
         if (err.status === 400 && state.feedCursor) {
           state.feedCursor = null;
@@ -1324,32 +1938,34 @@
         }
         throw err;
       }
-      if (gen !== state.generation) return true;
+      if (gen !== state.generation) return { used: true, added, updated, sawReset };
       feedModeBadge.textContent = "CURSOR FEED";
       if (res.reset) {
         sawReset = true;
         state.feedMap.clear();
         state.historyMap.clear();
         state.historyCursor = null;
+        markPoolDirty();
       }
       for (const rec of res.records || []) {
         const norm = normalizeFeedRecord(rec);
-        const current = state.feedMap.get(norm.key);
-        if (!current) added++;
+        const current = state.feedMap.get(norm.key) || state.historyMap.get(norm.key);
         // A just-refreshed incident can be newer than a poll already in flight.
         if (current && norm.kind === "Alert" && norm.ts < current.ts) continue;
         state.feedMap.set(norm.key, norm);
+        if (!current) added.push(norm);
+        else updated.push(norm);
       }
       if (res.cursor) state.feedCursor = res.cursor;
       if (!res.more) break;
     }
     if (sawReset) await seedLiveHistory(gen);
-    if (gen !== state.generation) return true;
-    if (state.paused && added > 0) {
-      state.bufferedWhilePaused += added;
+    if (gen !== state.generation) return { used: true, added, updated, sawReset };
+    if (state.paused && added.length > 0) {
+      state.bufferedWhilePaused += added.length;
       updatePauseUi();
     }
-    return true;
+    return { used: true, added, updated, sawReset };
   }
 
   async function pullLegacyFeed(gen) {
@@ -1357,7 +1973,7 @@
       api("/api/v1/live-records").catch((e) => (e.status === 401 ? Promise.reject(e) : null)),
       api("/api/v1/alerts?status=ALL").catch((e) => (e.status === 401 ? Promise.reject(e) : { alerts: [] })),
     ]);
-    if (gen !== state.generation) return;
+    if (gen !== state.generation) return { changed: false };
     let added = 0;
     const next = new Map();
 
@@ -1385,7 +2001,7 @@
     } else {
       feedModeBadge.textContent = "POLL";
       const eventsData = await api("/api/v1/events").catch((e) => (e.status === 401 ? Promise.reject(e) : { events: [] }));
-      if (gen !== state.generation) return;
+      if (gen !== state.generation) return { changed: false };
       for (const e of eventsData.events || []) {
         const norm = normalizeFeedRecord({ ...e, kind: "event", source: e.event_type, ts: e.created_at, details: e.metadata });
         if (!state.feedMap.has(norm.key)) added++;
@@ -1393,10 +2009,12 @@
       }
     }
     state.feedMap = next;
+    markPoolDirty();
     if (state.paused && added > 0) {
       state.bufferedWhilePaused += added;
       updatePauseUi();
     }
+    return { changed: true };
   }
 
   async function loadOlderHistory() {
@@ -1416,9 +2034,14 @@
           const norm = normalizeFeedRecord(rec);
           const alreadyKnown = state.feedMap.has(norm.key) || state.historyMap.has(norm.key);
           state.historyMap.set(norm.key, norm);
+          state.seenKeys.add(norm.key);
           if (!alreadyKnown) loaded++;
         }
         state.historyCursor = data.next || null;
+      }
+      if (loaded > 0) {
+        markPoolDirty();
+        state.renderLimit = Math.max(state.renderLimit + Math.max(loaded, 400), 1400);
       }
       btn.classList.toggle("hidden", !state.historyCursor);
       toast(loaded ? `Loaded ${loaded} older history record${loaded === 1 ? "" : "s"}.` : "Reached end of persisted history.");
@@ -1448,70 +2071,131 @@
     if (!reqs.length) return;
     const pages = await Promise.all(reqs);
     if (gen !== state.generation) return;
+    let any = false;
     for (const data of pages) {
       if (!data || !sameActiveOrg(data.organization)) continue;
       for (const rec of data.records || []) {
         const norm = normalizeFeedRecord(rec);
         state.historyMap.set(norm.key, norm);
+        any = true;
       }
     }
+    if (any) markPoolDirty();
   }
 
   async function poll(forceAll = false) {
     if (state.busy) return;
+    if (!forceAll && document.hidden) return;
     state.busy = true;
     const gen = state.generation;
     state.pollSeq++;
-    const fetchRich = forceAll || state.pollSeq % 2 === 1;
+    const nowMs = Date.now();
+    const fetchRich = forceAll || (nowMs - state.lastRichAt >= RICH_POLL_MS);
+    const fetchOverview = forceAll || (nowMs - state.lastOverviewAt >= OVERVIEW_POLL_MS);
     try {
-      const usedFeed = await pullEventFeed(gen);
+      const feedRes = await pullEventFeed(gen);
       if (gen !== state.generation) return;
-      if (!usedFeed) await pullLegacyFeed(gen);
+      let legacyChanged = false;
+      if (!feedRes.used) {
+        const leg = await pullLegacyFeed(gen);
+        legacyChanged = Boolean(leg?.changed);
+      }
       if (gen !== state.generation) return;
       if (forceAll) await pullScopedRecords(gen);
       if (gen !== state.generation) return;
 
-      if (fetchRich) {
+      let richChanged = false;
+      if (fetchRich || fetchOverview) {
         const [overview, activity, workBoard] = await Promise.all([
-          api("/api/v1/overview").catch((e) => (e.status === 401 ? Promise.reject(e) : {})),
-          api("/api/v1/activity").catch((e) => (e.status === 401 ? Promise.reject(e) : {})),
-          api("/api/v1/work-board").catch((e) => (e.status === 401 ? Promise.reject(e) : {})),
+          fetchOverview ? api("/api/v1/overview").catch((e) => (e.status === 401 ? Promise.reject(e) : null)) : Promise.resolve(null),
+          fetchRich ? api("/api/v1/activity").catch((e) => (e.status === 401 ? Promise.reject(e) : null)) : Promise.resolve(null),
+          fetchRich ? api("/api/v1/work-board").catch((e) => (e.status === 401 ? Promise.reject(e) : null)) : Promise.resolve(null),
         ]);
         if (gen !== state.generation) return;
-        state.hosts = Array.isArray(overview.hosts) ? overview.hosts : [];
-        const prevWorkCount = state.workMap.size;
-        state.workMap = normalizeActivitySessions(activity);
-        state.collabMap = normalizeCollaboration(workBoard);
-        state.linksByTask = workBoard?.links?.by_task && typeof workBoard.links.by_task === "object" ? workBoard.links.by_task : {};
-        state.linksBySession = workBoard?.links?.by_session && typeof workBoard.links.by_session === "object" ? workBoard.links.by_session : {};
-        state.auditMap = normalizeAudit(overview);
-        if (state.paused && state.workMap.size > prevWorkCount) {
-          state.bufferedWhilePaused += state.workMap.size - prevWorkCount;
-          updatePauseUi();
+        if (fetchOverview && overview) {
+          state.lastOverviewAt = Date.now();
+          state.hosts = Array.isArray(overview.hosts) ? overview.hosts : [];
+          state.auditMap = normalizeAudit(overview);
+          richChanged = true;
         }
+        if (fetchRich && (activity || workBoard)) {
+          state.lastRichAt = Date.now();
+          const prevWorkCount = state.workMap.size;
+          if (activity) state.workMap = normalizeActivitySessions(activity);
+          if (workBoard) {
+            state.collabMap = normalizeCollaboration(workBoard);
+            state.linksByTask = workBoard?.links?.by_task && typeof workBoard.links.by_task === "object" ? workBoard.links.by_task : {};
+            state.linksBySession = workBoard?.links?.by_session && typeof workBoard.links.by_session === "object" ? workBoard.links.by_session : {};
+          }
+          if (state.paused && state.workMap.size > prevWorkCount) {
+            state.bufferedWhilePaused += state.workMap.size - prevWorkCount;
+            updatePauseUi();
+          }
+          richChanged = true;
+        }
+        if (richChanged) markPoolDirty();
       }
 
-      // Highlight newly arrived keys
-      const currentAll = [
-        ...state.feedMap.values(),
-        ...state.workMap.values(),
-        ...state.collabMap.values(),
-        ...state.auditMap.values(),
-      ];
       const fresh = new Set();
-      if (state.seenKeys.size > 0) {
-        for (const r of currentAll) if (!state.seenKeys.has(r.key)) fresh.add(r.key);
+      const hadSeen = state.seenKeys.size > 0;
+      if (feedRes.used && !feedRes.sawReset && !richChanged && !forceAll) {
+        for (let i = 0; i < feedRes.added.length; i++) {
+          const k = feedRes.added[i].key;
+          if (hadSeen && !state.seenKeys.has(k)) fresh.add(k);
+          state.seenKeys.add(k);
+        }
+        for (let i = 0; i < feedRes.updated.length; i++) {
+          state.seenKeys.add(feedRes.updated[i].key);
+        }
+      } else {
+        for (const r of state.feedMap.values()) { if (hadSeen && !state.seenKeys.has(r.key)) fresh.add(r.key); state.seenKeys.add(r.key); }
+        for (const r of state.workMap.values()) { if (hadSeen && !state.seenKeys.has(r.key)) fresh.add(r.key); state.seenKeys.add(r.key); }
+        for (const r of state.collabMap.values()) { if (hadSeen && !state.seenKeys.has(r.key)) fresh.add(r.key); state.seenKeys.add(r.key); }
+        for (const r of state.auditMap.values()) { if (hadSeen && !state.seenKeys.has(r.key)) fresh.add(r.key); state.seenKeys.add(r.key); }
       }
-      state.seenKeys = new Set(currentAll.map((r) => r.key));
       state.newKeys = fresh;
 
-      liveBadge.className = `live-pill ${state.paused ? "paused" : "live"}`;
-      liveBadge.innerHTML = `<i aria-hidden="true"></i>${state.paused ? "PAUSED" : "LIVE"}`;
+      const nextLiveMode = state.paused ? "paused" : "live";
+      if (liveBadge.dataset.mode !== nextLiveMode) {
+        liveBadge.dataset.mode = nextLiveMode;
+        liveBadge.className = `live-pill ${nextLiveMode}`;
+        liveBadge.innerHTML = `<i aria-hidden="true"></i>${state.paused ? "PAUSED" : "LIVE"}`;
+      }
       syncEl.textContent = state.paused
         ? `Display paused (${state.bufferedWhilePaused} new buffered) · ${new Date().toLocaleTimeString()}`
         : `Connected · Synced ${new Date().toLocaleTimeString()}`;
 
-      if (!state.paused) render();
+      if (!state.paused) {
+        const canIncremental =
+          feedRes.used &&
+          !forceAll &&
+          !richChanged &&
+          !feedRes.sawReset &&
+          !legacyChanged &&
+          state.groupMode === "none" &&
+          state.sortKey === "ts" &&
+          state.sortDir === "desc";
+
+        if (canIncremental) {
+          if (feedRes.added.length === 0 && feedRes.updated.length === 0) {
+            return; // Nothing changed on this tick — skip DOM work completely
+          }
+          if (!state.mergedDirty && Array.isArray(state.mergedCache) && feedRes.updated.length === 0) {
+            for (let i = 0; i < feedRes.added.length; i++) {
+              state.mergedCache.unshift(feedRes.added[i]);
+            }
+            if (state.mergedCache.length > MAX_RECORDS) {
+              state.mergedCache.length = MAX_RECORDS;
+            }
+          } else {
+            markPoolDirty();
+          }
+          applyIncrementalUpdate(feedRes.added, feedRes.updated);
+        } else {
+          if (feedRes.added.length > 0 || feedRes.updated.length > 0) markPoolDirty();
+          render();
+        }
+      }
     } catch (err) {
       if (gen !== state.generation) return;
       if (err.status === 401 || err.status === 403) {
@@ -1521,6 +2205,7 @@
         authGate.classList.remove("hidden");
         return;
       }
+      liveBadge.dataset.mode = "offline";
       liveBadge.className = "live-pill offline";
       liveBadge.innerHTML = '<i aria-hidden="true"></i>RETRYING';
       syncEl.textContent = `Disconnected (${err.message}) · retrying…`;
@@ -1555,9 +2240,11 @@
     } else {
       state.displaySnapshot = null;
       state.bufferedWhilePaused = 0;
+      markPoolDirty();
       render();
     }
     updatePauseUi();
+    liveBadge.dataset.mode = state.paused ? "paused" : "live";
     liveBadge.className = `live-pill ${state.paused ? "paused" : "live"}`;
     liveBadge.innerHTML = `<i aria-hidden="true"></i>${state.paused ? "PAUSED" : "LIVE"}`;
   }
@@ -1572,6 +2259,7 @@
       if (result.alert) {
         const updated = normalizeFeedRecord({...result.alert, kind: "alert"});
         state.feedMap.set(updated.key, updated);
+        markPoolDirty();
       }
       toast("Alert acknowledged.");
       if (state.paused) togglePause();
@@ -1615,7 +2303,7 @@
     const pBtn = e.target.closest("[data-persp]");
     if (pBtn) {
       state.perspective = pBtn.dataset.persp;
-      state.scopeHost = ""; state.scopeAgent = ""; state.scopeWorkspace = "";
+      state.scopeHost = ""; state.scopeAgent = ""; state.scopeWorkspace = ""; state.scopeFile = "";
       el("sidebar").classList.remove("mobile-open");
       render();
       return;
@@ -1639,15 +2327,76 @@
       state.scopeWorkspace = state.scopeWorkspace === wBtn.dataset.scopeWs ? "" : wBtn.dataset.scopeWs;
       el("sidebar").classList.remove("mobile-open");
       render();
+      return;
+    }
+    const fBtn = e.target.closest("[data-scope-file]");
+    if (fBtn) {
+      state.scopeFile = state.scopeFile === fBtn.dataset.scopeFile ? "" : fBtn.dataset.scopeFile;
+      el("sidebar").classList.remove("mobile-open");
+      render();
     }
   });
 
   tbody.addEventListener("click", (e) => {
     const row = e.target.closest("tr[data-key]");
     if (!row) return;
-    state.selectedKey = row.dataset.key;
-    render();
+    selectRowKey(row.dataset.key);
   });
+
+  tbody.addEventListener("dblclick", (e) => {
+    const row = e.target.closest("tr[data-key]");
+    if (!row) return;
+    selectRowKey(row.dataset.key);
+    openEventPopup(row.dataset.key, row);
+  });
+
+  if (eventDialog) {
+    el("event-dialog-close")?.addEventListener("click", () => closeEventPopup());
+    el("event-dialog-copy")?.addEventListener("click", () => {
+      const it = getRecordByKey(state.eventModalKey);
+      if (!it) return;
+      const evId = getEvidenceEventId(it);
+      const ev = evId && state.org ? state.evidenceCache.get(`${state.org.id}:${evId}`) : null;
+      navigator.clipboard?.writeText(JSON.stringify({ record: it, evidence: ev || null }, null, 2)).then(() => {
+        toast("Event JSON copied.");
+      }).catch(() => {});
+    });
+    eventDialog.addEventListener("click", (e) => {
+      if (e.target === eventDialog) {
+        closeEventPopup();
+        return;
+      }
+      const zoomBtn = e.target.closest("[data-zoom-src]");
+      if (zoomBtn) {
+        openImageZoom(zoomBtn.dataset.zoomSrc, zoomBtn.dataset.zoomLabel, zoomBtn.dataset.zoomSource);
+        return;
+      }
+      const fileBtn = e.target.closest("[data-scope-file]");
+      if (fileBtn) {
+        state.scopeFile = fileBtn.dataset.scopeFile;
+        closeEventPopup({ skipFocus: true });
+        render();
+        return;
+      }
+      const copyEvBtn = e.target.closest('[data-act="copy-ev-cmd"]');
+      if (copyEvBtn) {
+        const it = getRecordByKey(copyEvBtn.dataset.evKey || state.eventModalKey);
+        const evId = getEvidenceEventId(it);
+        const ev = evId && state.org ? state.evidenceCache.get(`${state.org.id}:${evId}`) : null;
+        const txt = (ev && ev.command_input) || (it && it.command) || "";
+        if (txt) {
+          navigator.clipboard?.writeText(txt).then(() => {
+            copyEvBtn.textContent = "Copied ✓";
+            setTimeout(() => { copyEvBtn.textContent = "Copy command"; }, 1100);
+            toast("Command copied.");
+          }).catch(() => {});
+        }
+      }
+    });
+    eventDialog.addEventListener("close", () => {
+      closeEventPopup({ fromNativeClose: true });
+    });
+  }
 
   document.querySelector(".tbl thead").addEventListener("click", (e) => {
     const btn = e.target.closest("[data-sort]");
@@ -1655,7 +2404,7 @@
     const k = btn.dataset.sort;
     if (state.sortKey === k) state.sortDir = state.sortDir === "desc" ? "asc" : "desc";
     else { state.sortKey = k; state.sortDir = k === "ts" || k === "severity" ? "desc" : "asc"; }
-    render();
+    render({ skipExplorer: true });
   });
 
   document.querySelector(".statusbar").addEventListener("click", (e) => {
@@ -1664,7 +2413,7 @@
     const sev = btn.dataset.quickSev;
     state.filterSev = state.filterSev === sev ? "" : sev;
     el("severity").value = state.filterSev;
-    render();
+    render({ skipExplorer: true });
   });
 
   document.querySelector(".detail-tabs").addEventListener("click", (e) => {
@@ -1672,39 +2421,60 @@
     if (!btn) return;
     state.detailTab = btn.dataset.dtab;
     const pool = allMergedRecords();
-    renderDetails(pool.find((r) => r.key === state.selectedKey) || null, pool);
+    renderDetails(getRecordByKey(state.selectedKey), pool);
   });
 
   el("details").addEventListener("click", (e) => {
+    const zoomBtn = e.target.closest("[data-zoom-src]");
+    if (zoomBtn) {
+      openImageZoom(zoomBtn.dataset.zoomSrc, zoomBtn.dataset.zoomLabel, zoomBtn.dataset.zoomSource);
+      return;
+    }
+    const fileBtn = e.target.closest("[data-scope-file]");
+    if (fileBtn) {
+      state.scopeFile = state.scopeFile === fileBtn.dataset.scopeFile ? "" : fileBtn.dataset.scopeFile;
+      render();
+      return;
+    }
     const jump = e.target.closest("[data-jump]");
     if (jump) {
-      state.selectedKey = jump.dataset.jump;
       state.detailTab = "general";
-      render();
-      tbody.querySelector(`tr[data-key="${CSS.escape(state.selectedKey)}"]`)?.scrollIntoView({ block: "nearest" });
+      if (tbody.querySelector(`tr[data-key="${CSS.escape(jump.dataset.jump)}"]`)) {
+        selectRowKey(jump.dataset.jump, { scrollIntoView: true });
+      } else {
+        state.selectedKey = jump.dataset.jump;
+        render({ skipExplorer: true });
+        tbody.querySelector(`tr[data-key="${CSS.escape(state.selectedKey)}"]`)?.scrollIntoView({ block: "nearest" });
+      }
       return;
     }
     const act = e.target.closest("[data-act]");
     if (!act) return;
     const kind = act.dataset.act;
-    if (kind === "ack") ackAlert(act.dataset.id);
+    if (kind === "open-popup") {
+      if (state.selectedKey) openEventPopup(state.selectedKey, act);
+    } else if (kind === "ack") ackAlert(act.dataset.id);
     else if (kind === "incident") openIncident(act.dataset.id);
     else if (kind === "scope-host") { state.scopeHost = act.dataset.val; render(); }
     else if (kind === "scope-agent") { state.scopeAgent = act.dataset.val; render(); }
     else if (kind === "scope-ws") { state.scopeWorkspace = act.dataset.val; render(); }
     else if (kind === "copy-json") {
-      const it = allMergedRecords().find((r) => r.key === state.selectedKey);
+      const it = getRecordByKey(state.selectedKey);
       if (it) navigator.clipboard?.writeText(JSON.stringify(it, null, 2)).then(() => {
         act.classList.add("copied");
         setTimeout(() => act.classList.remove("copied"), 1100);
         toast("Event JSON copied.");
       }).catch(() => {});
-    } else if (kind === "copy-cmd") {
-      const it = allMergedRecords().find((r) => r.key === state.selectedKey);
-      if (it && it.command) navigator.clipboard?.writeText(it.command).then(() => {
+    } else if (kind === "copy-cmd" || kind === "copy-ev-cmd") {
+      const it = getRecordByKey(act.dataset.evKey || state.selectedKey);
+      const evId = getEvidenceEventId(it);
+      const ev = evId && state.org ? state.evidenceCache.get(`${state.org.id}:${evId}`) : null;
+      const txt = (ev && ev.command_input) || (it && it.command) || "";
+      if (txt) navigator.clipboard?.writeText(txt).then(() => {
         act.classList.add("copied");
+        const prev = act.textContent;
         act.textContent = "Copied ✓";
-        setTimeout(() => { act.classList.remove("copied"); act.textContent = "Copy"; }, 1100);
+        setTimeout(() => { act.classList.remove("copied"); act.textContent = prev; }, 1100);
         toast("Command copied.");
       }).catch(() => {});
     }
@@ -1713,20 +2483,20 @@
   el("search").addEventListener("input", (e) => {
     state.search = e.target.value;
     clearTimeout(state.searchDebounce);
-    state.searchDebounce = setTimeout(render, 80);
+    state.searchDebounce = setTimeout(() => render({ skipExplorer: true, skipDetailsIfSame: true }), 15);
   });
-  el("window").addEventListener("change", (e) => { state.windowSec = e.target.value; render(); });
-  el("severity").addEventListener("change", (e) => { state.filterSev = e.target.value; render(); });
-  el("kind").addEventListener("change", (e) => { state.filterKind = e.target.value; render(); });
-  el("category").addEventListener("change", (e) => { state.filterCat = e.target.value; render(); });
-  el("status").addEventListener("change", (e) => { state.filterStatus = e.target.value; render(); });
-  el("group-mode").addEventListener("change", (e) => { state.groupMode = e.target.value; render(); });
+  el("window").addEventListener("change", (e) => { state.windowSec = e.target.value; render({ skipExplorer: true }); });
+  el("severity").addEventListener("change", (e) => { state.filterSev = e.target.value; render({ skipExplorer: true }); });
+  el("kind").addEventListener("change", (e) => { state.filterKind = e.target.value; render({ skipExplorer: true }); });
+  el("category").addEventListener("change", (e) => { state.filterCat = e.target.value; render({ skipExplorer: true }); });
+  el("status").addEventListener("change", (e) => { state.filterStatus = e.target.value; render({ skipExplorer: true }); });
+  el("group-mode").addEventListener("change", (e) => { state.groupMode = e.target.value; render({ skipExplorer: true }); });
 
   el("tint-btn").addEventListener("click", (e) => {
     state.rowTint = !state.rowTint;
     e.currentTarget.classList.toggle("active", state.rowTint);
     e.currentTarget.setAttribute("aria-pressed", String(state.rowTint));
-    render();
+    appEl.classList.toggle("row-tint", state.rowTint);
   });
 
   function applyDensity(comfortable) {
@@ -1738,12 +2508,12 @@
       btn.setAttribute("aria-pressed", String(state.comfortable));
     }
     try { localStorage.setItem("sc_live_density", state.comfortable ? "comfortable" : "compact"); } catch {}
-    render();
+    appEl.classList.toggle("comfortable", state.comfortable);
   }
   el("density-btn")?.addEventListener("click", () => applyDensity(!state.comfortable));
 
   el("ack-selected").addEventListener("click", () => {
-    const it = allMergedRecords().find((r) => r.key === state.selectedKey);
+    const it = getRecordByKey(state.selectedKey);
     if (it && it.canAck) ackAlert(it.rawId);
   });
   el("export-csv").addEventListener("click", exportCsv);
@@ -1826,14 +2596,15 @@
       { cat: "View", label: "All Live Stream", hint: "Reset scope", run: () => resetAllFilters() },
       { cat: "View", label: "Agent Work (All)", hint: "Perspective", run: () => { state.perspective = "agent_work"; render(); } },
       { cat: "View", label: "File Edits Only", hint: "Perspective", run: () => { state.perspective = "file_edits"; render(); } },
+      { cat: "View", label: "Files & Media", hint: "Perspective", run: () => { state.perspective = "files_touched"; render(); } },
       { cat: "View", label: "Commands & Tests", hint: "Perspective", run: () => { state.perspective = "shell_cmds"; render(); } },
       { cat: "View", label: "Open Alerts", hint: "Perspective", run: () => { state.perspective = "open_alerts"; render(); } },
       { cat: "View", label: "Critical & Warning", hint: "Perspective", run: () => { state.perspective = "crit_warn"; render(); } },
       { cat: "View", label: "Collaboration Tasks", hint: "Perspective", run: () => { state.perspective = "collab"; render(); } },
-      { cat: "Group", label: "Group by Severity (SCOM)", hint: "Grouping", run: () => { state.groupMode = "severity"; el("group-mode").value = "severity"; render(); } },
-      { cat: "Group", label: "Group by Agent", hint: "Grouping", run: () => { state.groupMode = "agent"; el("group-mode").value = "agent"; render(); } },
-      { cat: "Group", label: "Group by Workspace", hint: "Grouping", run: () => { state.groupMode = "workspace"; el("group-mode").value = "workspace"; render(); } },
-      { cat: "Group", label: "Flat Timeline", hint: "Grouping", run: () => { state.groupMode = "none"; el("group-mode").value = "none"; render(); } },
+      { cat: "Group", label: "Group by Severity (SCOM)", hint: "Grouping", run: () => { state.groupMode = "severity"; el("group-mode").value = "severity"; render({ skipExplorer: true }); } },
+      { cat: "Group", label: "Group by Agent", hint: "Grouping", run: () => { state.groupMode = "agent"; el("group-mode").value = "agent"; render({ skipExplorer: true }); } },
+      { cat: "Group", label: "Group by Workspace", hint: "Grouping", run: () => { state.groupMode = "workspace"; el("group-mode").value = "workspace"; render({ skipExplorer: true }); } },
+      { cat: "Group", label: "Flat Timeline", hint: "Grouping", run: () => { state.groupMode = "none"; el("group-mode").value = "none"; render({ skipExplorer: true }); } },
       { cat: "Action", label: state.paused ? "Resume Live Display" : "Pause Display (Buffer New)", hint: "P", run: () => togglePause() },
       { cat: "Action", label: state.comfortable ? "Switch to Compact Density" : "Switch to Comfortable Density", hint: "D", run: () => applyDensity(!state.comfortable) },
       { cat: "Action", label: "Export Filtered CSV", hint: "CSV", run: () => exportCsv() },
@@ -1911,6 +2682,10 @@
 
   el("pause").addEventListener("click", togglePause);
   el("load-older")?.addEventListener("click", loadOlderHistory);
+  el("show-more-rows")?.addEventListener("click", () => {
+    state.renderLimit += 200;
+    render({ skipExplorer: true, skipDetails: true });
+  });
   el("refresh").addEventListener("click", () => {
     if (state.paused) togglePause();
     poll(true);
@@ -1953,7 +2728,13 @@
   });
 
   document.addEventListener("keydown", (e) => {
-    if (caseDialog.open) return;
+    if (state.zoomOverlay && e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeImageZoom();
+      return;
+    }
+    if (caseDialog.open || (eventDialog && eventDialog.open)) return;
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
       if (state.cmdkOpen) closeCmdk();
@@ -1968,17 +2749,25 @@
     const typing = tag === "input" || tag === "textarea" || tag === "select";
     if (e.key === "/" && !typing) { e.preventDefault(); el("search").focus(); return; }
     if (typing) return;
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      const list = getFiltered(allMergedRecords());
-      if (!list.length) return;
+    if (e.key === "Enter" && state.selectedKey && tag !== "button" && tag !== "a") {
+      const focusedRow = e.target.closest?.("tr[data-key]") || tbody.querySelector(`tr[data-key="${CSS.escape(state.selectedKey)}"]`);
       e.preventDefault();
-      const idx = list.findIndex((r) => r.key === state.selectedKey);
-      const next = e.key === "ArrowDown" ? Math.min(list.length - 1, idx + 1) : Math.max(0, idx - 1);
-      state.selectedKey = list[next].key;
-      render();
-      tbody.querySelector(`tr[data-key="${CSS.escape(state.selectedKey)}"]`)?.scrollIntoView({ block: "nearest" });
+      openEventPopup(state.selectedKey, focusedRow);
+      return;
+    }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      const visibleRows = [...tbody.querySelectorAll("tr[data-key]")];
+      if (!visibleRows.length) return;
+      e.preventDefault();
+      const idx = visibleRows.findIndex((tr) => tr.dataset.key === state.selectedKey);
+      const next = e.key === "ArrowDown" ? Math.min(visibleRows.length - 1, idx + 1) : Math.max(0, idx - 1);
+      const targetRow = visibleRows[next];
+      if (targetRow) {
+        selectRowKey(targetRow.dataset.key, { scrollIntoView: true });
+        targetRow.focus({ preventScroll: true });
+      }
     } else if (e.key === "a" || e.key === "A") {
-      const it = allMergedRecords().find((r) => r.key === state.selectedKey);
+      const it = getRecordByKey(state.selectedKey);
       if (it && it.canAck) ackAlert(it.rawId);
     } else if (e.key === "p" || e.key === "P") {
       togglePause();
@@ -2015,6 +2804,9 @@
     }
   }
 
-  window.addEventListener("focus", () => { if (!state.paused) poll(false); });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && !state.paused) poll(false);
+  });
+  window.addEventListener("focus", () => { if (!state.paused && !document.hidden) poll(false); });
   boot();
 })();

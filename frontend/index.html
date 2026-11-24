@@ -200,7 +200,11 @@
 
         <div class="grid-2">
           <section class="card" id="alerts" aria-labelledby="alerts-heading">
-            <div class="card-head"><h2 id="alerts-heading">Alerts</h2>
+            <div class="card-head">
+              <div>
+                <h2 id="alerts-heading">Alerts</h2>
+                <p class="section-lead">Active guardrail warnings that need an operator to acknowledge or resolve.</p>
+              </div>
               <label class="sr-only" for="alert-filter">Filter alerts</label>
               <select id="alert-filter" class="select"><option value="ACTIVE">Active incidents</option><option value="OPEN">Awaiting acknowledgement</option><option value="ALL">All alerts</option></select>
             </div>
@@ -208,212 +212,278 @@
           </section>
 
           <section class="card" id="enrollment" aria-labelledby="enrollment-heading">
-            <div class="card-head">
-              <div>
-                <h2 id="enrollment-heading">Install &amp; enroll a host</h2>
-                <p class="muted small card-sub">Service URL installer for Linux, macOS, Windows/WSL, or repository CLI.</p>
-              </div>
-            </div>
-
-            <div id="enrollment-readonly-note" class="notice-box hidden">
-              <p class="muted small">Token creation and revocation require the <strong>admin</strong> role. Ask an organization admin to generate a host enrollment command.</p>
-            </div>
-
-            <form id="token-form" class="enroll-form">
-              <div class="form-grid-2">
-                <div>
-                  <label for="token-name">Host or token label</label>
-                  <input id="token-name" name="host" type="text" required maxlength="80" placeholder="e.g. build-mac-01">
+            <details class="section-fold" id="enrollment-fold">
+              <summary class="section-fold-summary">
+                <div class="section-fold-title">
+                  <span class="section-fold-caret" aria-hidden="true">▸</span>
+                  <div>
+                    <h2 id="enrollment-heading">Install &amp; enroll a host</h2>
+                    <p class="section-lead">Create a single-host token and copy the installer command to connect a new machine.</p>
+                  </div>
                 </div>
-                <div>
-                  <label for="token-scope">Token scope</label>
-                  <select id="token-scope" name="scope" class="select full-select">
-                    <option value="ingest">Host observer (ingest)</option>
-                    <option value="read">Read-only API (read)</option>
-                  </select>
+                <span class="section-fold-cue">Expand</span>
+              </summary>
+              <div class="section-fold-body">
+                <div id="enrollment-readonly-note" class="notice-box hidden">
+                  <p class="muted small">Token creation and revocation require the <strong>admin</strong> role. Ask an organization admin to generate a host enrollment command.</p>
                 </div>
-              </div>
-              <div id="activity-roots-wrap">
-                <label for="token-activity-roots">Opt-in activity folders <span class="muted small">(optional, off by default)</span></label>
-                <input id="token-activity-roots" name="activity_roots" type="text" placeholder="e.g. /home/dev/project-a:/home/dev/project-b">
-                <p class="muted small field-hint">Activity shipping stays off unless you list folders here. Paths are redacted locally before upload.</p>
-              </div>
-              <div class="form-actions">
-                <button type="submit" class="btn primary">Generate token &amp; installer</button>
-              </div>
-            </form>
-            <div id="token-error" class="error-text hidden" role="alert"></div>
 
-            <div id="install-output" class="install-box hidden">
-              <div class="install-box-head">
-                <strong id="install-output-title">Run on the host you want to monitor.</strong>
-                <button id="copy-cmd-btn" type="button" class="btn small secondary">Copy</button>
-              </div>
-              <div id="install-platform-tabs" class="sub-tabs" role="tablist" aria-label="Installer platform">
-                <button type="button" class="sub-tab active" role="tab" aria-selected="true" data-platform="unix">Linux / macOS / WSL</button>
-                <button type="button" class="sub-tab" role="tab" aria-selected="false" data-platform="windows">Windows PowerShell</button>
-                <button type="button" class="sub-tab" role="tab" aria-selected="false" data-platform="repo">Repo / Preview CLI</button>
-                <button type="button" class="sub-tab" role="tab" aria-selected="false" data-platform="docker">Self-host Docker</button>
-              </div>
-              <pre id="install-cmd" tabindex="0" aria-label="Installation command"></pre>
-              <p id="install-cmd-note" class="muted small">Save this command now. The single-host token is shown only once.</p>
-            </div>
+                <form id="token-form" class="enroll-form">
+                  <div class="form-grid-2">
+                    <div>
+                      <label for="token-name">Host or token label</label>
+                      <input id="token-name" name="host" type="text" required maxlength="80" placeholder="e.g. build-mac-01">
+                    </div>
+                    <div>
+                      <label for="token-scope">Token scope</label>
+                      <select id="token-scope" name="scope" class="select full-select">
+                        <option value="ingest">Host observer (ingest)</option>
+                        <option value="read">Read-only API (read)</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div id="activity-roots-wrap">
+                    <label for="token-activity-roots">Opt-in activity folders <span class="muted small">(optional, off by default)</span></label>
+                    <input id="token-activity-roots" name="activity_roots" type="text" placeholder="e.g. /home/dev/project-a:/home/dev/project-b">
+                    <p class="muted small field-hint">Activity shipping stays off unless you list folders here. Paths are redacted locally before upload.</p>
+                  </div>
+                  <div class="form-actions">
+                    <button type="submit" class="btn primary">Generate token &amp; installer</button>
+                  </div>
+                </form>
+                <div id="token-error" class="error-text hidden" role="alert"></div>
 
-            <h3 class="sub-heading">Active &amp; revoked tokens</h3>
-            <div id="tokens-list" class="stack small-gap"></div>
+                <div id="install-output" class="install-box hidden">
+                  <div class="install-box-head">
+                    <strong id="install-output-title">Run on the host you want to monitor.</strong>
+                    <button id="copy-cmd-btn" type="button" class="btn small secondary">Copy</button>
+                  </div>
+                  <div id="install-platform-tabs" class="sub-tabs" role="tablist" aria-label="Installer platform">
+                    <button type="button" class="sub-tab active" role="tab" aria-selected="true" data-platform="unix">Linux / macOS / WSL</button>
+                    <button type="button" class="sub-tab" role="tab" aria-selected="false" data-platform="windows">Windows PowerShell</button>
+                    <button type="button" class="sub-tab" role="tab" aria-selected="false" data-platform="repo">Repo / Preview CLI</button>
+                    <button type="button" class="sub-tab" role="tab" aria-selected="false" data-platform="docker">Self-host Docker</button>
+                  </div>
+                  <pre id="install-cmd" tabindex="0" aria-label="Installation command"></pre>
+                  <p id="install-cmd-note" class="muted small">Save this command now. The single-host token is shown only once.</p>
+                </div>
+
+                <h3 class="sub-heading">Active &amp; revoked tokens</h3>
+                <div id="tokens-list" class="stack small-gap"></div>
+              </div>
+            </details>
           </section>
         </div>
 
         <section class="card" id="agent-work" aria-labelledby="agent-work-heading">
-          <div class="card-head"><h2 id="agent-work-heading">Agent work</h2><span class="muted small">Collaboration by change, reported plans, results, and workspace evidence</span></div>
+          <div class="card-head">
+            <div>
+              <h2 id="agent-work-heading">Agent work</h2>
+              <p class="section-lead">Assigned tasks, handoffs between agents, and workspace file updates grouped by change.</p>
+            </div>
+          </div>
           <div id="work-board">Loading workspace evidence…</div>
         </section>
 
         <section class="card" id="hosts" aria-labelledby="hosts-heading">
-          <div class="card-head"><h2 id="hosts-heading">Enrolled hosts</h2><span class="muted small">Processes, detected runtimes, and working folders</span></div>
+          <div class="card-head">
+            <div>
+              <h2 id="hosts-heading">Enrolled hosts</h2>
+              <p class="section-lead">Connected machines, their CPU and memory usage, and the agent runtimes detected on each host.</p>
+            </div>
+          </div>
           <div id="hosts-list" class="hosts-grid"></div>
         </section>
 
         <div class="grid-2">
           <section class="card" id="organization" aria-labelledby="org-heading">
-            <div class="card-head">
-              <div>
-                <h2 id="org-heading">Organization &amp; roles</h2>
-                <p class="muted small card-sub">Manage team memberships, role permissions, and single-use invitations.</p>
-              </div>
-              <span id="org-section-badge" class="pill neutral">TENANT</span>
-            </div>
-
-            <div id="org-memberships-box" class="notice-box hidden">
-              <div class="inline-between">
-                <span class="small"><strong>Your organizations:</strong> <span id="org-memberships-summary"></span></span>
-              </div>
-            </div>
-
-            <div id="org-nonadmin-note" class="notice-box hidden">
-              <p class="small">You have the <strong id="nonadmin-role-label"></strong> role in this organization.</p>
-              <ul class="role-matrix muted small">
-                <li><strong>Viewer:</strong> Read hosts, overview, activity map, alerts, events, and work reports.</li>
-                <li><strong>Operator:</strong> Viewer access plus acknowledging guardrail alerts.</li>
-                <li><strong>Admin:</strong> Full access including tokens, members, invitations, and audit trail.</li>
-              </ul>
-            </div>
-
-            <div id="org-admin-panel" class="hidden">
-              <h3 class="sub-heading">Members</h3>
-              <div id="members-error" class="error-text hidden" role="alert"></div>
-              <div id="members-list" class="stack small-gap"></div>
-
-              <h3 class="sub-heading">Invite a teammate</h3>
-              <form id="invite-create-form" class="enroll-form">
-                <div class="form-grid-2">
+            <details class="section-fold" id="organization-fold">
+              <summary class="section-fold-summary">
+                <div class="section-fold-title">
+                  <span class="section-fold-caret" aria-hidden="true">▸</span>
                   <div>
-                    <label for="invite-username">Username to invite</label>
-                    <input id="invite-username" name="username" type="text" required minlength="3" maxlength="128" placeholder="jamie.dev">
-                  </div>
-                  <div>
-                    <label for="invite-role">Role</label>
-                    <select id="invite-role" name="role" class="select full-select">
-                      <option value="viewer">Viewer (read-only)</option>
-                      <option value="operator">Operator (ack alerts)</option>
-                      <option value="admin">Admin (full control)</option>
-                    </select>
+                    <h2 id="org-heading">Organization &amp; roles</h2>
+                    <p class="section-lead">Manage who belongs to this organization, change roles, or create 48-hour invitations.</p>
                   </div>
                 </div>
-                <div class="form-actions">
-                  <button type="submit" class="btn primary">Create 48h invitation</button>
+                <span class="section-fold-meta">
+                  <span id="org-section-badge" class="pill neutral">TENANT</span>
+                  <span class="section-fold-cue">Expand</span>
+                </span>
+              </summary>
+              <div class="section-fold-body">
+                <div id="org-memberships-box" class="notice-box hidden">
+                  <div class="inline-between">
+                    <span class="small"><strong>Your organizations:</strong> <span id="org-memberships-summary"></span></span>
+                  </div>
                 </div>
-              </form>
-              <div id="invite-create-error" class="error-text hidden" role="alert"></div>
 
-              <div id="invite-created-box" class="install-box hidden">
-                <div class="install-box-head">
-                  <strong>Share this invitation link privately (single-use, expires in 48h).</strong>
-                  <button id="copy-invite-btn" type="button" class="btn small secondary">Copy link</button>
+                <div id="org-nonadmin-note" class="notice-box hidden">
+                  <p class="small">You have the <strong id="nonadmin-role-label"></strong> role in this organization.</p>
+                  <ul class="role-matrix muted small">
+                    <li><strong>Viewer:</strong> Read hosts, overview, activity map, alerts, events, and work reports.</li>
+                    <li><strong>Operator:</strong> Viewer access plus acknowledging guardrail alerts.</li>
+                    <li><strong>Admin:</strong> Full access including tokens, members, invitations, and audit trail.</li>
+                  </ul>
                 </div>
-                <pre id="invite-created-link" tabindex="0" aria-label="Invitation link"></pre>
-                <p class="muted small">Raw token: <code id="invite-created-token"></code></p>
+
+                <div id="org-admin-panel" class="hidden">
+                  <h3 class="sub-heading">Members</h3>
+                  <div id="members-error" class="error-text hidden" role="alert"></div>
+                  <div id="members-list" class="stack small-gap"></div>
+
+                  <h3 class="sub-heading">Invite a teammate</h3>
+                  <form id="invite-create-form" class="enroll-form">
+                    <div class="form-grid-2">
+                      <div>
+                        <label for="invite-username">Username to invite</label>
+                        <input id="invite-username" name="username" type="text" required minlength="3" maxlength="128" placeholder="jamie.dev">
+                      </div>
+                      <div>
+                        <label for="invite-role">Role</label>
+                        <select id="invite-role" name="role" class="select full-select">
+                          <option value="viewer">Viewer (read-only)</option>
+                          <option value="operator">Operator (ack alerts)</option>
+                          <option value="admin">Admin (full control)</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div class="form-actions">
+                      <button type="submit" class="btn primary">Create 48h invitation</button>
+                    </div>
+                  </form>
+                  <div id="invite-create-error" class="error-text hidden" role="alert"></div>
+
+                  <div id="invite-created-box" class="install-box hidden">
+                    <div class="install-box-head">
+                      <strong>Share this invitation link privately (single-use, expires in 48h).</strong>
+                      <button id="copy-invite-btn" type="button" class="btn small secondary">Copy link</button>
+                    </div>
+                    <pre id="invite-created-link" tabindex="0" aria-label="Invitation link"></pre>
+                    <p class="muted small">Raw token: <code id="invite-created-token"></code></p>
+                  </div>
+
+                  <h3 class="sub-heading">Invitations</h3>
+                  <div id="invitations-list" class="stack small-gap"></div>
+                </div>
               </div>
-
-              <h3 class="sub-heading">Invitations</h3>
-              <div id="invitations-list" class="stack small-gap"></div>
-            </div>
+            </details>
           </section>
 
           <section class="card" id="security" aria-labelledby="security-heading">
-            <div class="card-head">
-              <div>
-                <h2 id="security-heading">Account &amp; 2FA security</h2>
-                <p class="muted small card-sub">Authenticator-app TOTP protection and identity provider status.</p>
-              </div>
-              <span id="mfa-status-badge" class="pill waiting">2FA OFF</span>
-            </div>
-
-            <div class="notice-box">
-              <div class="small"><strong>Identity provider:</strong> Local multi-tenant credentials (WorkOS / OIDC adapter ready).</div>
-              <p class="muted small" style="margin:4px 0 0;">Sessions use HttpOnly same-origin cookies scoped to your active organization.</p>
-            </div>
-
-            <div id="mfa-setup-section" class="stack small-gap">
-              <h3 class="sub-heading">Enable two-factor authentication (TOTP)</h3>
-              <form id="mfa-start-form" class="enroll-form">
-                <label for="mfa-start-password">Confirm current password</label>
-                <div class="inline-form">
-                  <input id="mfa-start-password" type="password" autocomplete="current-password" required placeholder="Current password">
-                  <button type="submit" class="btn primary">Generate secret</button>
-                </div>
-              </form>
-
-              <div id="mfa-confirm-box" class="install-box hidden">
-                <div class="install-box-head">
-                  <strong>Add this secret to your authenticator app</strong>
-                  <button id="copy-mfa-secret-btn" type="button" class="btn small secondary">Copy secret</button>
-                </div>
-                <pre id="mfa-secret-code" tabindex="0" aria-label="TOTP setup secret"></pre>
-                <p class="muted small">OTPAuth URI: <code id="mfa-otpauth-uri"></code></p>
-                <form id="mfa-confirm-form" class="enroll-form small-gap">
-                  <label for="mfa-confirm-otp">Enter 6-digit verification code</label>
-                  <div class="inline-form">
-                    <input id="mfa-confirm-otp" type="text" inputmode="numeric" pattern="[0-9]{6}" required placeholder="123456">
-                    <button type="submit" class="btn primary">Verify &amp; enable 2FA</button>
-                  </div>
-                </form>
-              </div>
-            </div>
-
-            <div id="mfa-disable-section" class="stack small-gap hidden">
-              <h3 class="sub-heading">Two-factor authentication is active</h3>
-              <p class="muted small">Your account requires a 6-digit authenticator code on sign-in. To disable it, confirm your password and a current code.</p>
-              <form id="mfa-disable-form" class="enroll-form">
-                <div class="form-grid-2">
+            <details class="section-fold" id="security-fold">
+              <summary class="section-fold-summary">
+                <div class="section-fold-title">
+                  <span class="section-fold-caret" aria-hidden="true">▸</span>
                   <div>
-                    <label for="mfa-disable-password">Current password</label>
-                    <input id="mfa-disable-password" type="password" autocomplete="current-password" required>
-                  </div>
-                  <div>
-                    <label for="mfa-disable-otp">6-digit code</label>
-                    <input id="mfa-disable-otp" type="text" inputmode="numeric" pattern="[0-9]{6}" required placeholder="123456">
+                    <h2 id="security-heading">Account &amp; 2FA security</h2>
+                    <p class="section-lead">Protect your account with an authenticator app (2FA) and review sign-in session rules.</p>
                   </div>
                 </div>
-                <div class="form-actions">
-                  <button type="submit" class="btn danger">Disable 2FA</button>
+                <span class="section-fold-meta">
+                  <span id="mfa-status-badge" class="pill waiting">2FA OFF</span>
+                  <span class="section-fold-cue">Expand</span>
+                </span>
+              </summary>
+              <div class="section-fold-body">
+                <div class="notice-box">
+                  <div class="small"><strong>Identity provider:</strong> Local multi-tenant credentials (WorkOS / OIDC adapter ready).</div>
+                  <p class="muted small" style="margin:4px 0 0;">Sessions use HttpOnly same-origin cookies scoped to your active organization.</p>
                 </div>
-              </form>
-            </div>
 
-            <div id="mfa-error" class="error-text hidden" role="alert"></div>
+                <div id="mfa-setup-section" class="stack small-gap">
+                  <h3 class="sub-heading">Enable two-factor authentication (TOTP)</h3>
+                  <form id="mfa-start-form" class="enroll-form">
+                    <label for="mfa-start-password">Confirm current password</label>
+                    <div class="inline-form">
+                      <input id="mfa-start-password" type="password" autocomplete="current-password" required placeholder="Current password">
+                      <button type="submit" class="btn primary">Generate secret</button>
+                    </div>
+                  </form>
+
+                  <div id="mfa-confirm-box" class="install-box hidden">
+                    <div class="install-box-head">
+                      <strong>Add this secret to your authenticator app</strong>
+                      <button id="copy-mfa-secret-btn" type="button" class="btn small secondary">Copy secret</button>
+                    </div>
+                    <pre id="mfa-secret-code" tabindex="0" aria-label="TOTP setup secret"></pre>
+                    <p class="muted small">OTPAuth URI: <code id="mfa-otpauth-uri"></code></p>
+                    <form id="mfa-confirm-form" class="enroll-form small-gap">
+                      <label for="mfa-confirm-otp">Enter 6-digit verification code</label>
+                      <div class="inline-form">
+                        <input id="mfa-confirm-otp" type="text" inputmode="numeric" pattern="[0-9]{6}" required placeholder="123456">
+                        <button type="submit" class="btn primary">Verify &amp; enable 2FA</button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+
+                <div id="mfa-disable-section" class="stack small-gap hidden">
+                  <h3 class="sub-heading">Two-factor authentication is active</h3>
+                  <p class="muted small">Your account requires a 6-digit authenticator code on sign-in. To disable it, confirm your password and a current code.</p>
+                  <form id="mfa-disable-form" class="enroll-form">
+                    <div class="form-grid-2">
+                      <div>
+                        <label for="mfa-disable-password">Current password</label>
+                        <input id="mfa-disable-password" type="password" autocomplete="current-password" required>
+                      </div>
+                      <div>
+                        <label for="mfa-disable-otp">6-digit code</label>
+                        <input id="mfa-disable-otp" type="text" inputmode="numeric" pattern="[0-9]{6}" required placeholder="123456">
+                      </div>
+                    </div>
+                    <div class="form-actions">
+                      <button type="submit" class="btn danger">Disable 2FA</button>
+                    </div>
+                  </form>
+                </div>
+
+                <div id="mfa-error" class="error-text hidden" role="alert"></div>
+              </div>
+            </details>
           </section>
         </div>
 
         <div class="grid-2">
           <section class="card" id="events" aria-labelledby="events-heading">
-            <div class="card-head"><h2 id="events-heading">Recent events</h2></div>
-            <div id="events-list" class="stack"></div>
+            <details class="section-fold" id="events-fold">
+              <summary class="section-fold-summary">
+                <div class="section-fold-title">
+                  <span class="section-fold-caret" aria-hidden="true">▸</span>
+                  <div>
+                    <h2 id="events-heading">Recent events</h2>
+                    <p class="section-lead">Latest recorded steps and alerts; use Live Events for full search, filters, and evidence.</p>
+                  </div>
+                </div>
+                <span class="section-fold-cue">Expand</span>
+              </summary>
+              <div class="section-fold-body">
+                <div class="section-fold-toolbar">
+                  <a href="/live" class="btn small primary">Open Live Events (/live) ↗</a>
+                </div>
+                <div id="events-list" class="stack"></div>
+              </div>
+            </details>
           </section>
           <section class="card" id="audit" aria-labelledby="audit-heading">
-            <div class="card-head card-head-title"><h2 id="audit-heading">Audit trail</h2>
-              <span id="audit-integrity-badge" class="pill waiting" title="Audit chain integrity">VERIFYING</span></div>
-            <div id="audit-list" class="stack"></div>
+            <details class="section-fold" id="audit-fold">
+              <summary class="section-fold-summary">
+                <div class="section-fold-title">
+                  <span class="section-fold-caret" aria-hidden="true">▸</span>
+                  <div>
+                    <h2 id="audit-heading">Audit trail</h2>
+                    <p class="section-lead">Tamper-evident record of sign-ins, token changes, and administrative actions.</p>
+                  </div>
+                </div>
+                <span class="section-fold-meta">
+                  <span id="audit-integrity-badge" class="pill waiting" title="Audit chain integrity">VERIFYING</span>
+                  <span class="section-fold-cue">Expand</span>
+                </span>
+              </summary>
+              <div class="section-fold-body">
+                <div id="audit-list" class="stack"></div>
+              </div>
+            </details>
           </section>
         </div>
       </main>
