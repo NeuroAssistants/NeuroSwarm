@@ -112,7 +112,8 @@ class Lab:
         ids["a"] = self.agent_commit("sess-a", BASE + 20, "A adds three lines", "app.py")
         p = self.repo / "app.py"
         lines = p.read_text().splitlines()
-        p.write_text("\n".join(["a ONE changed" if x == "a one" else x for x in lines if x != "a two"]) + "\n")
+        kept = ["a ONE changed" if x == "a one" else x for x in lines if x != "a two"]
+        p.write_text("\n".join(["# header 1", "# header 2"] + kept) + "\n")   # numbers below shift by 2
         git(self.repo, "commit", "-qam", "human edits A's lines", at=BASE + 30)
         # B and C edit shared.py concurrently; B commits both changes, C never commits.
         self.edit("sess-b", BASE + 40, "shared.py", ["b line"])
@@ -127,6 +128,18 @@ class Lab:
         self.edit("sess-e", BASE + 80, ".env", ["TOKEN=y"])
         ids["e"] = self.agent_commit("sess-e", BASE + 85, "E touches env", ".env")
         return ids
+
+
+def line_of(repo: Path, name: str, text: str) -> int:
+    """Independent check: the 1-based line number of `text` in the file at HEAD, read with plain Git (not blame)."""
+    lines = git(repo, "show", f"HEAD:{name}").splitlines()
+    hits = [i + 1 for i, line in enumerate(lines) if text in line]
+    assert len(hits) == 1, (name, text, hits)
+    return hits[0]
+
+
+ITEM_KEYS = {"sha", "path", "added", "surviving", "exists", "commit_time", "prev_time", "head", "measured_at",
+             "repo_path", "ranges", "ranges_truncated", "too_large"}
 
 
 def edits(conn, session):
@@ -203,6 +216,78 @@ class LocalJournalTests(unittest.TestCase):
         self.assertEqual(self.detail("sess-a")["files"][0]["status"], "not_shared")
 
 
+    def measure_again(self):
+        ai._SURVIVAL_LAST.clear()
+        wj.capture_once(self.conn, {"shop"}, self.lab.repo, time.time(), None, self.scope)
+
+    def test_which_lines_remain_are_named_by_their_number_at_the_measured_revision(self):
+        f = self.detail("sess-a")["files"][0]
+        n = line_of(self.lab.repo, "app.py", SECRET_LINE)
+        self.assertEqual(n, 6, "two lines inserted above moved it from 5 to 6")
+        self.assertEqual((f["ranges"], f["ranges_truncated"], f["repo_path"]), ([[n, n]], False, "app.py"))
+        self.assertEqual(f["head_commit"], git(self.lab.repo, "rev-parse", "HEAD").strip())
+        blame = git(self.lab.repo, "blame", "-M", "-l", "-L", f"{n},{n}", f["head_commit"], "--", "app.py")
+        self.assertTrue(blame.startswith(git(self.lab.repo, "rev-parse", self.ids["a"]).strip()),
+                        "the shown command confirms the line comes from the session's commit")
+        d2 = self.detail("sess-d", 1)["files"][0]
+        first = line_of(self.lab.repo, "late.py", "d second 1")
+        self.assertEqual(d2["ranges"], [[first, first + 1]])
+
+    def test_a_later_edit_shifts_the_numbers_and_a_changed_line_leaves_the_list(self):
+        p = self.lab.repo / "late.py"
+        lines = p.read_text().splitlines()
+        p.write_text("\n".join(["# a", "# b", "# c"] + ["d second 1 CHANGED" if x == "d second 1" else x for x in lines]) + "\n")
+        git(self.lab.repo, "commit", "-qam", "human inserts three lines and changes one of D's", at=BASE + 100)
+        self.measure_again()
+        f = self.detail("sess-d", 1)["files"][0]
+        n = line_of(self.lab.repo, "late.py", "d second 2")
+        self.assertEqual((f["added"], f["surviving"], f["changed_or_removed"]), (2, 1, 1))
+        self.assertEqual(f["ranges"], [[n, n]], "only the unchanged line, at its new number")
+        self.assertEqual(f["head_commit"], git(self.lab.repo, "rev-parse", "HEAD").strip(), "measured at the new revision")
+
+    def test_a_deleted_file_names_no_line(self):
+        git(self.lab.repo, "rm", "-q", "late.py")
+        git(self.lab.repo, "commit", "-qm", "remove late.py", at=BASE + 110)
+        self.measure_again()
+        f = self.detail("sess-d", 1)["files"][0]
+        self.assertEqual((f["surviving"], f["file_exists"], f["ranges"]), (0, False, None))
+
+    def test_files_over_the_size_limit_are_reported_not_guessed(self):
+        with patch.object(ai, "SURVIVAL_MAX_BYTES", 10):
+            self.measure_again()
+        f = self.detail("sess-a")["files"][0]
+        self.assertEqual(f["status"], "too_large")
+        self.assertNotIn("ranges", f)
+        self.assertNotIn("surviving", f)
+
+    def test_measurements_from_an_older_observer_keep_their_counts_without_line_numbers(self):
+        row = self.conn.execute("SELECT * FROM line_survival WHERE path='shop/app.py' AND sha LIKE ?",
+                                (self.ids["a"] + "%",)).fetchone()
+        cols = [c[1] for c in self.conn.execute("PRAGMA table_info(line_survival)")]
+        old = dict(zip(cols, row))
+        item = {"sha": old["sha"], "head": old["head"], "path": str(self.lab.repo / "app.py"), "added": old["added"],
+                "surviving": old["surviving"], "exists": True, "commit_time": old["commit_time"],
+                "prev_time": old["prev_time"], "measured_at": time.time()}          # the first version's payload
+        with self.dbo.transaction() as conn:
+            line_survival.store(conn, "host-ls", [item], time.time(),
+                                lambda p: next(iter(line_survival.canonical_keys([p], project=self.lab.repo)), None))
+        f = self.detail("sess-a")["files"][0]
+        self.assertEqual((f["status"], f["surviving"], f["ranges"]), ("attributed", 1, None))
+
+    def test_inconsistent_line_numbers_are_dropped_rather_than_shown(self):
+        ok = line_survival.clean_ranges
+        self.assertEqual(ok([[6, 6]], 1, False), [[6, 6]])
+        self.assertIsNone(ok([[6, 7]], 1, False), "two lines for one surviving line")
+        self.assertIsNone(ok([[7, 7], [6, 6]], 2, False), "out of order")
+        self.assertIsNone(ok([[0, 1]], 2, False), "line 0")
+        self.assertIsNone(ok([[1, "2"]], 2, False), "not a number")
+        self.assertEqual(ok([[1, 2]], 5, True), [[1, 2]], "a truncated list may cover fewer lines")
+        self.assertIsNone(line_survival.clean_repo_path("../etc/passwd", "shop/passwd"))
+        self.assertIsNone(line_survival.clean_repo_path("/abs/app.py", "shop/app.py"))
+        self.assertIsNone(line_survival.clean_repo_path("other.py", "shop/app.py"), "must be the same file")
+        self.assertEqual(line_survival.clean_repo_path("sub/app.py", "shop/app.py"), "sub/app.py")
+
+
 class CollectorTests(unittest.TestCase):
     def test_only_a_successful_git_commit_output_is_evidence(self):
         out = "[main 1a2b3c4] Fix totals\n 1 file changed, 2 insertions(+)\n"
@@ -234,8 +319,8 @@ class CollectorTests(unittest.TestCase):
                 finally:
                     ai._CURRENT = None
             self.assertEqual([Path(i["path"]).name for i in items], ["in.py"])
-            self.assertEqual(set(items[0]), {"sha", "path", "added", "surviving", "exists", "commit_time", "prev_time",
-                                             "head", "measured_at"}, "numbers and identifiers only")
+            self.assertTrue(set(items[0]) <= ITEM_KEYS, "numbers and identifiers only")
+            self.assertEqual((items[0]["repo_path"], items[0]["ranges"]), ("shared/in.py", [[1, 1]]))
             self.assertFalse(marker.exists(), "repository settings did not run a program")
 
 
@@ -262,12 +347,13 @@ class RemoteAndAccessTests(ServerHarness):
     def test_remote_observer_gives_the_same_answer_and_sends_counts_only(self):
         self.assertNotIn(SECRET_LINE, json.dumps(self.payload))
         items = self.payload["line_survival"]
-        self.assertTrue(items and all(set(i) <= {"sha", "path", "added", "surviving", "exists", "commit_time",
-                                                 "prev_time", "head", "measured_at"} for i in items))
+        self.assertTrue(items and all(set(i) <= ITEM_KEYS for i in items))
         status, d, _ = self.req("GET", f"/api/v1/events/{self.ids['sess-a'][0][0]}/line-survival")
         self.assertEqual(status, 200, d)
         f, = d["files"]
         self.assertEqual((f["status"], f["added"], f["surviving"], f["changed_or_removed"]), ("attributed", 3, 1, 2))
+        self.assertEqual(f["ranges"], [[line_of(self.lab.repo, "app.py", SECRET_LINE)] * 2], "same lines as the local journal")
+        self.assertEqual(f["ranges"], [[6, 6]])
         self.assertEqual(self.req("GET", f"/api/v1/events/{self.ids['sess-b'][0][0]}/line-survival")[1]["files"][0]["status"],
                          "other_session")
         self.assertNotIn(str(self.lab.repo), json.dumps(d))

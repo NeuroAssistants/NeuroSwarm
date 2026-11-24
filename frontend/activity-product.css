@@ -195,3 +195,8 @@
 .am-survival-why { font-size: .86rem; }
 .am-survival-list p { margin: 0; }
 @media (forced-colors: active) { .am-survival-bar { border: 1px solid CanvasText; } .am-survival-bar span { background: Highlight; } }
+.am-survival-lines p { margin: 0; }
+.am-line-range { display: inline-block; font-family: var(--sc-mono); font-size: .82em; font-weight: 700; padding: 0 6px; margin: 1px 0; border-radius: 3px; color: var(--sc-ok-fg); background: var(--sc-ok-bg); }
+.am-verify summary { cursor: pointer; font-size: .84rem; color: var(--sc-action); }
+.am-verify pre { margin: 4px 0; padding: 6px 8px; font-family: var(--sc-mono); font-size: .78rem; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sc-inset); border-radius: 3px; }
+@media (forced-colors: active) { .am-line-range { border: 1px solid CanvasText; } }

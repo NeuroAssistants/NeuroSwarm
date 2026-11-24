@@ -1651,6 +1651,7 @@ SURVIVAL_MAX_FILES = 150
 SURVIVAL_MAX_ITEMS = 300
 SURVIVAL_MAX_BYTES = 2_000_000
 SURVIVAL_BUDGET_SEC = 20.0
+SURVIVAL_MAX_RANGES = 100        # per commit and file; more are reported as truncated, never guessed
 _SURVIVAL_LAST: dict[tuple[str, ...], float] = {}
 # Repository settings must not run programs or write files while we only read history.
 _GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
@@ -1723,13 +1724,15 @@ def _survival_root(root: Path, deadline: float, now: float) -> list[dict[str, An
         size = _git(top, "cat-file", "-s", f"HEAD:{path}")
         exists = size is not None
         counts: Counter = Counter()
+        final_lines: dict[str, list[int]] = {}                   # commit -> line numbers at HEAD that blame assigns to it
         if exists and int(size.strip() or 0) <= SURVIVAL_MAX_BYTES:
             blame = _git(top, "blame", "--line-porcelain", "-M", "HEAD", "--", path, timeout=15.0)
             if blame is None:
                 continue                                         # binary or unreadable: no measurement, no claim
-            counts = Counter(m[1] for m in re.finditer(r"^([0-9a-f]{40}) \d+ \d+", blame, re.M))
-        elif exists:
-            continue                                             # too large to measure: say nothing rather than guess
+            for m in re.finditer(r"^([0-9a-f]{40}) \d+ (\d+)", blame, re.M):
+                counts[m[1]] += 1
+                final_lines.setdefault(m[1], []).append(int(m[2]))
+        too_large = exists and int(size.strip() or 0) > SURVIVAL_MAX_BYTES   # reported as such, never guessed
         hits.sort(reverse=True)
         for i, (ct, sha, added) in enumerate(hits):
             if i + 1 < len(hits):
@@ -1737,9 +1740,27 @@ def _survival_root(root: Path, deadline: float, now: float) -> list[dict[str, An
             else:
                 prev_raw = _git(top, "log", "-1", "--format=%ct", f"{sha}^", "--", path)
                 prev = float(prev_raw.strip()) if prev_raw and prev_raw.strip().isdigit() else 0.0
-            out.append({"sha": sha, "path": str(absolute), "added": added, "surviving": min(counts.get(sha, 0), added),
-                        "exists": exists, "commit_time": ct, "prev_time": prev, "head": head, "measured_at": now})
+            item = {"sha": sha, "path": str(absolute), "added": added, "surviving": min(counts.get(sha, 0), added),
+                    "exists": exists, "commit_time": ct, "prev_time": prev, "head": head, "measured_at": now,
+                    "repo_path": path, **({"too_large": True, "surviving": 0} if too_large else {})}
+            # Which lines: HEAD line numbers whose blame origin is this commit. Only when the count agrees with the
+            # lines the commit added (otherwise blame and numstat disagree and no line is named).
+            lines = sorted(set(final_lines.get(sha, [])))
+            if not too_large and lines and len(lines) == counts.get(sha, 0) <= added:
+                item["ranges"], item["ranges_truncated"] = line_ranges(lines, SURVIVAL_MAX_RANGES)
+            out.append(item)
     return out
+
+
+def line_ranges(lines: list[int], limit: int) -> tuple[list[list[int]], bool]:
+    """[3, 4, 5, 9] -> [[3, 5], [9, 9]]; at most `limit` ranges, with a flag when more exist."""
+    out: list[list[int]] = []
+    for n in lines:
+        if out and n == out[-1][1] + 1:
+            out[-1][1] = n
+        else:
+            out.append([n, n])
+    return out[:limit], len(out) > limit
 
 
 def measure_line_survival(scope: "Scope", force: bool = False) -> list[dict[str, Any]] | None:

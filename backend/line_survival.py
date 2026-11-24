@@ -32,7 +32,13 @@ STATUS_TEXT = {
     "earlier_commit": "An earlier commit to this file came after the edit, so the edit may already be in it",
     "other_session": "Another session also edited this file before the commit, so its lines cannot be told apart",
     "not_tracked": "This edit was recorded without a file in a shared Git folder",
+    "too_large": "The file is larger than 2 MB at the measured revision, so its lines were not measured",
 }
+
+
+MAX_RANGES = 100
+COLUMNS = ("host_id", "sha", "path", "added", "surviving", "exists_at_head", "commit_time", "prev_time", "head",
+           "measured_at", "ranges_json", "ranges_truncated", "repo_path", "too_large")
 
 
 def ensure_tables(conn: Any) -> None:
@@ -41,6 +47,45 @@ def ensure_tables(conn: Any) -> None:
         added INTEGER NOT NULL, surviving INTEGER NOT NULL, exists_at_head INTEGER NOT NULL,
         commit_time REAL NOT NULL, prev_time REAL NOT NULL, head TEXT NOT NULL, measured_at REAL NOT NULL,
         PRIMARY KEY (host_id, sha, path))""")
+    rows = (conn.query_all("PRAGMA table_info(line_survival)") if hasattr(conn, "query_all")
+            else conn.execute("PRAGMA table_info(line_survival)").fetchall())   # Database wrapper or a raw connection
+    have = {r["name"] if hasattr(r, "keys") else r[1] for r in rows}
+    for column, kind in (("ranges_json", "TEXT"), ("ranges_truncated", "INTEGER NOT NULL DEFAULT 0"), ("repo_path", "TEXT"),
+                         ("too_large", "INTEGER NOT NULL DEFAULT 0")):
+        if column not in have:  # databases from the first line-survival version keep their counts
+            conn.execute(f"ALTER TABLE line_survival ADD COLUMN {column} {kind}")
+
+
+def clean_ranges(raw: Any, surviving: int, truncated: bool) -> list[list[int]] | None:
+    """Line ranges at HEAD that must add up to the surviving count (all of it, or less when truncated).
+    Anything inconsistent names no line at all."""
+    if not isinstance(raw, list) or not raw or len(raw) > MAX_RANGES:
+        return None
+    out: list[list[int]] = []
+    last = 0
+    for pair in raw:
+        if (not isinstance(pair, (list, tuple)) or len(pair) != 2 or not all(type(n) is int for n in pair)
+                or not (last < pair[0] <= pair[1] <= 10_000_000)):
+            return None
+        out.append([pair[0], pair[1]])
+        last = pair[1]
+    total = sum(b - a + 1 for a, b in out)
+    return out if (total == surviving or (truncated and total < surviving)) else None
+
+
+def clean_repo_path(raw: Any, key: str) -> str | None:
+    """Path inside the repository (for the Git command shown to verify). Relative, no hidden part, same file as `key`."""
+    if not isinstance(raw, str) or not raw or len(raw) > 320 or raw.startswith(("/", "\\")) or "\\" in raw:
+        return None
+    from activity_inspector import is_sensitive_path  # same protected-path rules as capture
+
+    if is_sensitive_path(raw):
+        return None
+    parts = raw.split("/")
+    if any(not p or p in (".", "..") or p.startswith(".") or any(ord(c) < 32 for c in p) for p in parts):
+        return None
+    rel = key.split("/", 1)[1] if "/" in key else key
+    return raw if raw == rel or raw.endswith("/" + rel) else None
 
 
 def canonical_keys(paths: list[Any], *, project: Any = None, extra_scope: Any = None, root_index: Any = None,
@@ -83,13 +128,20 @@ def store(conn: Any, host_id: str, items: Any, now: float, resolve) -> int:
         key = resolve(item.get("path"))
         if not key:
             continue
+        surviving = min(surviving, added)
+        truncated = item.get("ranges_truncated") is True
+        ranges = clean_ranges(item.get("ranges"), surviving, truncated)
         conn.execute(
-            """INSERT INTO line_survival VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(host_id, sha, path) DO UPDATE SET
+            f"""INSERT INTO line_survival ({",".join(COLUMNS)}) VALUES ({",".join("?" * len(COLUMNS))})
+               ON CONFLICT(host_id, sha, path) DO UPDATE SET
                added=excluded.added, surviving=excluded.surviving, exists_at_head=excluded.exists_at_head,
                commit_time=excluded.commit_time, prev_time=excluded.prev_time, head=excluded.head,
-               measured_at=excluded.measured_at WHERE excluded.measured_at >= line_survival.measured_at""",
-            (host_id, sha, key, added, min(surviving, added), 1 if item.get("exists") else 0, commit_time, prev_time,
-             head, measured_at),
+               measured_at=excluded.measured_at, ranges_json=excluded.ranges_json,
+               ranges_truncated=excluded.ranges_truncated, repo_path=excluded.repo_path, too_large=excluded.too_large
+               WHERE excluded.measured_at >= line_survival.measured_at""",
+            (host_id, sha, key, added, surviving, 1 if item.get("exists") else 0, commit_time, prev_time,
+             head, measured_at, json.dumps(ranges) if ranges else None, 1 if ranges and truncated else 0,
+             clean_repo_path(item.get("repo_path"), key), 1 if item.get("too_large") is True else 0),
         )
         stored += 1
     return stored
@@ -150,9 +202,7 @@ def detail(db: Any, org: int, event_id: int) -> dict[str, Any] | None:
                 status = "not_shared" if not shared else ("not_in_commit" if commits else "no_commit")
             else:
                 cid, ctime, m = found
-                m = dict(m) if hasattr(m, "keys") else dict(zip(
-                    ("host_id", "sha", "path", "added", "surviving", "exists_at_head", "commit_time", "prev_time", "head",
-                     "measured_at"), m))
+                m = dict(m) if hasattr(m, "keys") else dict(zip(COLUMNS, m))
                 others = conn.execute(
                     """SELECT COUNT(*) FROM events WHERE host_id=? AND event_type='observed_step' AND id<>?
                          AND json_extract(metadata_json,'$.action')='file_edit'
@@ -167,7 +217,9 @@ def detail(db: Any, org: int, event_id: int) -> dict[str, Any] | None:
                          AND EXISTS (SELECT 1 FROM json_each(json_extract(metadata_json,'$.line_keys')) WHERE value=?)""",
                     (host, session, m["prev_time"], ctime, key)).fetchone()[0]
                 entry.update(commit=m["sha"][:12], commit_event_id=cid)
-                if m["prev_time"] >= edited_at:
+                if m.get("too_large"):
+                    status = "too_large"
+                elif m["prev_time"] >= edited_at:
                     status = "earlier_commit"
                 elif others:
                     status = "other_session"
@@ -177,6 +229,11 @@ def detail(db: Any, org: int, event_id: int) -> dict[str, Any] | None:
                                  changed_or_removed=max(0, m["added"] - m["surviving"]),
                                  file_exists=bool(m["exists_at_head"]), head=m["head"][:12],
                                  measured_at=m["measured_at"], edits_in_commit=max(1, same))
+                    # Which lines, at the measured revision. Absent when the observer predates line numbers.
+                    ranges = clean_ranges(json.loads(m["ranges_json"]) if m.get("ranges_json") else None,
+                                          m["surviving"], bool(m.get("ranges_truncated")))
+                    entry.update(ranges=ranges, ranges_truncated=bool(ranges and m.get("ranges_truncated")),
+                                 repo_path=m.get("repo_path") if ranges else None, head_commit=m["head"])
             entry.update(status=status, reason=STATUS_TEXT[status])
             out["files"].append(entry)
         return out

@@ -477,6 +477,14 @@ def sanitize_activity_payload(body: dict[str, Any]) -> dict[str, Any]:
                 "commit_time": _num(item.get("commit_time"), 0.0, 1e12, 0.0),
                 "prev_time": _num(item.get("prev_time"), 0.0, 1e12, 0.0),
                 "measured_at": _num(item.get("measured_at"), 0.0, 1e12, time.time()),
+                # Line numbers at HEAD (pairs of ints) and the path inside the repository; checked again on storage.
+                **({"ranges": [[int(a), int(b)] for a, b in item["ranges"][:100]]}
+                   if isinstance(item.get("ranges"), list) and all(
+                       isinstance(p, list) and len(p) == 2 and all(type(n) is int for n in p) for p in item["ranges"][:100])
+                   else {}),
+                "ranges_truncated": item.get("ranges_truncated") is True,
+                "too_large": item.get("too_large") is True,
+                **({"repo_path": _redact_str(item["repo_path"], 320)} if isinstance(item.get("repo_path"), str) else {}),
             })
 
     raw_reader = str(body.get("capture_reader") or "").strip().lower()

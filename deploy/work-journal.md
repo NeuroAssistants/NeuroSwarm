@@ -96,6 +96,15 @@ How a number is reached, and nothing else counts:
    are disabled for these commands.
 3. The edit is linked to the first commit recorded by the same session after it that changed the same file.
 
+Which lines: for each attributed file the detail lists the line numbers, as ranges, of the file at the measured
+revision whose `git blame -M` origin is the session's commit (for example `Line 6` or `Lines 3–4`). The numbers come
+from blame's own line mapping, so lines inserted or deleted above them by later commits move them to their current
+place. The measured revision is shown, and **Verify with Git** gives the command that shows the same lines on that
+revision (`git blame -M -L 6,6 <revision> -- app.py`); its output must name the session's commit. Only numbers are
+sent. When blame and the commit's line count disagree, no line is named. Up to 100 ranges are listed per file; a longer
+list says it is shortened. Observers from the first line-survival version send counts without line numbers; the detail
+then shows the count and asks to update the observer.
+
 The detail shows a reason instead of a number when:
 
 | Shown | Why |
@@ -105,6 +114,7 @@ The detail shows a reason instead of a number when:
 | An earlier commit to this file came after the edit | The edit may already be in that earlier commit. |
 | The session's commits do not change this file on the checked-out branch | The commit is on another branch, older than 7 days, or did not include the file. |
 | Line tracking is not shared by this machine | The setting is off, or the collector has not measured yet. |
+| The file is larger than 2 MB at the measured revision | Git blame is not run on files over 2 MB; no count or line is shown. |
 
 Limits: counts are measured at the checked-out `HEAD`; uncommitted changes and other branches are not counted. When
 the same session edits a file several times before one commit, the count covers all of those edits together. Moved

@@ -20,7 +20,7 @@ import activity_inspector as ai  # noqa: E402
 import activity_shipper  # noqa: E402
 import browser_cdp  # noqa: E402
 from product_qa.test_acceptance_blackbox import HttpClient, SpawnedConsole  # noqa: E402
-from test_line_survival import SECRET_LINE, Lab  # noqa: E402
+from test_line_survival import SECRET_LINE, Lab, git, line_of  # noqa: E402
 
 ADMIN = ("bootstrap_admin", "BootstrapPass!2026#QA")
 
@@ -66,9 +66,11 @@ class LineSurvivalBrowserTests(unittest.TestCase):
         cls.srv.stop()
         cls.tmp.cleanup()
 
-    def open_step(self, pg, label):
+    def open_step(self, pg, label, last=False):
+        pg.settled("#activity-map .ap-tab[data-view='sessions']", 10)
         pg.click("#activity-map .ap-tab[data-view='sessions']")
-        sel = f"[...document.querySelectorAll('#activity-map .am-inspect[data-kind=step]')].find(b => b.textContent.trim() === {label!r})"
+        pick = "filter(b => b.textContent.trim() === %r).at(-1)" % label if last else "find(b => b.textContent.trim() === %r)" % label
+        sel = f"[...document.querySelectorAll('#activity-map .am-inspect[data-kind=step]')].{pick}"
         pg.wait(f"!!{sel}", what=f"step '{label}'")
         pg.eval(f"(b => {{ b.closest('details') && (b.closest('details').open = true); b.click(); }})({sel})")
         pg.wait("!!document.querySelector('dialog.am-detail[open] [data-survival]:not([aria-busy])')", what="line survival loaded")
@@ -90,12 +92,32 @@ class LineSurvivalBrowserTests(unittest.TestCase):
                 text = self.open_step(pg, "Edit app.py")
                 self.assertIn("1 of 3 lines remain", text)
                 self.assertIn("2 changed or removed since commit", text)
+                n = line_of(self.lab.repo, "app.py", SECRET_LINE)
+                head = git(self.lab.repo, "rev-parse", "HEAD").strip()
+                ranges = pg.eval("[...document.querySelectorAll('dialog.am-detail[open] .am-line-range')].map(e => e.textContent)")
+                self.assertEqual(ranges, [str(n)], "the surviving line, at its number in the measured revision")
+                self.assertIn(f"Line {n} of app.py at revision {head[:7]}", " ".join(text.split()))
+                cmd = pg.eval("document.querySelector('dialog.am-detail[open] .am-verify pre').textContent")
+                self.assertEqual(cmd, f"git blame -M -L {n},{n} {head[:7]} -- app.py")
+                blame = git(self.lab.repo, "blame", "-M", "-l", "-L", f"{n},{n}", head[:7], "--", "app.py")
+                self.assertIn(f"commit {blame[:7]}", text.replace("commit\n", "commit "), "the command shows the commit the UI names")
+                self.observed = getattr(self, "observed", []) + [(view, ranges, cmd)]
                 self.assertNotIn(SECRET_LINE, pg.eval("document.body.innerText"))
                 self.assertTrue(pg.eval("!!document.querySelector('dialog.am-detail[open] .am-survival-bar span')"))
                 art = os.environ.get("SWARMCONTROL_BROWSER_ARTIFACTS", "").strip()
                 if art:
                     Path(art).mkdir(parents=True, exist_ok=True)
                     pg.screenshot(Path(art) / f"{view}-line-survival.png")
+                pg.key("Escape", "Escape", key_code=27)
+                pg.wait("!document.querySelector('dialog[open]')", what="dialog closed")
+                text = self.open_step(pg, "Edit late.py", last=True)        # D's second edit: two lines, one range
+                first = line_of(self.lab.repo, "late.py", "d second 1")
+                ranges = pg.eval("[...document.querySelectorAll('dialog.am-detail[open] .am-line-range')].map(e => e.textContent)")
+                self.assertEqual(ranges, [f"{first}–{first + 1}"])
+                self.assertIn(f"Lines {first}–{first + 1} of late.py at revision {head[:7]}", " ".join(text.split()))
+                self.observed.append((view, ranges, pg.eval("document.querySelector('dialog.am-detail[open] .am-verify pre').textContent")))
+                if art:
+                    pg.screenshot(Path(art) / f"{view}-line-ranges.png")
                 pg.key("Escape", "Escape", key_code=27)
                 pg.wait("!document.querySelector('dialog[open]')", what="dialog closed")
                 text = self.open_step(pg, "Edit shared.py")
@@ -105,6 +127,7 @@ class LineSurvivalBrowserTests(unittest.TestCase):
                 errors = [e for e in pg.errors if not ("status of 401" in e and e.endswith("/api/v1/auth/me"))]
                 bad = [(s, u) for s, u in pg.http_errors if not (s == 401 and u.endswith("/api/v1/auth/me"))]
                 self.assertEqual((errors, bad), ([], []))
+                print(f"\nobserved in {view}: {self.observed[-2:]}")
 
 
 if __name__ == "__main__":

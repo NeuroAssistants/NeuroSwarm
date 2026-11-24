@@ -391,11 +391,30 @@
       const pct = added ? Math.round((kept / added) * 100) : 0;
       return `<li><div class="am-survival-head"><code>${H(f.file)}</code><strong>${kept} of ${added} lines remain</strong></div>
         <div class="am-survival-bar" role="img" aria-label="${kept} lines remain, ${gone} changed or removed"><span style="width:${pct}%"></span></div>
+        ${rangesHtml(f, kept)}
         <p class="muted small">${gone ? `${gone} changed or removed since commit <code>${H(String(f.commit).slice(0, 7))}</code>` : `Unchanged since commit <code>${H(String(f.commit).slice(0, 7))}</code>`}${
           f.file_exists === false ? " · the file is no longer on the checked-out branch" : ""}${
           f.edits_in_commit > 1 ? ` · counts all ${H(f.edits_in_commit)} edits this session made to the file before that commit` : ""}.
           Measured at <code>${H(String(f.head).slice(0, 7))}</code>, ${H(when(f.measured_at))}. Uncommitted changes are not counted.</p></li>`;
     }).join("")}</ul>`;
+  }
+  /* Which lines: numbers in the file at the measured revision whose `git blame -M` origin is the session's commit.
+     Each range carries the Git command that shows the same lines, so anyone with the repository can verify them. */
+  const rangeText = ([a, b]) => (a === b ? `${a}` : `${a}–${b}`);
+  function rangesHtml(f, kept) {
+    const head = String(f.head_commit || f.head || "").slice(0, 7);
+    if (!kept) return "";
+    if (!Array.isArray(f.ranges) || !f.ranges.length) {
+      return `<p class="muted small am-survival-lines">Line numbers were not reported for this file. Observers updated to this version report them on their next measurement.</p>`;
+    }
+    const ok = f.ranges.filter(r => Array.isArray(r) && r.length === 2 && Number.isSafeInteger(r[0]) && Number.isSafeInteger(r[1]) && r[0] >= 1 && r[1] >= r[0]);
+    const lines = ok.reduce((n, [a, b]) => n + b - a + 1, 0);
+    const path = typeof f.repo_path === "string" && f.repo_path ? f.repo_path : f.file;
+    const cmd = `git blame -M ${ok.slice(0, 10).map(([a, b]) => `-L ${a},${b}`).join(" ")} ${head} -- ${path}`;
+    return `<div class="am-survival-lines"><p>${lines === 1 ? "Line" : "Lines"} ${ok.map(r => `<span class="am-line-range">${H(rangeText(r))}</span>`).join(" ")} of <code>${H(f.file)}</code>
+        at revision <code title="${H(String(f.head_commit || f.head || ""))}">${H(head)}</code>${f.ranges_truncated ? ` (first ${ok.length} ranges, ${lines} of ${kept} lines)` : ""}.</p>
+      <details class="am-verify"><summary>Verify with Git</summary><pre tabindex="0">${H(cmd)}</pre>
+        <p class="muted small">Run it in the repository on the agent's machine. The listed lines must show commit <code>${H(String(f.commit).slice(0, 7))}</code>.${ok.length > 10 ? " The command covers the first 10 ranges." : ""}</p></details></div>`;
   }
   let survivalSeq = 0;
   async function loadSurvival(slot, s, st) {
