@@ -131,6 +131,7 @@ def _fmt_age(seconds: int) -> str:
 def _event_link(
     event_id: int,
     *,
+    event_type: str = "",
     host_id: str = "",
     session: str = "",
     agent: str = "",
@@ -139,7 +140,8 @@ def _event_link(
     params: list[tuple[str, str]] = [("event", f"event:{int(event_id)}")]
     if host_id:
         params.append(("host", host_id))
-    if session and host_id and agent and runtime:
+    # Only observed_step rows carry sessionId in /live and match /api/v1/live-records?session=...
+    if event_type == "observed_step" and session and host_id and agent and runtime:
         params.extend([("session", session), ("agent", agent), ("runtime", runtime)])
     params.append(("from", "/#needs-attention"))
     return "/live?" + urlencode(params)
@@ -164,9 +166,12 @@ def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
     severity = _clean_str(row.get("severity"), 16).upper()
     message = _clean_str(row.get("message"), 400)
     host_id = _clean_str(row.get("host_id"), 128)
-    harness = _clean_str(work.get("runtime") or row.get("harness"), 64)
-    agent = _clean_str(work.get("agent") or row.get("agent_name"), 128)
-    session = _clean_str(work.get("session") or meta.get("session") or meta.get("session_id"), 256)
+    row_harness = _clean_str(row.get("harness"), 64)
+    row_agent = _clean_str(row.get("agent_name"), 128)
+    harness = _clean_str(work.get("runtime") or row_harness, 64)
+    agent = _clean_str(work.get("agent") or row_agent, 128)
+    work_session = _clean_str(work.get("session"), 256)
+    session = _clean_str(work_session or meta.get("session") or meta.get("session_id"), 256)
     workspace = _clean_str(work.get("workspace") or meta.get("workspace"), 256)
     action = _clean_str(work.get("action") or meta.get("action"), 64).lower()
     tool = _clean_str(work.get("tool") or meta.get("tool"), 64)
@@ -185,6 +190,9 @@ def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
         "host_id": host_id,
         "harness": harness,
         "agent": agent,
+        "row_harness": row_harness,
+        "row_agent": row_agent,
+        "work_session": work_session,
         "session": session,
         "workspace": workspace,
         "event_type": event_type,
@@ -353,10 +361,11 @@ def _item_payload(
     age_seconds = max(0, int(now - since))
     link = _event_link(
         trigger["id"],
+        event_type=trigger["event_type"],
         host_id=trigger["host_id"],
-        session=trigger["session"],
-        agent=trigger["agent"],
-        runtime=trigger["harness"],
+        session=trigger["work_session"],
+        agent=trigger["row_agent"],
+        runtime=trigger["row_harness"],
     )
 
     if category == "permission":
@@ -410,10 +419,11 @@ def _item_payload(
                 "resolved_by_event_id": res_ev["id"],
                 "resolved_link": _event_link(
                     res_ev["id"],
+                    event_type=res_ev["event_type"],
                     host_id=res_ev["host_id"],
-                    session=res_ev["session"],
-                    agent=res_ev["agent"],
-                    runtime=res_ev["harness"],
+                    session=res_ev["work_session"],
+                    agent=res_ev["row_agent"],
+                    runtime=res_ev["row_harness"],
                 ),
             }
         )

@@ -138,6 +138,9 @@ class NeedsAttentionAPITests(unittest.TestCase):
         self.assertEqual(item["event_id"], perm_event_id)
         self.assertEqual(item["event_key"], f"event:{perm_event_id}")
         self.assertIn(f"event=event%3A{perm_event_id}", item["link"])
+        self.assertIn("host=host-perm", item["link"])
+        for forbidden in ("session=", "agent=", "runtime="):
+            self.assertNotIn(forbidden, item["link"])
         self.assertGreaterEqual(item["age_seconds"], 0)
         self.assertEqual(item["session"], "claude:perm-1")
 
@@ -165,6 +168,9 @@ class NeedsAttentionAPITests(unittest.TestCase):
         self.assertEqual(na["resolved"][0]["event_id"], perm_event_id)
         self.assertEqual(na["resolved"][0]["resolved_by_event_id"], res_ev["event_id"])
         self.assertEqual(na["resolved"][0]["resolution_reason"], "Permission granted")
+        for link_field in ("link", "resolved_link"):
+            for forbidden in ("session=", "agent=", "runtime="):
+                self.assertNotIn(forbidden, na["resolved"][0][link_field])
 
     def test_failed_test_not_cleared_by_non_test_command_and_resolved_by_passing_test(self):
         tok = self._create_token(self.admin, "host-tests")
@@ -318,6 +324,9 @@ class NeedsAttentionAPITests(unittest.TestCase):
         self.assertEqual(q_item["category"], "quota_exhausted")
         self.assertEqual(q_item["event_id"], ev["event_id"])
         self.assertIn("retry after 45s", q_item["detail"])
+        self.assertIn(f"event=event%3A{ev['event_id']}", q_item["link"])
+        for forbidden in ("session=", "agent=", "runtime="):
+            self.assertNotIn(forbidden, q_item["link"])
 
         # Resolve with explicit quota_recovered event
         st, _, rec = self.admin.json(
@@ -339,6 +348,9 @@ class NeedsAttentionAPITests(unittest.TestCase):
         st, _, na = self.admin.json("GET", "/api/v1/needs-attention")
         self.assertEqual(na["counts"]["quota_exhausted"], 0)
         self.assertEqual(na["resolved"][0]["resolution_reason"], "Quota recovered")
+        self.assertIn(f"event=event%3A{rec['event_id']}", na["resolved"][0]["resolved_link"])
+        for forbidden in ("session=", "agent=", "runtime="):
+            self.assertNotIn(forbidden, na["resolved"][0]["resolved_link"])
 
     def test_no_signal_by_heartbeat_without_inferring_cause_and_recovery(self):
         tok = self._create_token(self.admin, "host-hb")
@@ -588,25 +600,25 @@ class NeedsAttentionBrowserTests(unittest.TestCase):
             conn.execute("UPDATE hosts SET last_seen_at = ? WHERE host_id = ?", (time.time() - 260, "na-host-silent"))
             conn.commit()
 
-        # 2) Explicit permission with XSS probe
-        cls.xss = '<img src=x onerror="window.__na_xss=1">'
-        st, _, perm_ev = cls.admin.json(
-            "POST",
-            "/api/v1/ingest/event",
-            {
-                "host_id": "na-host-1",
-                "harness": "claude",
-                "agent_name": "deploy-bot",
-                "event_type": "permission_request",
-                "severity": "WARNING",
-                "message": f"Approve deployment command {cls.xss}",
-                "metadata": {"session": "claude:perm-ui", "workspace": "demo"},
-            },
-            headers=hdr,
-        )
-        assert st == 200, perm_ev
-
-        # 3) Failed test via normal activity ingestion (to test exact link click -> /live!)
+        # 2) Seed earlier observed_step activity on the same sessions used by permission, quota,
+        #    and failed_test items so any accidental session= scoping on non-observed_step events
+        #    would visibly select the wrong observed_step row in /live.
+        prior_perm_step = {
+            "tool": "edit_file",
+            "category": "file_edit",
+            "label": "Prepare migration script",
+            "status": "completed",
+            "time": _iso_offset(120),
+            "files": ["migrations/001.sql"],
+        }
+        prior_quota_step = {
+            "tool": "edit_file",
+            "category": "file_edit",
+            "label": "Edit batch runner",
+            "status": "completed",
+            "time": _iso_offset(110),
+            "files": ["batch.py"],
+        }
         fail_step = {
             "tool": "exec_command",
             "category": "shell",
@@ -627,21 +639,56 @@ class NeedsAttentionBrowserTests(unittest.TestCase):
                 "activity_roots": ["/work/demo"],
                 "sessions": [
                     {
+                        "session_id": "claude:perm-ui",
+                        "harness": "claude",
+                        "agent_name": "deploy-bot",
+                        "workspace": "/work/demo",
+                        "steps": [prior_perm_step],
+                        "capture_steps": [prior_perm_step],
+                    },
+                    {
+                        "session_id": "codex:quota-ui",
+                        "harness": "codex",
+                        "agent_name": "quota-bot",
+                        "workspace": "/work/demo",
+                        "steps": [prior_quota_step],
+                        "capture_steps": [prior_quota_step],
+                    },
+                    {
                         "session_id": "codex:fail-ui",
                         "harness": "codex",
                         "agent_name": "test-bot",
                         "workspace": "/work/demo",
                         "steps": [fail_step],
                         "capture_steps": [fail_step],
-                    }
+                    },
                 ],
             },
             headers=hdr,
         )
         assert st in (200, 201)
 
-        # 4) Exhausted quota event
-        st, _, _ = cls.admin.json(
+        # 3) Explicit permission with XSS probe (via /api/v1/ingest/event on session with prior observed_step)
+        cls.xss = '<img src=x onerror="window.__na_xss=1">'
+        st, _, perm_ev = cls.admin.json(
+            "POST",
+            "/api/v1/ingest/event",
+            {
+                "host_id": "na-host-1",
+                "harness": "claude",
+                "agent_name": "deploy-bot",
+                "event_type": "permission_request",
+                "severity": "WARNING",
+                "message": f"Approve deployment command {cls.xss}",
+                "metadata": {"session": "claude:perm-ui", "workspace": "demo"},
+            },
+            headers=hdr,
+        )
+        assert st == 200, perm_ev
+        cls.perm_event_id = perm_ev["event_id"]
+
+        # 4) Exhausted quota event (via /api/v1/ingest/event on session with prior observed_step)
+        st, _, quota_ev = cls.admin.json(
             "POST",
             "/api/v1/ingest/event",
             {
@@ -655,10 +702,11 @@ class NeedsAttentionBrowserTests(unittest.TestCase):
             },
             headers=hdr,
         )
-        assert st == 200
+        assert st == 200, quota_ev
+        cls.quota_event_id = quota_ev["event_id"]
 
-        # 5) One resolved permission so Recently resolved disclosure appears
-        cls.admin.json(
+        # 5) One resolved permission so Recently resolved disclosure appears with both trigger & resolution links
+        st, _, res_trig = cls.admin.json(
             "POST",
             "/api/v1/ingest/event",
             {
@@ -672,7 +720,10 @@ class NeedsAttentionBrowserTests(unittest.TestCase):
             },
             headers=hdr,
         )
-        cls.admin.json(
+        assert st == 200, res_trig
+        cls.resolved_trigger_event_id = res_trig["event_id"]
+
+        st, _, res_done = cls.admin.json(
             "POST",
             "/api/v1/ingest/event",
             {
@@ -686,6 +737,8 @@ class NeedsAttentionBrowserTests(unittest.TestCase):
             },
             headers=hdr,
         )
+        assert st == 200, res_done
+        cls.resolved_by_event_id = res_done["event_id"]
 
         # 6) Second organization for browser isolation check
         beta = HttpClient(cls.srv.base_url)
@@ -747,15 +800,64 @@ class NeedsAttentionBrowserTests(unittest.TestCase):
             self.assertLessEqual(p.eval("document.documentElement.scrollWidth"), 1441)
             self.assertEqual([e for e in p.errors if "/api/v1/auth/me" not in e], [])
 
-            # Click exact event link -> opens /live with that exact event selected!
+            # Click exact event link for failed_test -> opens /live with that exact event selected!
             p.click("#na-items-list [data-na-link='event']")
             p.wait("window.location.pathname === '/live'", 10)
             p.wait(
-                f"Boolean(document.querySelector('#rows tr[data-key=\"event:{failed_ev_id}\"].selected'))",
+                f"Boolean(document.querySelector('#rows tr[data-key=\"event:{failed_ev_id}\"][aria-selected=\"true\"]'))",
                 15,
             )
             p.wait("document.getElementById('detail').textContent.includes('pytest')", 10)
             self.assertEqual([e for e in p.errors if "/api/v1/auth/me" not in e], [])
+
+            # Verify exact /live selection for permission, quota_exhausted, and resolved-history links
+            link_checks = [
+                (
+                    "#na-items-list .na-item[data-na-category='permission'] [data-na-link='event']",
+                    f"event:{self.perm_event_id}",
+                    "Approve deployment command",
+                    False,
+                ),
+                (
+                    "#na-items-list .na-item[data-na-category='quota_exhausted'] [data-na-link='event']",
+                    f"event:{self.quota_event_id}",
+                    "HTTP 429 rate limit exceeded on provider",
+                    False,
+                ),
+                (
+                    "#na-resolved-list .na-item [data-na-link='event']",
+                    f"event:{self.resolved_trigger_event_id}",
+                    "Approve config read",
+                    True,
+                ),
+                (
+                    "#na-resolved-list .na-item [data-na-link='resolution']",
+                    f"event:{self.resolved_by_event_id}",
+                    "Approved config read",
+                    True,
+                ),
+            ]
+            for selector, expected_key, expected_detail, open_resolved in link_checks:
+                p.goto(self.srv.base_url + "/")
+                p.wait("document.querySelectorAll('#na-items-list .na-item').length === 3", 15)
+                if open_resolved:
+                    p.click("#na-resolved-fold > summary")
+                    p.wait("document.getElementById('na-resolved-fold').open === true", 5)
+                p.click(selector)
+                p.wait("window.location.pathname === '/live'", 10)
+                p.wait(
+                    f"(document.querySelector('#rows tr[aria-selected=\"true\"]') || {{}}).dataset?.key === {json.dumps(expected_key)}",
+                    15,
+                )
+                p.wait(
+                    f"Boolean(document.querySelector('#rows tr[data-key={json.dumps(expected_key)}].selected'))",
+                    5,
+                )
+                p.wait(
+                    f"document.getElementById('detail').textContent.includes({json.dumps(expected_detail)})",
+                    10,
+                )
+                self.assertEqual([e for e in p.errors if "/api/v1/auth/me" not in e], [])
 
             # Mobile 390x844 — Org A
             pm = b.new_page(390, 844)
