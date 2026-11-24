@@ -2259,6 +2259,8 @@ def chunk_activity_payload(payload: dict[str, Any], max_bytes: int = 320_000) ->
             meta_tail["capture_metrics"] = capture_metrics
         chunks.append(meta_tail)
 
+    if payload.get("line_survival") is not None and chunks:
+        chunks[0]["line_survival"] = payload["line_survival"]  # counts only; bounded to 300 items by the reader
     return chunks
 
 

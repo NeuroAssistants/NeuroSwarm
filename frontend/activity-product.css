@@ -181,3 +181,17 @@
 .am-text pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--sc-line); font-family: var(--sc-mono); font-size: .78rem; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; }
 @media (prefers-reduced-motion: reduce) { .am-loading::before { animation: none; } }
 @media (forced-colors: active) { .am-term, .am-exit, .am-shot { border: 1px solid CanvasText; } }
+
+/* ===== line survival: lines an edit added that are still in the code ===== */
+.am-survival { margin: 12px 0; padding: 10px 12px; border: 1px solid var(--sc-line); border-radius: var(--sc-radius); background: var(--sc-paper); }
+.am-survival h4 { margin: 0 0 6px; font-size: .74rem; letter-spacing: .07em; text-transform: uppercase; color: var(--sc-muted); }
+.am-survival-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.am-survival-list li { display: grid; gap: 4px; overflow-wrap: anywhere; }
+.am-survival-list code { font-family: var(--sc-mono); font-size: .84em; }
+.am-survival-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; }
+.am-survival-bar { height: 8px; border-radius: 999px; background: var(--sc-critical-bg); overflow: hidden; }
+.am-survival-bar span { display: block; height: 100%; background: var(--sc-action); }
+.am-survival-list li.is-unknown { padding-left: 10px; border-left: 3px solid var(--sc-control); }
+.am-survival-why { font-size: .86rem; }
+.am-survival-list p { margin: 0; }
+@media (forced-colors: active) { .am-survival-bar { border: 1px solid CanvasText; } .am-survival-bar span { background: Highlight; } }

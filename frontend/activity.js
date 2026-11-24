@@ -359,6 +359,7 @@
       <div class="am-detail-summary"><h4>What the agent did in this session</h4><p>${H(s.what_done)}</p></div>
       ${stepFiles || '<p class="muted small">No file inside the shared folders is tied to this single step.</p>'}
       ${isPlan ? "" : `<div class="am-evidence" data-evidence aria-live="polite" aria-busy="true"><p class="muted small am-loading">Loading the recorded command, output and files…</p></div>`}
+      ${!isPlan && item.category === "file_edit" ? `<section class="am-survival" data-survival aria-live="polite" aria-busy="true"><h4>Lines still in the code</h4><p class="muted small am-loading">Checking Git…</p></section>` : ""}
       <dl class="ap-facts"><dt>Folder</dt><dd><code>${H(rel(s.workspace, d) || "unreported")}</code></dd>
         <dt>Agent identity</dt><dd>From the shared folder name${s.owner_basis && s.owner_basis !== "workspace" ? ` (${H(s.owner_basis)})` : ""}</dd>
         <dt>Provider</dt><dd>${H(s.provider_basis === "recorded" ? "Recorded by the harness" : s.provider_basis === "model" ? "Inferred from the model name" : "Not recorded")}</dd></dl>
@@ -367,6 +368,55 @@
     dialog.querySelector("[data-close]").focus();
     const slot = dialog.querySelector("[data-evidence]");
     if (slot) loadEvidence(slot, s, item, d, firstStepFile, Boolean(stepFiles));
+    const survival = dialog.querySelector("[data-survival]");
+    if (survival) loadSurvival(survival, s, item);
+  }
+
+  /* ---------- line survival: lines this edit added that are still in the code (Git evidence only) ----------
+     The server links the edit to the commit the same session's own `git commit` printed, and counts with `git blame`
+     on the agent's machine how many of the lines that commit added are still assigned to it. Nothing is inferred
+     from file text; when the evidence is not explicit the reason is shown instead of a number. */
+  const SURVIVAL_HELP = `Line tracking appears when the observer on that machine sets <code>SWARMCONTROL_SHARE_LINE_SURVIVAL=1</code>.
+    It sends commit IDs and line counts only, never file contents.`;
+  function survivalHtml(r) {
+    const files = Array.isArray(r.files) ? r.files : [];
+    if (!files.length) return '<p class="muted small">This edit names no file in a shared folder, so there are no lines to follow.</p>';
+    const when = t => t ? new Date(t * 1000).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "";
+    return `<ul class="am-survival-list">${files.map(f => {
+      if (f.status !== "attributed") {
+        return `<li class="is-unknown"><code>${H(f.file)}</code><span class="am-survival-why">${H(f.reason || "Not enough Git evidence")}</span>
+          ${f.status === "not_shared" ? `<span class="muted small">${SURVIVAL_HELP}</span>` : ""}</li>`;
+      }
+      const added = Number(f.added) || 0, kept = Math.min(Number(f.surviving) || 0, added), gone = added - kept;
+      const pct = added ? Math.round((kept / added) * 100) : 0;
+      return `<li><div class="am-survival-head"><code>${H(f.file)}</code><strong>${kept} of ${added} lines remain</strong></div>
+        <div class="am-survival-bar" role="img" aria-label="${kept} lines remain, ${gone} changed or removed"><span style="width:${pct}%"></span></div>
+        <p class="muted small">${gone ? `${gone} changed or removed since commit <code>${H(String(f.commit).slice(0, 7))}</code>` : `Unchanged since commit <code>${H(String(f.commit).slice(0, 7))}</code>`}${
+          f.file_exists === false ? " · the file is no longer on the checked-out branch" : ""}${
+          f.edits_in_commit > 1 ? ` · counts all ${H(f.edits_in_commit)} edits this session made to the file before that commit` : ""}.
+          Measured at <code>${H(String(f.head).slice(0, 7))}</code>, ${H(when(f.measured_at))}. Uncommitted changes are not counted.</p></li>`;
+    }).join("")}</ul>`;
+  }
+  let survivalSeq = 0;
+  async function loadSurvival(slot, s, st) {
+    const seq = ++survivalSeq;
+    const settle = html => { if (seq === survivalSeq && slot.isConnected) { slot.innerHTML = `<h4>Lines still in the code</h4>${html}`; slot.removeAttribute("aria-busy"); } };
+    const id = st.event_id, org = st.event_org;
+    if (!Number.isSafeInteger(id) || id <= 0 || !Number.isSafeInteger(org) || org <= 0) {
+      settle('<p class="muted small">This step has no exact journal link yet, so its lines cannot be followed.</p>');
+      return;
+    }
+    try {
+      const r = await getJSON(`/api/v1/events/${id}/line-survival?organization_id=${org}`);
+      if (r.organization !== org || r.event_id !== id || r.session !== s.session_id) {
+        settle('<p class="muted small">The event no longer matches this step. Reopen the step to refresh it.</p>');
+        return;
+      }
+      settle(survivalHtml(r));
+    } catch (err) {
+      settle(err.status === 409 ? '<p class="muted small">The organization changed. Close this window and open the step again.</p>'
+        : '<p class="muted small">Line tracking could not be loaded. Try again in a moment.</p>');
+    }
   }
 
   /* ---------- empty and privacy states ---------- */

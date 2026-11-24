@@ -78,3 +78,37 @@ All three settings default to off. File names and recorded exit codes can still 
 An image marked **Tool result** contains the bytes the tool returned to the agent. A **Workspace snapshot** shows what the collector found in the file and carries its own timestamp. The path can still appear when a preview is unavailable. Source snapshots require a system with directory-relative, no-follow file opens.
 
 Command detail depends on what the agent logged. An exit code of `0` means the command succeeded. Empty output means it produced no text. Missing output means the collector has no recorded result for that call. A result found on a later scan can fill in the original event when its call identifier matches.
+
+### Lines still in the code
+
+Opening an edit on the Activity map shows how many lines it added are still in the code, when Git gives explicit
+evidence. Set `SWARMCONTROL_SHARE_LINE_SURVIVAL=1` on the collector of the machine that has the repository (the local
+journal or a remote observer with the shared reader), then restart it. It is off by default.
+
+How a number is reached, and nothing else counts:
+
+1. The session's own `git commit` printed the commit ID (`[main abc1234] message`). Only that ID is recorded on the
+   command's event. A command that merely prints similar text, a failed commit, or output with two IDs is not evidence.
+2. About once a minute, the collector runs read-only Git inside each shared folder: `git log --numstat` for commits of
+   the last 7 days on the checked-out branch (up to 50), and `git blame -M HEAD` for the files they changed (up to 150,
+   2 MB each). It sends commit IDs, file paths in the shared folders and line counts. It never sends file contents and
+   ignores hidden and protected files. Repository settings that would run programs (fsmonitor, hooks, external diff)
+   are disabled for these commands.
+3. The edit is linked to the first commit recorded by the same session after it that changed the same file.
+
+The detail shows a reason instead of a number when:
+
+| Shown | Why |
+| --- | --- |
+| No commit recorded by this session after the edit | Another session or a person may have committed it; that is not evidence about this edit. |
+| Another session also edited this file before the commit | Two sessions' changes can be in one commit; their lines cannot be told apart. |
+| An earlier commit to this file came after the edit | The edit may already be in that earlier commit. |
+| The session's commits do not change this file on the checked-out branch | The commit is on another branch, older than 7 days, or did not include the file. |
+| Line tracking is not shared by this machine | The setting is off, or the collector has not measured yet. |
+
+Limits: counts are measured at the checked-out `HEAD`; uncommitted changes and other branches are not counted. When
+the same session edits a file several times before one commit, the count covers all of those edits together. Moved
+lines within a file still count (`git blame -M`); lines moved to another file do not. Measurements are a snapshot,
+refreshed while the commit is within the 7-day window. Remote observers need the shared reader (`activity_core.py`);
+the fallback reader does not measure lines. Timestamps from the session log and from Git must come from the same
+machine clock.

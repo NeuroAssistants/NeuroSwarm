@@ -442,6 +442,10 @@ def execution_detail(command, output, code):
         return info
     if type(code) is int:
         info["exit_code"] = code
+    if line_survival_enabled():
+        sha = recorded_commit(command, output, code)
+        if sha:
+            info["git_commit"] = sha
     if os.environ.get("SWARMCONTROL_SHARE_COMMANDS") == "1":
         text, _ = evidence_text(command, 1024)
         if text is not None:
@@ -867,7 +871,7 @@ def _finish(card: dict[str, Any], steps: list[dict[str, Any]], edited: list[str]
     if not card["what_done"]:
         card["what_done"] = "No written summary in the latest part of this session."
     private_fields = {"command_input", "command_output", "exit_code", "output_truncated", "image_previews", "text_previews",
-                      "native_call_ref"}
+                      "native_call_ref", "git_commit"}
     shown = [{k: v for k, v in s.items() if k not in private_fields} for s in steps[-10:]]
     card["steps"] = shown
     card["latest_action"] = shown[-1] if shown else None
@@ -1245,9 +1249,9 @@ def claude_sessions(limit: int = 6) -> list[dict[str, Any]]:
                     if (name in CLAUDE_EDIT or name in CLAUDE_READ) and fp:
                         steps[-1]["files"] = [fp]
                     if (_CAPTURE is not None and isinstance(b.get("id"), str) and
-                            (name in CLAUDE_READ or name == "Bash") and any(
+                            (name in CLAUDE_READ or name == "Bash") and (any(
                                 os.environ.get(key) == "1" for key in ("SWARMCONTROL_SHARE_COMMAND_OUTPUT", "SWARMCONTROL_SHARE_FILE_PREVIEWS")
-                            )):
+                            ) or (name == "Bash" and line_survival_enabled()))):  # the commit ID is read from the result
                         recorded_calls[b["id"]] = (steps[-1], inp.get("command") if name == "Bash" else None)
         tasks = HOME / ".claude/tasks" / jf.stem
         if tasks.is_dir():
@@ -1636,6 +1640,127 @@ def workspaces(max_files: int = 600) -> list[dict[str, Any]]:
     return out
 
 
+# --- line survival (opt-in): explicit Git evidence for lines a session's commit added ----------------------
+# Only commit IDs, file paths inside shared folders and line counts leave the machine; never file contents.
+COMMIT_LINE = re.compile(r"^\[[^\]\n]* ([0-9a-f]{7,40})\] ", re.M)       # "[main abc1234] message" printed by git commit
+COMMIT_COMMAND = re.compile(r"(?:^|[\s;&|(])git(?:\s+-[cC]\s+\S+)*\s+commit(?:\s|$)")
+SURVIVAL_EVERY_SEC = 60.0
+SURVIVAL_DAYS = 7
+SURVIVAL_MAX_COMMITS = 50
+SURVIVAL_MAX_FILES = 150
+SURVIVAL_MAX_ITEMS = 300
+SURVIVAL_MAX_BYTES = 2_000_000
+SURVIVAL_BUDGET_SEC = 20.0
+_SURVIVAL_LAST: dict[tuple[str, ...], float] = {}
+# Repository settings must not run programs or write files while we only read history.
+_GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+             "-c", "core.untrackedCache=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false")
+
+
+def line_survival_enabled() -> bool:
+    return os.environ.get("SWARMCONTROL_SHARE_LINE_SURVIVAL") == "1"
+
+
+def recorded_commit(command: Any, output: Any, code: Any) -> str | None:
+    """The commit ID a session's own successful `git commit` printed. Anything else is not evidence."""
+    if isinstance(command, list):
+        command = " ".join(str(c) for c in command)
+    if code not in (None, 0) or not isinstance(command, str) or not isinstance(output, str):
+        return None
+    if not COMMIT_COMMAND.search(command):
+        return None
+    found = set(COMMIT_LINE.findall(output[:20_000]))
+    return found.pop() if len(found) == 1 else None
+
+
+def _git(repo: Path, *args: str, timeout: float = 10.0) -> str | None:
+    git = shutil.which("git")
+    if not git:
+        return None
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(HOME), "LC_ALL": "C",
+           "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_NO_REPLACE_OBJECTS": "1"}
+    try:
+        done = subprocess.run([git, *_GIT_SAFE, "-C", str(repo), *args], capture_output=True, timeout=timeout,
+                              env=env, stdin=subprocess.DEVNULL, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.decode("utf-8", "replace") if done.returncode == 0 else None
+
+
+def _survival_root(root: Path, deadline: float, now: float) -> list[dict[str, Any]]:
+    top_raw = _git(root, "rev-parse", "--show-toplevel")
+    head = _git(root, "rev-parse", "--verify", "-q", "HEAD^{commit}")
+    if not top_raw or not head:
+        return []
+    top, head = Path(top_raw.strip()), head.strip()
+    try:
+        scope_rel = root.resolve().relative_to(top.resolve()).as_posix() or "."
+    except ValueError:
+        return []
+    log = _git(top, "log", "HEAD", f"--since={SURVIVAL_DAYS}.days", f"-n{SURVIVAL_MAX_COMMITS}", "--no-renames",
+               "--no-ext-diff", "--no-textconv", "--numstat", "--format=%x1e%H %ct", "--", f":(literal){scope_rel}")
+    if log is None:
+        return []
+    touches: dict[str, list[tuple[float, str, int]]] = {}       # path -> [(commit time, sha, lines added)]
+    for block in log.split("\x1e")[1:]:
+        lines = block.strip().splitlines()
+        if not lines:
+            continue
+        sha, _, ct = lines[0].partition(" ")
+        for row in lines[1:]:
+            added, _, rest = row.partition("\t")
+            _, _, path = rest.partition("\t")
+            if added.isdigit() and int(added) > 0 and path:
+                touches.setdefault(path, []).append((float(ct), sha, int(added)))
+    out: list[dict[str, Any]] = []
+    for path, hits in sorted(touches.items(), key=lambda kv: -max(t for t, _, _ in kv[1]))[:SURVIVAL_MAX_FILES]:
+        if time.monotonic() > deadline or len(out) >= SURVIVAL_MAX_ITEMS:
+            break
+        absolute = top / path
+        rel_parts = Path(path).parts
+        if any(p.startswith(".") for p in rel_parts) or is_sensitive_path(path) or not _scope().contains(absolute):
+            continue
+        size = _git(top, "cat-file", "-s", f"HEAD:{path}")
+        exists = size is not None
+        counts: Counter = Counter()
+        if exists and int(size.strip() or 0) <= SURVIVAL_MAX_BYTES:
+            blame = _git(top, "blame", "--line-porcelain", "-M", "HEAD", "--", path, timeout=15.0)
+            if blame is None:
+                continue                                         # binary or unreadable: no measurement, no claim
+            counts = Counter(m[1] for m in re.finditer(r"^([0-9a-f]{40}) \d+ \d+", blame, re.M))
+        elif exists:
+            continue                                             # too large to measure: say nothing rather than guess
+        hits.sort(reverse=True)
+        for i, (ct, sha, added) in enumerate(hits):
+            if i + 1 < len(hits):
+                prev = hits[i + 1][0]
+            else:
+                prev_raw = _git(top, "log", "-1", "--format=%ct", f"{sha}^", "--", path)
+                prev = float(prev_raw.strip()) if prev_raw and prev_raw.strip().isdigit() else 0.0
+            out.append({"sha": sha, "path": str(absolute), "added": added, "surviving": min(counts.get(sha, 0), added),
+                        "exists": exists, "commit_time": ct, "prev_time": prev, "head": head, "measured_at": now})
+    return out
+
+
+def measure_line_survival(scope: "Scope", force: bool = False) -> list[dict[str, Any]] | None:
+    """Recent commits' added lines and how many `git blame` still assigns to them, per file in shared folders.
+    At most once a minute per set of folders; None when it is not time yet or sharing is off."""
+    if not line_survival_enabled() or not scope.enabled:
+        return None
+    key = tuple(str(r) for r in scope.roots)
+    clock = time.monotonic()
+    if not force and clock - _SURVIVAL_LAST.get(key, -SURVIVAL_EVERY_SEC) < SURVIVAL_EVERY_SEC:
+        return None
+    _SURVIVAL_LAST[key] = clock
+    deadline, now, items, seen = clock + SURVIVAL_BUDGET_SEC, time.time(), [], set()
+    for root in scope.roots:
+        for item in _survival_root(Path(root), deadline, now):
+            if (item["sha"], item["path"]) not in seen:
+                seen.add((item["sha"], item["path"]))
+                items.append(item)
+    return items[:SURVIVAL_MAX_ITEMS]
+
+
 # --- snapshot -----------------------------------------------------------------------------
 def collect_activity(scope: Scope | None = None, capture: "Capture | None" = None) -> dict[str, Any]:
     """Map snapshot. With `capture` (the work journal), every session's `capture_steps` holds all steps appended
@@ -1713,6 +1838,8 @@ def _collect(t0: float) -> dict[str, Any]:
         "sessions": sessions,
         "workspaces": ws,
         "category_labels": CATEGORY_LABEL,
+        **({"line_survival": survival} if (survival := (measure_line_survival(scope) if _CAPTURE is not None else None))
+           is not None else {}),
     }
 
 
