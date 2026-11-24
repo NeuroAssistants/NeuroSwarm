@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#192823">
+  <title>Live events · NeuroSwarm NOC</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%20role%3D%22img%22%3E%3Ctitle%3ENeuroSwarm%3C%2Ftitle%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2210%22%20fill%3D%22%23192823%22%2F%3E%3Cg%20transform%3D%22translate%288%2013%29%22%3E%3Cpolygon%20fill%3D%22%23BDF2C9%22%20points%3D%2216%2C2%2048%2C2%2040%2C10%208%2C10%22%2F%3E%3Cpolygon%20fill%3D%22%23BDF2C9%22%20points%3D%228%2C15%2040%2C15%2032%2C23%200%2C23%22%2F%3E%3Cpolygon%20fill%3D%22%23BDF2C9%22%20points%3D%228%2C28%2032%2C28%2024%2C36%200%2C36%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E" type="image/svg+xml">
+  <link rel="stylesheet" href="/live.css">
+</head>
+<body>
+  <a href="#table-wrap" class="sr-only skip-link">Skip to live event table</a>
+
+  <div id="auth-gate" class="gate hidden" role="main">
+    <div class="gate-card">
+      <h1>Operator session required</h1>
+      <p>Sign in through the NeuroSwarm control room to open the full-screen real-time event console.</p>
+      <a href="/" class="btn primary">Go to sign-in →</a>
+    </div>
+  </div>
+
+  <div id="app" class="shell row-tint hidden">
+    <header class="topbar">
+      <div class="top-left">
+        <a href="/" class="brand" title="Back to main control room">
+          <svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="10" fill="#233730"/><g transform="translate(8 13)" fill="#BDF2C9"><polygon points="16,2 48,2 40,10 8,10"/><polygon points="8,15 40,15 32,23 0,23"/><polygon points="8,28 32,28 24,36 0,36"/></g></svg>
+          <strong>NeuroSwarm</strong>
+        </a>
+        <span class="title-chip">Live NOC Console</span>
+        <a href="/" id="return-link" class="btn bar-btn return-bar-btn hidden">← Return (filters preserved)</a>
+        <a href="/" class="btn bar-btn">← Control room</a>
+        <div class="org-wrap">
+          <label for="org-switcher" class="sr-only">Active organization</label>
+          <select id="org-switcher" class="org-select hidden" aria-label="Switch active organization"></select>
+          <span id="org-badge" class="org-pill">Organization</span>
+        </div>
+      </div>
+
+      <div class="top-right">
+        <button type="button" id="cmdk-btn" class="btn bar-btn cmdk-trigger" title="Quick jump &amp; actions (Ctrl+K / ⌘K)">Quick jump <kbd>⌘K</kbd></button>
+        <span id="live-badge" class="live-pill live"><i aria-hidden="true"></i>LIVE</span>
+        <span id="feed-mode-badge" class="mode-chip" title="Active telemetry transport">STREAM</span>
+        <label for="interval" class="sr-only">Refresh interval</label>
+        <select id="interval" class="top-select" title="Auto-refresh interval">
+          <option value="2500" selected>2.5s</option>
+          <option value="5000">5s</option>
+          <option value="10000">10s</option>
+          <option value="30000">30s</option>
+        </select>
+        <button type="button" id="pause" class="btn bar-btn" aria-pressed="false" title="Pause display while buffering incoming events (P)">Pause</button>
+        <button type="button" id="refresh" class="btn bar-btn">Refresh</button>
+        <button type="button" id="fullscreen" class="btn bar-btn" title="Toggle full screen (F)">Full screen</button>
+        <span id="user-label" class="user-lbl"></span>
+        <span id="role-badge" class="role-pill">VIEWER</span>
+        <button type="button" id="logout" class="btn bar-btn">Sign out</button>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <aside id="sidebar" class="sidebar" aria-label="View Explorer">
+        <div class="pane-head">
+          <h2>View Explorer</h2>
+          <button type="button" id="sidebar-toggle" class="icon-btn" title="Collapse View Explorer" aria-label="Toggle View Explorer">⇄</button>
+        </div>
+        <div class="tree-scroll">
+          <div class="tree-group">
+            <div class="tree-heading">Perspectives</div>
+            <ul id="perspectives" class="tree-list" role="listbox" aria-label="Event perspectives"></ul>
+          </div>
+          <div class="tree-group">
+            <div class="tree-heading">Hosts &amp; Nodes</div>
+            <ul id="host-tree" class="tree-list" aria-label="Hosts"></ul>
+          </div>
+          <div class="tree-group">
+            <div class="tree-heading">Active Agents</div>
+            <ul id="agent-tree" class="tree-list" aria-label="Agents"></ul>
+          </div>
+          <div class="tree-group">
+            <div class="tree-heading">Workspaces &amp; Folders</div>
+            <ul id="workspace-tree" class="tree-list" aria-label="Workspaces"></ul>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main" id="main">
+        <section class="browser-pane" aria-label="Real-time event and agent work browser">
+          <div class="toolbar">
+            <div class="toolbar-group">
+              <button type="button" id="mobile-tree-btn" class="btn small mobile-only">Explorer</button>
+              <label for="search" class="sr-only">Search events, files, commands, host or agent</label>
+              <input id="search" class="search" type="search" placeholder="Search message, file, command, agent, host… ( / )" autocomplete="off">
+
+              <label for="window" class="sr-only">History time window</label>
+              <select id="window" class="select" title="History window">
+                <option value="all" selected>All history</option>
+                <option value="900">Last 15 min</option>
+                <option value="3600">Last 1 hour</option>
+                <option value="86400">Last 24 hours</option>
+              </select>
+
+              <label for="severity" class="sr-only">Severity filter</label>
+              <select id="severity" class="select">
+                <option value="">All severities</option>
+                <option value="CRITICAL">Critical</option>
+                <option value="ERROR">Error</option>
+                <option value="WARNING">Warning</option>
+                <option value="INFO">Info</option>
+                <option value="NORMAL">Normal / OK</option>
+              </select>
+
+              <label for="kind" class="sr-only">Source filter</label>
+              <select id="kind" class="select">
+                <option value="">All sources</option>
+                <option value="Alert">Alerts</option>
+                <option value="Agent Work">Agent Work (files &amp; cmds)</option>
+                <option value="Event">System / Agent Events</option>
+                <option value="Collaboration">Collaboration</option>
+                <option value="Audit">Audit Trail</option>
+              </select>
+
+              <label for="category" class="sr-only">Work category filter</label>
+              <select id="category" class="select">
+                <option value="">All actions</option>
+                <option value="file_edit">Edit files</option>
+                <option value="shell">Run commands</option>
+                <option value="file_read">Read files</option>
+                <option value="plan">Plan</option>
+                <option value="coordination">Coordinate</option>
+                <option value="web">Web &amp; browser</option>
+                <option value="guardrail">Guardrail / Resource</option>
+              </select>
+
+              <label for="status" class="sr-only">State filter</label>
+              <select id="status" class="select">
+                <option value="">All states</option>
+                <option value="OPEN">Open / Active</option>
+                <option value="ACKED">Acknowledged</option>
+                <option value="RESOLVED">Resolved / Done</option>
+                <option value="RECORDED">Recorded</option>
+              </select>
+            </div>
+
+            <div class="toolbar-group">
+              <label for="group-mode" class="sr-only">Group rows by</label>
+              <select id="group-mode" class="select" title="Group rows (SCOM style)">
+                <option value="none">Flat timeline</option>
+                <option value="severity">Group: Severity</option>
+                <option value="agent">Group: Agent</option>
+                <option value="workspace">Group: Workspace</option>
+              </select>
+              <button type="button" id="tint-btn" class="btn small active" aria-pressed="true" title="Toggle OMi full-row severity color tint">Row colors</button>
+              <button type="button" id="density-btn" class="btn small" aria-pressed="false" title="Toggle row density (Compact / Comfortable)">Compact</button>
+              <button type="button" id="ack-selected" class="btn small primary hidden">Acknowledge (A)</button>
+              <button type="button" id="export-csv" class="btn small">CSV</button>
+              <button type="button" id="export-json" class="btn small">JSON</button>
+              <button type="button" id="reset-filters" class="btn small">Reset</button>
+            </div>
+          </div>
+
+          <div id="scope-banner" class="scope-banner hidden">
+            <div id="active-chips" class="active-chips"><span id="scope-text"></span></div>
+            <button type="button" id="clear-scope" class="link-btn">Clear all</button>
+          </div>
+
+          <div id="table-wrap" class="table-wrap" tabindex="0">
+            <table class="tbl" aria-label="Real-time alerts, events and agent work stream">
+              <thead>
+                <tr>
+                  <th class="col-sev"><button type="button" class="sort-btn" data-sort="severity">Sev</button></th>
+                  <th class="col-kind"><button type="button" class="sort-btn" data-sort="kind">Source</button></th>
+                  <th class="col-cat"><button type="button" class="sort-btn" data-sort="categoryLabel">Action</button></th>
+                  <th class="col-state"><button type="button" class="sort-btn" data-sort="status">State</button></th>
+                  <th class="col-time"><button type="button" class="sort-btn" data-sort="ts">Time</button></th>
+                  <th class="col-age">Age</th>
+                  <th class="col-host"><button type="button" class="sort-btn" data-sort="host_id">Host</button></th>
+                  <th class="col-agent"><button type="button" class="sort-btn" data-sort="agent">Agent / Harness</button></th>
+                  <th class="col-where"><button type="button" class="sort-btn" data-sort="where">Folder / File</button></th>
+                  <th class="col-msg"><button type="button" class="sort-btn" data-sort="message">Event / Command / Detail</button></th>
+                </tr>
+              </thead>
+              <tbody id="rows"></tbody>
+            </table>
+            <p id="empty" class="empty-msg">Loading live records…</p>
+          </div>
+
+          <footer class="statusbar" role="status" aria-live="polite">
+            <div class="status-left">
+              <span id="count">0 of 0 records</span>
+              <span class="sep" aria-hidden="true">|</span>
+              <button type="button" class="counter sev-critical" data-quick-sev="CRITICAL" title="Filter Critical"><i aria-hidden="true"></i><span id="cnt-critical">0</span> Critical</button>
+              <button type="button" class="counter sev-warning" data-quick-sev="WARNING" title="Filter Warning"><i aria-hidden="true"></i><span id="cnt-warning">0</span> Warning</button>
+              <button type="button" class="counter sev-info" data-quick-sev="INFO" title="Filter Info"><i aria-hidden="true"></i><span id="cnt-info">0</span> Info</button>
+              <button type="button" class="counter sev-normal" data-quick-sev="NORMAL" title="Filter Normal"><i aria-hidden="true"></i><span id="cnt-normal">0</span> Normal</button>
+              <span class="sep" aria-hidden="true">|</span>
+              <span id="open-alerts-cnt" class="open-badge">0 open alerts</span>
+              <span id="work-steps-cnt" class="work-badge">0 agent actions</span>
+            </div>
+            <div class="status-right">
+              <span id="rate-badge" class="rate-chip" title="Events observed in the last 5 minutes">0 / 5m</span>
+              <button type="button" id="load-older" class="btn hidden" title="Load older persisted history">Load older history</button>
+              <span id="sync">Connecting…</span>
+            </div>
+          </footer>
+        </section>
+
+        <div id="split-handle" class="split-handle" role="separator" aria-orientation="horizontal" aria-label="Resize details panel" aria-valuemin="180" aria-valuemax="560" aria-valuenow="272" tabindex="0" title="Drag or use Up/Down arrows to resize details pane"><span></span></div>
+
+        <section id="details" class="detail-pane" aria-label="Selected event details and correlations">
+          <div class="detail-head">
+            <div class="detail-tabs" role="tablist" aria-label="Event detail tabs">
+              <button type="button" class="dtab active" role="tab" aria-selected="true" data-dtab="general">General</button>
+              <button type="button" class="dtab" role="tab" aria-selected="false" data-dtab="correlations">Correlations <span id="corr-count" class="tab-cnt">0</span></button>
+              <button type="button" class="dtab" role="tab" aria-selected="false" data-dtab="files">Files &amp; Workspace <span id="files-count" class="tab-cnt">0</span></button>
+              <button type="button" class="dtab" role="tab" aria-selected="false" data-dtab="evidence">Evidence &amp; JSON</button>
+              <button type="button" class="dtab" role="tab" aria-selected="false" data-dtab="actions">Actions &amp; Keys</button>
+            </div>
+            <div id="detail-quick" class="detail-quick"></div>
+          </div>
+          <div id="detail" class="detail-body">
+            <p class="muted">Select any alert, event, file edit, or command row above to inspect its full details, correlations, and files touched.</p>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="cmdk-overlay" class="cmdk-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="cmdk-label">
+    <div class="cmdk-card">
+      <div class="cmdk-head">
+        <label id="cmdk-label" for="cmdk-input" class="sr-only">Quick jump to perspective, agent, host, workspace or action</label>
+        <input id="cmdk-input" class="cmdk-input" type="search" placeholder="Jump to perspective, agent, host, folder, or action…" autocomplete="off">
+        <kbd class="cmdk-esc">Esc</kbd>
+      </div>
+      <ul id="cmdk-list" class="cmdk-list" role="listbox" aria-label="Quick actions"></ul>
+      <div class="cmdk-foot">
+        <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+        <span><kbd>↵</kbd> select</span>
+        <span><kbd>Esc</kbd> close</span>
+      </div>
+    </div>
+  </div>
+
+  <dialog id="incident-dialog" aria-labelledby="incident-heading">
+    <header class="incident-head">
+      <h2 id="incident-heading">Incident</h2>
+      <button type="button" class="btn" id="incident-refresh">Refresh</button>
+      <button type="button" class="btn" id="incident-close" autofocus>Close</button>
+    </header>
+    <p id="incident-feedback" role="status"></p>
+    <div id="incident-content"></div>
+  </dialog>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  <script defer src="/live.js"></script>
+</body>
+</html>

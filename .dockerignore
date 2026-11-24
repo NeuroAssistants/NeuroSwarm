@@ -1,0 +1,23 @@
+**/__pycache__
+**/*.pyc
+**/*.db*
+**/*.sqlite*
+.env*
+.git
+backups/
+data/
+
+# Private state may be placed in a custom directory inside the build context
+**/initial-password
+**/swarmcontrol-initial-password-*
+**/.env
+**/.env.*
+**/*.env
+**/*.key
+**/*.pem
+**/state/
+**/backups/
+**/capture_offsets.json
+**/pending_activity_queue.json
+**/.capture_offsets.json.*.tmp
+**/.pending_activity_queue.json.*.tmp

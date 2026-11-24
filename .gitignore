@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+*.env
+*.db*
+*.sqlite*
+*.key
+*.pem
+initial-password
+state/
+backups/
+node_modules/
+
+# Local state from the console and observer
+/data/
+swarmcontrol-initial-password-*
+capture_offsets.json
+pending_activity_queue.json
+.capture_offsets.json.*.tmp
+.pending_activity_queue.json.*.tmp
+.env.*
+!.env.example
+!.env.sample

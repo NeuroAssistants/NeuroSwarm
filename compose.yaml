@@ -1,0 +1,28 @@
+services:
+  console:
+    build: .
+    environment:
+      SWARMCONTROL_STATE_DIR: /data
+      SWARMCONTROL_HOST: 0.0.0.0
+      SWARMCONTROL_PUBLIC_URL: ${SWARMCONTROL_PUBLIC_URL:-}
+      SWARMCONTROL_REGISTRATION: ${SWARMCONTROL_REGISTRATION:-open}
+    ports:
+      - "127.0.0.1:${SWARMCONTROL_PORT:-8790}:8790"
+    volumes:
+      - state:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/health',timeout=3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  backup:
+    build: .
+    command: ["python", "deploy/backup.py", "schedule", "/data", "/backups"]
+    volumes:
+      - state:/data
+      - backups:/backups
+    restart: unless-stopped
+volumes:
+  state:
+  backups:

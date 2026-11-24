@@ -1,0 +1,12 @@
+services:
+  https:
+    image: caddy:2-alpine
+    command: ["caddy","reverse-proxy","--from","${SWARMCONTROL_PUBLIC_URL:?Set the public HTTPS URL}","--to","http://console:8790"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - certificates:/data
+    restart: unless-stopped
+volumes:
+  certificates:

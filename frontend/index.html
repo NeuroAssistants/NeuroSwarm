@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#192823">
+  <title>NeuroSwarm · Coding agent monitor</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%20role%3D%22img%22%3E%3Ctitle%3ENeuroSwarm%3C%2Ftitle%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2210%22%20fill%3D%22%23192823%22%2F%3E%3Cg%20transform%3D%22translate%288%2013%29%22%3E%3Cpolygon%20fill%3D%22%23BDF2C9%22%20points%3D%2216%2C2%2048%2C2%2040%2C10%208%2C10%22%2F%3E%3Cpolygon%20fill%3D%22%23BDF2C9%22%20points%3D%228%2C15%2040%2C15%2032%2C23%200%2C23%22%2F%3E%3Cpolygon%20fill%3D%22%23BDF2C9%22%20points%3D%228%2C28%2032%2C28%2024%2C36%200%2C36%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/activity-product.css">
+</head>
+<body>
+  <main id="login-view" class="login-shell hidden">
+    <div class="login-story">
+      <div class="story-brand"><svg class="lockup" xmlns="http://www.w3.org/2000/svg" viewBox="-12 -6 295 64" role="img"><rect x="-12" y="-6" width="295" height="64" rx="8" fill="#152925"/><title>NeuroSwarm</title><g transform="translate(2 7)"><polygon fill="#BDF2C9" points="16,2 48,2 40,10 8,10"/><polygon fill="#BDF2C9" points="8,15 40,15 32,23 0,23"/><polygon fill="#BDF2C9" points="8,28 32,28 24,36 0,36"/></g><text x="61" y="38" font-family="Arial,Helvetica,sans-serif" font-size="36" font-weight="bold" letter-spacing="-1.4" fill="#BDF2C9">NeuroSwarm</text></svg></div>
+      <div class="login-photo" aria-hidden="true"></div>
+      <div class="story-copy">
+        <p>See what your coding agents are working on</p>
+        <span>Follow an agent from its task to its latest file edit. See commands, machine health and alerts in the same place.</span>
+        <ul class="story-highlights">
+          <li>Each team controls who can see its work.</li>
+          <li>Choose which folders to share.</li>
+          <li>Follow sessions from Codex, Claude Code, OpenCode and Antigravity.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="signin-panel">
+      <div class="login-card">
+        <div class="auth-tabs" role="tablist" aria-label="Account access mode">
+          <button type="button" class="auth-tab active" role="tab" id="tab-signin" aria-selected="true" aria-controls="panel-signin" data-auth-tab="signin">Sign in</button>
+          <button type="button" class="auth-tab" role="tab" id="tab-register" aria-selected="false" aria-controls="panel-register" data-auth-tab="register">Create org</button>
+          <button type="button" class="auth-tab" role="tab" id="tab-invite" aria-selected="false" aria-controls="panel-invite" data-auth-tab="invite">Use invite</button>
+        </div>
+
+        <section id="panel-signin" class="auth-panel" role="tabpanel" aria-labelledby="tab-signin">
+          <h1>Sign in</h1>
+          <p class="intro">Open your organization console to monitor hosts, sessions, and alerts.</p>
+          <form id="login-form">
+            <label for="username">Username</label>
+            <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+            <label for="password">Password</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" required>
+            <div id="login-otp-group" class="hidden">
+              <label for="login-otp">Authenticator code (6 digits)</label>
+              <input id="login-otp" name="otp" type="text" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" placeholder="123456">
+              <p class="muted small field-hint">Enter the 6-digit code from your authenticator app.</p>
+            </div>
+            <button type="submit" class="btn primary full">Sign in <span aria-hidden="true">→</span></button>
+            <div id="login-error" class="error-text hidden" role="alert"></div>
+          </form>
+        </section>
+
+        <section id="panel-register" class="auth-panel hidden" role="tabpanel" aria-labelledby="tab-register">
+          <h1>Create organization</h1>
+          <p class="intro">Start an isolated workspace with your own hosts, tokens, and team members.</p>
+          <form id="register-form">
+            <label for="reg-org">Organization name</label>
+            <input id="reg-org" name="organization" type="text" required minlength="2" maxlength="80" placeholder="e.g. Acme Engineering">
+            <label for="reg-username">Admin username</label>
+            <input id="reg-username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required minlength="3" maxlength="128" placeholder="alex.ops">
+            <p class="muted small field-hint">3–128 characters: letters, digits, or <code>. _ @ + -</code></p>
+            <label for="reg-password">Password</label>
+            <input id="reg-password" name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="128" placeholder="At least 12 characters">
+            <p class="muted small field-hint">Minimum 12 characters. You can add 2FA right after sign-in.</p>
+            <button type="submit" class="btn primary full">Create workspace <span aria-hidden="true">→</span></button>
+            <div id="register-error" class="error-text hidden" role="alert"></div>
+          </form>
+        </section>
+
+        <section id="panel-invite" class="auth-panel hidden" role="tabpanel" aria-labelledby="tab-invite">
+          <h1>Join an organization</h1>
+          <p class="intro">Paste the single-use invitation token shared by your organization admin.</p>
+          <form id="invite-accept-form">
+            <label for="inv-token">Invitation token</label>
+            <input id="inv-token" name="token" type="text" autocapitalize="none" spellcheck="false" required placeholder="Paste token from invite">
+            <label for="inv-username">Username</label>
+            <input id="inv-username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required minlength="3" maxlength="128">
+            <label for="inv-password">Password</label>
+            <input id="inv-password" name="password" type="password" autocomplete="current-password" required minlength="12" maxlength="128">
+            <p class="muted small field-hint">New users set a 12+ character password; existing users enter their current password.</p>
+            <div id="invite-otp-group" class="hidden">
+              <label for="inv-otp">Authenticator code (if 2FA enabled)</label>
+              <input id="inv-otp" name="otp" type="text" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" placeholder="123456">
+            </div>
+            <button type="submit" class="btn primary full">Accept invitation <span aria-hidden="true">→</span></button>
+            <div id="invite-accept-error" class="error-text hidden" role="alert"></div>
+          </form>
+        </section>
+
+        <p class="auth-footnote muted small">Your account and activity are stored on this server.</p>
+      </div>
+    </div>
+  </main>
+
+  <div id="app-view" class="app-shell hidden">
+    <a href="#main-content" class="skip-link">Skip to fleet overview</a>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="topbar-left">
+          <svg class="lockup" xmlns="http://www.w3.org/2000/svg" viewBox="-12 -6 295 64" role="img"><rect x="-12" y="-6" width="295" height="64" rx="8" fill="#152925"/><title>NeuroSwarm</title><g transform="translate(2 7)"><polygon fill="#BDF2C9" points="16,2 48,2 40,10 8,10"/><polygon fill="#BDF2C9" points="8,15 40,15 32,23 0,23"/><polygon fill="#BDF2C9" points="8,28 32,28 24,36 0,36"/></g><text x="61" y="38" font-family="Arial,Helvetica,sans-serif" font-size="36" font-weight="bold" letter-spacing="-1.4" fill="#BDF2C9">NeuroSwarm</text></svg>
+          <div class="org-bar-wrap">
+            <label for="org-switcher" class="sr-only">Active organization</label>
+            <select id="org-switcher" class="org-select hidden" aria-label="Switch active organization"></select>
+            <span id="org-badge" class="org-pill">Organization</span>
+          </div>
+          <span class="sr-only">Fleet status</span><span id="fleet-badge" class="pill waiting">WAITING</span>
+        </div>
+        <div class="topbar-right">
+          <a href="/live" class="btn bar-btn live-cta-btn"><span class="live-dot" aria-hidden="true"></span>Live NOC ↗</a>
+          <button id="cmdk-btn" class="btn bar-btn cmdk-trigger" type="button" title="Quick jump &amp; actions (Ctrl+K / ⌘K)">Jump <kbd>⌘K</kbd></button>
+          <span id="operator-label" class="operator"></span>
+          <span id="role-badge" class="pill role-pill">ROLE</span>
+          <button id="refresh-btn" class="btn bar-btn" type="button">Refresh</button>
+          <button id="logout-btn" class="btn bar-btn" type="button">Sign out</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <nav class="section-nav" aria-label="Console sections">
+        <a href="#main-content"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>Overview</a>
+        <a href="#activity"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="6" height="5" rx="1"/><rect x="2" y="15" width="6" height="5" rx="1"/><rect x="16" y="9.5" width="6" height="5" rx="1"/><path d="M8 6.5c4 0 4 5.5 8 5.5M8 17.5c4 0 4-5.5 8-5.5"/></svg>Activity map</a>
+        <a href="#agent-work"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4v16M9 5h10M9 12h7M9 19h10"/><circle cx="5" cy="5" r="2"/><circle cx="5" cy="12" r="2"/><circle cx="5" cy="19" r="2"/></svg>Agent work</a>
+        <a href="#alerts"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 10 17H2z M12 8v5 M12 16v.1"/></svg>Alerts</a>
+        <a href="#hosts"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M6 7h2 M6 17h2"/></svg>Hosts</a>
+        <a href="#enrollment"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h8v11H3z M14 12h8 M18 8v8"/></svg>Install &amp; enroll</a>
+        <a href="#organization"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 19.5c.6-3.2 3.2-5 6.5-5s5.9 1.8 6.5 5"/><circle cx="17.5" cy="9.5" r="2.5"/><path d="M17.5 14.5c2 0 3.7 1 4.3 3"/></svg>Organization</a>
+        <a href="#security"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6.5v5.5c0 4.6 3.4 8.2 8 9.5 4.6-1.3 8-4.9 8-9.5V6.5z"/><path d="M9.5 12.2 11.3 14l3.5-3.8"/></svg>Account &amp; 2FA</a>
+        <a href="/live" class="nav-live-link"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2.5"/><path d="M16.2 7.8a6 6 0 0 1 0 8.4M7.8 16.2a6 6 0 0 1 0-8.4M19.1 4.9a10 10 0 0 1 0 14.2M4.9 19.1a10 10 0 0 1 0-14.2"/></svg>Live events ↗</a>
+        <a href="#events"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12h5l3-7 4 14 3-7h5"/></svg>Events</a>
+        <a href="#audit" id="nav-audit-link"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="1"/><path d="M8 8h8 M8 12h8 M8 16h5"/></svg>Audit trail</a>
+      </nav>
+
+      <main class="container" id="main-content" tabindex="-1">
+        <div id="status-toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+        <section id="onboarding-banner" class="onboarding-card hidden" aria-labelledby="onboarding-heading">
+          <div class="onboarding-head">
+            <div>
+              <span class="pill healthy">GETTING STARTED</span>
+              <h2 id="onboarding-heading">Connect your first machine in under 2 minutes</h2>
+              <p class="muted small">Your organization <strong id="onboarding-org-name"></strong> is isolated and ready. Nothing leaves a host until you enroll it.</p>
+            </div>
+            <button type="button" id="dismiss-onboarding-btn" class="btn small">Hide guide</button>
+          </div>
+          <ol class="onboarding-steps">
+            <li class="done">
+              <span class="step-num" aria-hidden="true">✓</span>
+              <div>
+                <strong>Organization created</strong>
+                <p class="muted small">Dedicated tenant database &amp; session isolation are active.</p>
+              </div>
+            </li>
+            <li id="ob-step-host">
+              <span class="step-num" aria-hidden="true">2</span>
+              <div>
+                <strong>Install the passive observer</strong>
+                <p class="muted small">Create an ingest token for Linux, macOS, Windows, or WSL and optionally select folders for redacted activity tracking.</p>
+                <a href="#enrollment" class="btn small primary">Open installer →</a>
+              </div>
+            </li>
+            <li id="ob-step-team">
+              <span class="step-num" aria-hidden="true">3</span>
+              <div>
+                <strong>Invite teammates &amp; enable 2FA</strong>
+                <p class="muted small">Assign Admin, Operator, or Viewer roles and protect your sign-in with an authenticator app.</p>
+                <div class="inline-links">
+                  <a href="#organization" class="btn small">Manage team</a>
+                  <a href="#security" class="btn small">Set up 2FA</a>
+                </div>
+              </div>
+            </li>
+          </ol>
+        </section>
+
+        <section class="digest" aria-labelledby="overview-heading">
+          <div class="overview-head">
+            <div>
+              <span id="overview-org-kicker" class="kicker">ACTIVE ORGANIZATION</span>
+              <h1 id="overview-heading">Fleet overview</h1>
+            </div>
+            <span id="digest-time" class="muted small"></span>
+          </div>
+          <p id="digest-headline" class="digest-headline">Loading fleet status…</p>
+          <ul id="digest-bullets" class="digest-bullets"></ul>
+          <div class="kpi-grid">
+            <div class="kpi"><span class="kpi-label">Monitored hosts</span><strong id="kpi-hosts">—</strong></div>
+            <div class="kpi"><span class="kpi-label">Agent processes</span><strong id="kpi-procs">—</strong></div>
+            <div class="kpi"><span class="kpi-label">Active runtimes</span><strong id="kpi-harnesses">—</strong></div>
+            <div class="kpi"><span class="kpi-label">Open alerts</span><strong id="kpi-alerts">—</strong></div>
+            <div class="kpi"><span class="kpi-label">Max scan time</span><strong id="kpi-scan">—</strong></div>
+          </div>
+        </section>
+
+        <section class="card" id="activity" aria-labelledby="activity-heading">
+          <div class="card-head"><h2 id="activity-heading">Activity map</h2><span class="muted small">What each agent did, plans, how it worked, and where</span></div>
+          <div id="activity-map">Loading agent activity…</div>
+        </section>
+
+        <div class="grid-2">
+          <section class="card" id="alerts" aria-labelledby="alerts-heading">
+            <div class="card-head"><h2 id="alerts-heading">Alerts</h2>
+              <label class="sr-only" for="alert-filter">Filter alerts</label>
+              <select id="alert-filter" class="select"><option value="ACTIVE">Active incidents</option><option value="OPEN">Awaiting acknowledgement</option><option value="ALL">All alerts</option></select>
+            </div>
+            <div id="alerts-list" class="stack"></div>
+          </section>
+
+          <section class="card" id="enrollment" aria-labelledby="enrollment-heading">
+            <div class="card-head">
+              <div>
+                <h2 id="enrollment-heading">Install &amp; enroll a host</h2>
+                <p class="muted small card-sub">Service URL installer for Linux, macOS, Windows/WSL, or repository CLI.</p>
+              </div>
+            </div>
+
+            <div id="enrollment-readonly-note" class="notice-box hidden">
+              <p class="muted small">Token creation and revocation require the <strong>admin</strong> role. Ask an organization admin to generate a host enrollment command.</p>
+            </div>
+
+            <form id="token-form" class="enroll-form">
+              <div class="form-grid-2">
+                <div>
+                  <label for="token-name">Host or token label</label>
+                  <input id="token-name" name="host" type="text" required maxlength="80" placeholder="e.g. build-mac-01">
+                </div>
+                <div>
+                  <label for="token-scope">Token scope</label>
+                  <select id="token-scope" name="scope" class="select full-select">
+                    <option value="ingest">Host observer (ingest)</option>
+                    <option value="read">Read-only API (read)</option>
+                  </select>
+                </div>
+              </div>
+              <div id="activity-roots-wrap">
+                <label for="token-activity-roots">Opt-in activity folders <span class="muted small">(optional, off by default)</span></label>
+                <input id="token-activity-roots" name="activity_roots" type="text" placeholder="e.g. /home/dev/project-a:/home/dev/project-b">
+                <p class="muted small field-hint">Activity shipping stays off unless you list folders here. Paths are redacted locally before upload.</p>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="btn primary">Generate token &amp; installer</button>
+              </div>
+            </form>
+            <div id="token-error" class="error-text hidden" role="alert"></div>
+
+            <div id="install-output" class="install-box hidden">
+              <div class="install-box-head">
+                <strong id="install-output-title">Run on the host you want to monitor.</strong>
+                <button id="copy-cmd-btn" type="button" class="btn small secondary">Copy</button>
+              </div>
+              <div id="install-platform-tabs" class="sub-tabs" role="tablist" aria-label="Installer platform">
+                <button type="button" class="sub-tab active" role="tab" aria-selected="true" data-platform="unix">Linux / macOS / WSL</button>
+                <button type="button" class="sub-tab" role="tab" aria-selected="false" data-platform="windows">Windows PowerShell</button>
+                <button type="button" class="sub-tab" role="tab" aria-selected="false" data-platform="repo">Repo / Preview CLI</button>
+                <button type="button" class="sub-tab" role="tab" aria-selected="false" data-platform="docker">Self-host Docker</button>
+              </div>
+              <pre id="install-cmd" tabindex="0" aria-label="Installation command"></pre>
+              <p id="install-cmd-note" class="muted small">Save this command now. The single-host token is shown only once.</p>
+            </div>
+
+            <h3 class="sub-heading">Active &amp; revoked tokens</h3>
+            <div id="tokens-list" class="stack small-gap"></div>
+          </section>
+        </div>
+
+        <section class="card" id="agent-work" aria-labelledby="agent-work-heading">
+          <div class="card-head"><h2 id="agent-work-heading">Agent work</h2><span class="muted small">Collaboration by change, reported plans, results, and workspace evidence</span></div>
+          <div id="work-board">Loading workspace evidence…</div>
+        </section>
+
+        <section class="card" id="hosts" aria-labelledby="hosts-heading">
+          <div class="card-head"><h2 id="hosts-heading">Enrolled hosts</h2><span class="muted small">Processes, detected runtimes, and working folders</span></div>
+          <div id="hosts-list" class="hosts-grid"></div>
+        </section>
+
+        <div class="grid-2">
+          <section class="card" id="organization" aria-labelledby="org-heading">
+            <div class="card-head">
+              <div>
+                <h2 id="org-heading">Organization &amp; roles</h2>
+                <p class="muted small card-sub">Manage team memberships, role permissions, and single-use invitations.</p>
+              </div>
+              <span id="org-section-badge" class="pill neutral">TENANT</span>
+            </div>
+
+            <div id="org-memberships-box" class="notice-box hidden">
+              <div class="inline-between">
+                <span class="small"><strong>Your organizations:</strong> <span id="org-memberships-summary"></span></span>
+              </div>
+            </div>
+
+            <div id="org-nonadmin-note" class="notice-box hidden">
+              <p class="small">You have the <strong id="nonadmin-role-label"></strong> role in this organization.</p>
+              <ul class="role-matrix muted small">
+                <li><strong>Viewer:</strong> Read hosts, overview, activity map, alerts, events, and work reports.</li>
+                <li><strong>Operator:</strong> Viewer access plus acknowledging guardrail alerts.</li>
+                <li><strong>Admin:</strong> Full access including tokens, members, invitations, and audit trail.</li>
+              </ul>
+            </div>
+
+            <div id="org-admin-panel" class="hidden">
+              <h3 class="sub-heading">Members</h3>
+              <div id="members-error" class="error-text hidden" role="alert"></div>
+              <div id="members-list" class="stack small-gap"></div>
+
+              <h3 class="sub-heading">Invite a teammate</h3>
+              <form id="invite-create-form" class="enroll-form">
+                <div class="form-grid-2">
+                  <div>
+                    <label for="invite-username">Username to invite</label>
+                    <input id="invite-username" name="username" type="text" required minlength="3" maxlength="128" placeholder="jamie.dev">
+                  </div>
+                  <div>
+                    <label for="invite-role">Role</label>
+                    <select id="invite-role" name="role" class="select full-select">
+                      <option value="viewer">Viewer (read-only)</option>
+                      <option value="operator">Operator (ack alerts)</option>
+                      <option value="admin">Admin (full control)</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="form-actions">
+                  <button type="submit" class="btn primary">Create 48h invitation</button>
+                </div>
+              </form>
+              <div id="invite-create-error" class="error-text hidden" role="alert"></div>
+
+              <div id="invite-created-box" class="install-box hidden">
+                <div class="install-box-head">
+                  <strong>Share this invitation link privately (single-use, expires in 48h).</strong>
+                  <button id="copy-invite-btn" type="button" class="btn small secondary">Copy link</button>
+                </div>
+                <pre id="invite-created-link" tabindex="0" aria-label="Invitation link"></pre>
+                <p class="muted small">Raw token: <code id="invite-created-token"></code></p>
+              </div>
+
+              <h3 class="sub-heading">Invitations</h3>
+              <div id="invitations-list" class="stack small-gap"></div>
+            </div>
+          </section>
+
+          <section class="card" id="security" aria-labelledby="security-heading">
+            <div class="card-head">
+              <div>
+                <h2 id="security-heading">Account &amp; 2FA security</h2>
+                <p class="muted small card-sub">Authenticator-app TOTP protection and identity provider status.</p>
+              </div>
+              <span id="mfa-status-badge" class="pill waiting">2FA OFF</span>
+            </div>
+
+            <div class="notice-box">
+              <div class="small"><strong>Identity provider:</strong> Local multi-tenant credentials (WorkOS / OIDC adapter ready).</div>
+              <p class="muted small" style="margin:4px 0 0;">Sessions use HttpOnly same-origin cookies scoped to your active organization.</p>
+            </div>
+
+            <div id="mfa-setup-section" class="stack small-gap">
+              <h3 class="sub-heading">Enable two-factor authentication (TOTP)</h3>
+              <form id="mfa-start-form" class="enroll-form">
+                <label for="mfa-start-password">Confirm current password</label>
+                <div class="inline-form">
+                  <input id="mfa-start-password" type="password" autocomplete="current-password" required placeholder="Current password">
+                  <button type="submit" class="btn primary">Generate secret</button>
+                </div>
+              </form>
+
+              <div id="mfa-confirm-box" class="install-box hidden">
+                <div class="install-box-head">
+                  <strong>Add this secret to your authenticator app</strong>
+                  <button id="copy-mfa-secret-btn" type="button" class="btn small secondary">Copy secret</button>
+                </div>
+                <pre id="mfa-secret-code" tabindex="0" aria-label="TOTP setup secret"></pre>
+                <p class="muted small">OTPAuth URI: <code id="mfa-otpauth-uri"></code></p>
+                <form id="mfa-confirm-form" class="enroll-form small-gap">
+                  <label for="mfa-confirm-otp">Enter 6-digit verification code</label>
+                  <div class="inline-form">
+                    <input id="mfa-confirm-otp" type="text" inputmode="numeric" pattern="[0-9]{6}" required placeholder="123456">
+                    <button type="submit" class="btn primary">Verify &amp; enable 2FA</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+
+            <div id="mfa-disable-section" class="stack small-gap hidden">
+              <h3 class="sub-heading">Two-factor authentication is active</h3>
+              <p class="muted small">Your account requires a 6-digit authenticator code on sign-in. To disable it, confirm your password and a current code.</p>
+              <form id="mfa-disable-form" class="enroll-form">
+                <div class="form-grid-2">
+                  <div>
+                    <label for="mfa-disable-password">Current password</label>
+                    <input id="mfa-disable-password" type="password" autocomplete="current-password" required>
+                  </div>
+                  <div>
+                    <label for="mfa-disable-otp">6-digit code</label>
+                    <input id="mfa-disable-otp" type="text" inputmode="numeric" pattern="[0-9]{6}" required placeholder="123456">
+                  </div>
+                </div>
+                <div class="form-actions">
+                  <button type="submit" class="btn danger">Disable 2FA</button>
+                </div>
+              </form>
+            </div>
+
+            <div id="mfa-error" class="error-text hidden" role="alert"></div>
+          </section>
+        </div>
+
+        <div class="grid-2">
+          <section class="card" id="events" aria-labelledby="events-heading">
+            <div class="card-head"><h2 id="events-heading">Recent events</h2></div>
+            <div id="events-list" class="stack"></div>
+          </section>
+          <section class="card" id="audit" aria-labelledby="audit-heading">
+            <div class="card-head card-head-title"><h2 id="audit-heading">Audit trail</h2>
+              <span id="audit-integrity-badge" class="pill waiting" title="Audit chain integrity">VERIFYING</span></div>
+            <div id="audit-list" class="stack"></div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+  <div id="cmdk-overlay" class="cmdk-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="cmdk-label">
+    <div class="cmdk-card">
+      <div class="cmdk-head">
+        <label id="cmdk-label" for="cmdk-input" class="sr-only">Quick jump to console section or action</label>
+        <input id="cmdk-input" class="cmdk-input" type="search" placeholder="Jump to section, open Live NOC, switch org, or run action…" autocomplete="off">
+        <kbd class="cmdk-esc">Esc</kbd>
+      </div>
+      <ul id="cmdk-list" class="cmdk-list" role="listbox" aria-label="Quick actions"></ul>
+      <div class="cmdk-foot">
+        <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+        <span><kbd>↵</kbd> select</span>
+        <span><kbd>Esc</kbd> close</span>
+      </div>
+    </div>
+  </div>
+  <script src="/app.js"></script>
+  <script src="/activity.js"></script>
+</body>
+</html>

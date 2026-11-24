@@ -1,0 +1,1444 @@
+"""Passive, read-only view of what local agent harnesses did inside the folders an operator chose.
+
+Answers four questions per agent session, from the harness's own local records:
+  what it did (latest summary), what it plans (checklist), how it worked (readable
+  steps and a tool mix), and where (workspace, files edited, files read).
+
+Sources: Codex (state DB + rollout JSONL, incl. code-mode `exec`), Claude Code
+(project JSONL + task files), Gemini/Antigravity (brain transcripts + conversation
+metadata) and OpenCode (`session_v2`, read-only SQLite).
+
+Privacy model (opt-in): nothing is read unless the operator lists folders in
+SWARMCONTROL_ACTIVITY_ROOTS. Sessions whose working folder is outside those roots are
+skipped, and file paths outside them are dropped. Identity comes from the folder (or
+SWARMCONTROL_AGENT_LABELS); the core knows no team, product or path. Optional adapters
+(e.g. `adapters/openbot.py`, enabled with SWARMCONTROL_ACTIVITY_ADAPTERS=openbot) may add
+roots and labels from a host application without the core depending on it.
+
+Output follows REMOTE-CONTRACT v1 (`POST /api/v1/ingest/activity`), so a local scan and a
+remote agent produce the same snapshot. Never writes, signals or blocks anything.
+"""
+from __future__ import annotations
+
+import hashlib
+import importlib
+import json
+import os
+import re
+import shutil
+import socket
+import sqlite3
+import subprocess
+import threading
+import time
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+SCHEMA_VERSION = "1.0"
+HOME = Path(os.environ.get("SWARMCONTROL_ACTIVITY_HOME") or Path.home())
+ACTIVE_WINDOW_SEC = 900
+LABEL_RE = re.compile(r"[^\w .@+-]+", re.UNICODE)
+
+
+# --- scope: which folders may be read, and how they are named ---------------------
+def _split_roots(raw: str) -> list[str]:
+    # Same syntax as the remote agent: os.pathsep (":" Unix, ";" Windows) or commas.
+    return [p.strip() for p in re.split(r"[,%s]" % re.escape(os.pathsep), raw or "") if p.strip()]
+
+
+def parse_labels(raw: str) -> dict[str, str]:
+    """`key=Name,key2=Name` where key is a folder name or absolute folder path."""
+    labels: dict[str, str] = {}
+    for pair in (raw or "").split(","):
+        key, sep, value = pair.partition("=")
+        if sep and key.strip() and value.strip():
+            labels[key.strip().rstrip("/")] = LABEL_RE.sub("", value.strip())[:64] or key.strip()
+    return labels
+
+
+class Scope:
+    """Allowed roots plus display labels. Longest matching root owns a path."""
+
+    def __init__(self, roots: list[str | Path] | None = None, labels: dict[str, str] | None = None,
+                 host_id: str | None = None, adapters: list[Any] | None = None):
+        clean = []
+        for r in roots or []:
+            try:
+                p = Path(r).expanduser().resolve()
+            except (OSError, RuntimeError):
+                continue
+            if p.is_dir() and not is_sensitive_path(str(p)) and p not in clean:
+                clean.append(p)
+        self.roots = sorted(clean, key=lambda p: len(p.parts), reverse=True)
+        self.labels = dict(labels or {})
+        self.host_id = (host_id or socket.gethostname())[:128]
+        self.adapters = list(adapters or [])
+        names = Counter(p.name for p in self.roots)
+        self._ids = {p: (p.name if names[p.name] == 1 else
+                         f"{p.name}-{hashlib.sha256(str(p).encode()).hexdigest()[:6]}") for p in self.roots}
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.roots)
+
+    def root_of(self, path: Any) -> Path | None:
+        s = str(path or "")
+        if s.startswith("file://"):
+            s = s[7:]
+        if not Path(s).is_absolute():
+            return None
+        try:
+            p = Path(s).resolve()
+        except (OSError, RuntimeError):
+            return None
+        if is_sensitive_path(str(p)):
+            return None
+        return next((r for r in self.roots if p == r or p.is_relative_to(r)), None)
+
+    def contains(self, path: Any) -> bool:
+        return self.root_of(path) is not None
+
+    def identity(self, path: Any) -> tuple[str, str, str]:
+        """(agent_id, agent_name, workspace) for a path inside a root, else ("", "", "")."""
+        root = self.root_of(path)
+        if root is None:
+            return "", "", ""
+        name = self.labels.get(str(root)) or self.labels.get(root.name) or root.name
+        return self._ids[root], name, str(root)
+
+
+def load_scope() -> Scope:
+    roots = _split_roots(os.environ.get("SWARMCONTROL_ACTIVITY_ROOTS", ""))
+    labels: dict[str, str] = {}
+    adapters = []
+    for name in _split_roots(os.environ.get("SWARMCONTROL_ACTIVITY_ADAPTERS", "")):
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", name):
+            continue
+        try:
+            adapter = importlib.import_module(f"adapters.{name}")
+        except ImportError:
+            continue  # an optional integration must never break the core scan
+        adapters.append(adapter)
+        for pre in getattr(adapter, "TOOL_PREFIXES", []):
+            if pre not in TOOL_PREFIXES:
+                TOOL_PREFIXES.append(pre)
+        try:
+            roots += [str(r) for r in adapter.roots()]
+            labels.update(adapter.labels())
+        except Exception:
+            continue
+    labels.update(parse_labels(os.environ.get("SWARMCONTROL_AGENT_LABELS", "")))  # operator wins
+    return Scope(roots, labels, os.environ.get("SWARMCONTROL_HOST_ID"), adapters)
+
+
+_CURRENT: Scope | None = None
+
+
+def _scope() -> Scope:
+    return _CURRENT if _CURRENT is not None else load_scope()
+
+# --- redaction & sensitive paths -------------------------------------------------
+SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("swarmcontrol_token", re.compile(r"\bsc_(?:live|tok)_[A-Za-z0-9_-]{8,}")),
+    ("anthropic_key", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{16,}")),
+    ("openai_key", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}")),
+    ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_-]{25,}")),
+    ("xai_key", re.compile(r"\bxai-[A-Za-z0-9_-]{20,}")),
+    ("github_token", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}")),
+    ("huggingface_token", re.compile(r"\bhf_[A-Za-z0-9]{20,}")),
+    ("npm_token", re.compile(r"\bnpm_[A-Za-z0-9]{20,}")),
+    ("aws_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{12,}")),
+    ("private_key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("bearer", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}")),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
+    ("url_credentials", re.compile(r"(?<=://)[^/\s:@]+:[^/\s@]+(?=@)")),
+]
+INLINE_SECRET = re.compile(
+    r"(?i)\b(password|passwd|pass|secret|api[_-]?key|token|admin[_-]?pass|session[_-]?secret)"
+    r"(\s*[:=]\s*)(['\"]?)([^\s'\",;]{6,})")
+NOISE_TAGS = re.compile(r"</?(?:USER_REQUEST|SYSTEM_MESSAGE|system-reminder|[a-z]+-[a-z_-]+-instructions|agent_[a-z_-]+)>", re.I)
+
+SENSITIVE_DIRS = {".vault", "vault", "agent-api-keys", ".farm-connector", ".beszel-access", ".ssh", ".gnupg"}
+SENSITIVE_FILE = re.compile(
+    r"(?i)(?:^\.env(?:\.|$)|auth\.json$|credentials?\.json$|operator-password$|server-password$|\.pw$|"
+    r"admin_credentials|id_rsa|id_ed25519|ssh_ed25519|\.(?:pem|key|p12|pfx|kdbx)$|^cookies(?:\.|$)|"
+    r"(?:^|[._-])(?:secret|secrets|passwd|password|credential|credentials|api[_-]?key)(?:$|[._-])|"
+    r"(?:^|[._-])token\.(?:txt|json|env|key|secret)$|oauth-token$)")
+SKIP_WALK_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".cache", "Cache", "Code Cache",
+                  "GPUCache", "Crashpad", "dist", "build"} | SENSITIVE_DIRS
+
+
+def is_sensitive_path(path: str) -> bool:
+    p = Path(str(path))
+    if any(part.lower() in SENSITIVE_DIRS for part in p.parts):
+        return True
+    return bool(SENSITIVE_FILE.search(p.name))
+
+
+def redact(text: Any, max_len: int = 240) -> str:
+    if not text:
+        return ""
+    clean = NOISE_TAGS.sub(" ", str(text))
+    clean = re.sub(r"\s+", " ", clean).strip()
+    for name, pat in SECRET_PATTERNS:
+        clean = pat.sub(f"[redacted:{name}]", clean)
+    clean = INLINE_SECRET.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", clean)
+    if len(clean) > max_len:
+        clean = clean[: max_len - 1].rstrip() + "…"
+    return clean
+
+
+def clean_path(raw: Any) -> str:
+    s = str(raw or "").strip()
+    for _ in range(3):
+        s = s.strip().strip('"').strip("'").rstrip("\\")
+    if s.startswith("file://"):
+        s = s[7:]
+    if not Path(s).is_absolute() or "\n" in s or len(s) > 400:
+        return ""
+    if ".system_generated/" in s or is_sensitive_path(s):
+        return ""
+    return s
+
+
+# --- tool classification -----------------------------------------------------------
+CATEGORY_LABEL = {
+    "file_edit": "Edit files", "file_read": "Read files", "shell": "Run commands",
+    "web": "Web & browser", "coordination": "Coordinate", "plan": "Plan", "think": "Reason", "visual": "Images",
+    "other": "Other",
+}
+
+
+def categorize_tool(name: str) -> str:
+    low = (name or "").lower()
+    if any(k in low for k in ("todo", "update_plan", "task_create", "taskcreate", "taskupdate", "manage_task", "plan")):
+        return "plan"
+    if any(k in low for k in ("write", "edit", "patch", "notebook", "replace")):
+        return "file_edit"
+    if any(k in low for k in ("read", "view", "glob", "grep", "list_dir", "find_by")):
+        return "file_read"
+    if any(k in low for k in ("command", "bash", "exec", "shell", "terminal")):
+        return "shell"
+    if any(k in low for k in ("image", "screenshot")):
+        return "visual"
+    if any(k in low for k in ("web", "browser", "fetch", "url", "search")):
+        return "web"
+    if any(k in low for k in ("message", "channel", "subagent", "agent", "mcp", "tool_call", "attach")):
+        return "coordination"
+    return "other"
+
+
+FRIENDLY = {
+    "channel_result": "Post the result to the channel", "channel_reply": "Reply in the channel",
+    "send_message": "Message a teammate", "attach_files_to_response": "Attach files to the answer",
+    "run_script": "Drive the browser", "open": "Open a web page", "browser_open": "Open a web page",
+    "tool_call": "Call an OpenBot tool", "list_agents": "Check available teammates",
+    "tool_describe": "Look up a tool", "tool_search": "Look up a tool", "toolsearch": "Look up a tool",
+    "search_memories": "Search saved memory", "screenshot": "Take a screenshot", "imagegen": "Generate an image",
+    "generate_image": "Generate an image", "web_search": "Search the web", "search_web": "Search the web",
+    "web__run": "Search the web", "run_command": "Run a command", "bash": "Run a command",
+    "exec_command": "Run a command", "todowrite": "Update the plan", "update_plan": "Update the plan",
+    "taskcreate": "Add a task to the plan", "taskupdate": "Update a task in the plan", "manage_task": "Update a task",
+    "agent": "Delegate to a helper", "invoke_subagent": "Delegate to a helper", "ask_user": "Ask the user",
+    "askuserquestion": "Ask the user", "close_tab": "Close a browser tab", "set_environment": "Change browser size",
+    "remember": "Save a memory", "react_to_user_message": "React to a message", "routine_no_update": "Finish routine",
+}
+FILE_VERB = {"file_edit": "Edit", "file_read": "Read"}
+
+
+TOOL_PREFIXES: list[str] = []  # adapters may add single-underscore MCP prefixes (e.g. "mcp_<server>_")
+
+
+def _tool_key(tool: str) -> str:
+    """Strip any MCP server namespace: mcp__<server>__name, <server>.name, plus adapter prefixes."""
+    t = str(tool or "").lower()
+    t = re.sub(r"^mcp__.+?__", "", t)
+    for pre in TOOL_PREFIXES:
+        if t.startswith(pre):
+            t = t[len(pre):]
+            break
+    return re.sub(r"^[a-z0-9_-]+\.", "", t)
+
+
+def readable(text: Any, max_len: int = 220) -> str:
+    """Plain, short sentence(s): no markdown, links, absolute paths or status prefixes."""
+    t = str(text or "")
+    t = re.sub(r"\[([^\]]{1,200})\]\((?:file://|https?://)[^)]*\)", r"\1", t)
+    t = re.sub(r"file://(/[^\s)`'\"]+)", lambda m: Path(m.group(1)).name, t)
+    t = re.sub(r"(?<![\w.])/(?:var|home|opt|tmp|etc|usr)/[^\s)`'\",;]+", lambda m: Path(m.group(0).rstrip("/.")).name or m.group(0), t)
+    t = re.sub(r"```.*?```", " ", t, flags=re.S)
+    t = re.sub(r"(\*\*|__|`|^#+\s*|^\s*[-*•]\s+|^\s*\d+\.\s+)", "", t, flags=re.M)
+    t = re.sub(r"(?<!\w)\*(?!\s)([^*]{1,80})\*", r"\1", t)
+    t = re.sub(r"(?:(?<=\s)|^)[-*]?\s*\[[ xX/]\]\s+", "", t, flags=re.M)  # checklist markers, inline or per line
+    t = re.sub(r"^\s*(?:status:\s*\w+\s*)?(?:result:\s*)", "", t, flags=re.I)
+    t = redact(t, 4000)
+    if len(t) > max_len:
+        cut = t[:max_len]
+        end = max(cut.rfind(". "), cut.rfind("; "), cut.rfind(": "))
+        t = (cut[: end + 1] if end > max_len * 0.45 else cut.rsplit(" ", 1)[0] + "…").strip()
+    return t
+
+
+def _step(tool: str, label: Any, ts: Any = None) -> dict[str, Any]:
+    cat = categorize_tool(tool)
+    key = _tool_key(tool)
+    text = str(label or "").strip()
+    first = text.split(" ", 1)
+    flat = text.replace(" ", "_").lower()
+    if not text or _tool_key(first[0]) == key or _tool_key(flat) == key or (len(key) > 4 and flat.endswith("_" + key)):
+        rest = first[1] if len(first) > 1 and _tool_key(first[0]) == key else ""
+        if rest and cat in FILE_VERB:
+            text = f"{FILE_VERB[cat]} {rest}"
+        else:
+            text = FRIENDLY.get(key) or key.replace("__", " ").replace("_", " ").strip().capitalize() or "Use a tool"
+    step = {"tool": redact(key, 48), "category": cat, "label": readable(text, 110), "time": str(ts or "")[:19]}
+    global _POS_N
+    if _POS is not None:  # exact origin: <log key>:<byte offset of the record>:<n-th step from that record>
+        step["src"] = f"{_POS[0]}:{_POS[1]}:{_POS_N}"
+        _POS_N += 1
+    return step
+
+
+CMD_KIND = [
+    (re.compile(r"\b(unittest|pytest|npm (?:run )?test|go test|cargo test)\b"), "Run tests"),
+    (re.compile(r"^(?:sudo\s+(?:-n\s+)?)?systemctl\b"), "Manage a service"),
+    (re.compile(r"^(?:python3?|python3\.\d+)\b"), "Run a Python script"),
+    (re.compile(r"^(?:node|npx|npm)\b"), "Run a Node.js script"),
+    (re.compile(r"^curl\b|^wget\b"), "Call a web address"),
+    (re.compile(r"^git\b"), "Use Git"),
+    (re.compile(r"^sqlite3\b"), "Query a database"),
+    (re.compile(r"^(?:grep|rg|find)\b"), "Search files"),
+    (re.compile(r"^(?:ls|tree|du|stat)\b"), "List files"),
+    (re.compile(r"^(?:cat|head|tail|sed -n|less|wc)\b"), "Read a file"),
+    (re.compile(r"^(?:cp|mv|mkdir|rm|tee|install|chmod)\b"), "Change files"),
+    (re.compile(r"^(?:pdftoppm|convert|magick|weasyprint|rsvg-convert|ffmpeg)\b"), "Render or convert media"),
+]
+
+
+def command_kind(cmd: Any) -> str:
+    """Describe a shell command by its kind only; never return its arguments."""
+    c = str(cmd or "").strip()
+    c = re.sub(r"^(?:cd\s+\S+\s*(?:&&|;)\s*)+", "", c)
+    c = re.sub(r"^(?:[A-Z_][A-Z0-9_]*=\S*\s+)+", "", c)
+    for pat, label in CMD_KIND:
+        if pat.search(c):
+            return label
+    return "Run a shell command"
+
+
+PROGRAM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,39}")
+WRAPPERS = {"sudo", "env", "nohup", "time", "timeout", "nice", "exec", "xargs", "stdbuf"}
+KEYWORD_PREFIX = {"then", "do", "else", "if", "while", "until", "!", "{"}
+SHELL_BUILTINS = {"cd", "set", "export", "source", ".", "if", "then", "else", "elif", "fi", "for", "do", "done", "while",
+                  "until", "case", "esac", "function", "local", "trap", "true", "false", ":", "[", "[[", "test", "{", "}",
+                  "unset", "shopt", "alias", "eval", "builtin", "umask", "pushd", "popd", "wait", "read"}
+
+
+def command_info(cmd: Any) -> dict[str, str]:
+    """{'program': <name>} for any shell command, plus 'command' (redacted, ≤160 chars) when the operator
+    opted in with SWARMCONTROL_SHARE_COMMANDS=1. Never returns arguments otherwise."""
+    c = str(cmd or "").strip()
+    unwrapped = re.match(r"""^(?:/\S*/)?(?:ba|z)?sh\s+-l?c\s+(['"])(.*)\1\s*$""", c, re.S)
+    if unwrapped:
+        c = unwrapped.group(2).strip()
+    program = ""
+    # First real program across segments (newlines, ;, &&, ||, |); shell builtins and keywords are skipped.
+    for segment in re.split(r"\n|;|&&|\|\||\|", c):
+        for tok in re.findall(r"[^\s()]+", segment):
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", tok) or tok.startswith("-"):
+                continue
+            name = tok.rsplit("/", 1)[-1]
+            if name in WRAPPERS or name in KEYWORD_PREFIX or re.fullmatch(r"\d+[smh]?", name):
+                continue  # `then cat x`, `do wc -l`, `if grep -q`: the command follows the keyword
+            if name not in SHELL_BUILTINS and PROGRAM_RE.fullmatch(name) and not is_sensitive_path(name):
+                program = name
+            break
+        if program:
+            break
+    out = {"program": program} if program else {}
+    if os.environ.get("SWARMCONTROL_SHARE_COMMANDS") == "1" and c:
+        shown = re.sub(r"(?<![\w.])/(?:var|home|opt|tmp|etc|usr|root|srv|mnt|Users)/\S+",
+                       lambda m: ".../" + "/".join(Path(m.group(0)).parts[-2:]), c)
+        shown = re.sub(r"(?i)((?:^|\s)(?:-u|-p|--user|--password|--passwd|--pass|--token|--secret|--api[-_]?key|--auth|"
+                       r"--header|-H)\s+)(?:\"[^\"]*\"|'[^']*'|\S+)", r"\1[redacted]", shown)
+        shown = redact(shown, 4000)  # secrets first, so masking can never hide the keyword that triggers redaction
+        shown = re.sub(r"(?<![\w-])[^\s'\"=-][^\s'\"=]*", lambda m: "[protected file]"
+                       if ("/" in m.group(0) or "." in m.group(0)) and is_sensitive_path(m.group(0)) else m.group(0), shown)
+        out["command"] = shown if len(shown) <= 160 else shown[:159].rstrip() + "…"
+    return out
+
+
+def _model(raw: Any) -> str:
+    m = str(raw or "")
+    if m.startswith("{"):
+        try:
+            m = str(json.loads(m).get("id") or "")
+        except (ValueError, AttributeError):
+            hit = re.search(r'"id"\s*:\s*"([^"]+)"', m)
+            m = hit.group(1) if hit else ""
+    return redact(m, 40)
+
+
+TAIL_CEILING = 4_000_000  # bytes; logs with huge records (e.g. screenshots) need a wider window to show recent steps
+MIN_USEFUL_LINES = 40
+
+
+def _tail_lines(path: Path, max_bytes: int = 160_000, max_lines: int = 400) -> list[str]:
+    """Recent complete lines. If the window holds few usable lines (huge records at the end), widen it ×4 up to
+    TAIL_CEILING, so a session with large tool outputs never looks empty. Lines ≥ 400 kB are skipped."""
+    try:
+        size = path.stat().st_size
+        window = max_bytes
+        while True:
+            with path.open("rb") as f:
+                if size > window:
+                    f.seek(size - window)
+                    f.readline()
+                data = f.read(window).decode("utf-8", errors="ignore")
+            lines = [ln for ln in data.splitlines()[-max_lines:] if len(ln) < 400_000]
+            if len(lines) >= MIN_USEFUL_LINES or window >= size or window >= TAIL_CEILING:
+                return lines
+            window = min(window * 4, TAIL_CEILING)
+    except OSError:
+        return []
+
+
+# --- incremental capture for the work journal ---------------------------------------------
+# The map needs a recent view; the journal needs *every* action. In capture mode each log is read from the byte
+# offset where the previous scan stopped (minus a small overlap for parser context), steps carry their exact
+# source position, and nothing is truncated to "the last 10". The caller (work_journal) persists offsets in the
+# same transaction as the events, so a crash or a failed write simply re-reads the same bytes next time.
+CAPTURE_OVERLAP = 262_144        # bytes re-read before the saved offset so multi-line records keep their context
+CAPTURE_FIRST_SIGHT = 640_000    # bytes read the first time a log is seen (older history predates the journal)
+CAPTURE_SESSION_LIMIT = 200      # sessions per runtime considered in one scan (the map keeps its own small limits)
+CAPTURE_OPENCODE_PARTS = 2000
+CAPTURE_MAX_RECORD = 32 * 1024 * 1024  # bytes; one log record (e.g. a large file write) is read whole up to this size
+BASELINE_KEY = "__baseline__"         # stored with the offsets: when the journal first ran
+NONTERMINAL = {"running", "pending", "in_progress"}
+_CAPTURE: "Capture | None" = None
+_POS: tuple[str, int] | None = None
+_POS_N = 0
+
+
+def _file_key(path: Any) -> str:
+    return hashlib.sha256(str(path).encode()).hexdigest()[:20]
+
+
+class Capture:
+    """Per-scan read state. `offsets` comes from storage; `read` holds the new positions to persist on success."""
+
+    def __init__(self, offsets: dict[str, dict[str, int]] | None = None, ceiling: int = TAIL_CEILING):
+        self.offsets = dict(offsets or {})
+        self.ceiling = ceiling
+        self.read: dict[str, dict[str, int]] = {}
+        self.reader = ""
+        self._by_reader: dict[str, set[str]] = {}
+        self.gaps: list[dict[str, Any]] = []
+        self.backlog: list[str] = []
+        self.bytes_read = 0
+        self.files_read = 0
+        self.oversize = 0
+        # The first scan ever (no stored offsets) marks a baseline; logs found after it are read from the start.
+        # Saved offsets without a baseline (journals before baselines existed) also prove an earlier scan, so they are not a first run.
+        self.first_run = not self.offsets
+        if self.first_run:
+            self.read[BASELINE_KEY] = {"inode": 0, "offset": int(time.time()), "legacy_until": 0}
+
+    def legacy_until(self, key: str) -> int:
+        state = self.read.get(key) or self.offsets.get(key) or {}
+        return int(state.get("legacy_until", 0))
+
+    def unchanged(self, path: Path) -> bool:
+        try:
+            st = path.stat()
+        except OSError:
+            return True
+        prev = self.offsets.get(_file_key(path))
+        return bool(prev) and prev.get("inode") == st.st_ino and prev.get("offset") == st.st_size
+
+    def note(self, key: str, state: dict[str, int]) -> None:
+        self.read[key] = state
+        self._by_reader.setdefault(self.reader, set()).add(key)
+
+    def fail_reader(self, name: str) -> None:
+        """A parser crashed: do not advance its offsets, so the next scan re-reads those bytes."""
+        for key in self._by_reader.pop(name, set()):
+            self.read.pop(key, None)
+
+    def lines(self, path: Path, first_sight: int = CAPTURE_FIRST_SIGHT):
+        """Yield complete lines appended since the last scan; set the source position used by `_step`.
+
+        - A log seen for the first time on the journal's very first scan is read from its last `first_sight` bytes
+          (its older history predates the journal). Any log that appears later is read from its first line.
+        - Records of any size up to CAPTURE_MAX_RECORD are read whole, even past the per-scan budget.
+          Larger records are skipped and reported as a `capture_gap`, never silently.
+        """
+        global _POS, _POS_N
+        try:
+            st = path.stat()
+        except OSError:
+            return
+        key = _file_key(path)
+        prev = self.offsets.get(key)
+        size = st.st_size
+        if prev and prev.get("inode") == st.st_ino and size >= prev.get("offset", 0):
+            saved = int(prev["offset"])
+            start = max(0, saved - CAPTURE_OVERLAP)
+            legacy = int(prev.get("legacy_until", 0))
+        else:
+            if prev:  # rotated or truncated: what was between the old offset and the rewrite cannot be recovered
+                self.gaps.append({"file": key, "reason": "log rotated or truncated", "path": path.name})
+            start = max(0, size - first_sight) if self.first_run else 0
+            # Only bytes that existed before the first scan can have been stored by an older journal (exact or
+            # same-moment keys). A rotated log or one created later holds only new actions.
+            saved, legacy = start, (size if self.first_run else 0)
+        budget_end = saved + self.ceiling                   # a large backlog is read in order over several scans
+        try:
+            f = path.open("rb")
+        except OSError:
+            return
+        with f:
+            f.seek(start)
+            pos = start
+            if start > 0:                                  # drop the partial first line, in bounded chunks
+                while True:
+                    chunk = f.readline(1 << 20)
+                    if not chunk:
+                        return                             # no complete line yet; same offsets next scan
+                    pos += len(chunk)
+                    if chunk.endswith(b"\n"):
+                        break
+            first = pos
+            while pos < size:
+                if pos >= budget_end:
+                    self.backlog.append(key)
+                    break
+                raw = f.readline(CAPTURE_MAX_RECORD + 1)
+                if not raw:
+                    break
+                if not raw.endswith(b"\n"):
+                    if len(raw) <= CAPTURE_MAX_RECORD:
+                        break                              # the writer is mid-record: read it next scan
+                    skipped = len(raw)                     # oversize: skip to the end of the record, visibly
+                    while True:
+                        chunk = f.readline(1 << 20)
+                        skipped += len(chunk)
+                        if not chunk or chunk.endswith(b"\n"):
+                            break
+                    if not chunk:
+                        break                              # the oversize record is still being written
+                    self.gaps.append({"file": key, "reason": f"record over {CAPTURE_MAX_RECORD // (1 << 20)} MB skipped",
+                                      "path": path.name, "bytes": skipped})
+                    self.oversize += 1
+                    pos += skipped
+                    continue
+                line_pos = pos
+                pos += len(raw)
+                _POS, _POS_N = (key, line_pos), 0
+                yield raw[:-1].decode("utf-8", errors="ignore")
+            _POS = None
+        self.bytes_read += pos - first
+        self.files_read += 1
+        self.note(key, {"inode": st.st_ino, "offset": pos, "legacy_until": legacy})
+
+
+def _lines(path: Path, max_bytes: int = 160_000, max_lines: int = 400):
+    """Capture mode: every new line with its position. Map mode: the recent tail, as before."""
+    if _CAPTURE is not None:
+        return _CAPTURE.lines(path)
+    return _tail_lines(path, max_bytes, max_lines)
+
+
+def _checklist(text: str) -> list[dict[str, Any]]:
+    items = []
+    for line in str(text).splitlines():
+        m = re.match(r"^\s*[-*]\s*\[([ xX/])\]\s+(.+)$", line)
+        if m:
+            mark = m.group(1).lower()
+            items.append({"status": "completed" if mark == "x" else "in_progress" if mark == "/" else "pending",
+                          "text": redact(m.group(2), 140)})
+    return items[:12]
+
+
+def _plan_item(status: Any, text: Any) -> dict[str, Any]:
+    s = str(status or "pending").lower()
+    s = "completed" if s in {"completed", "done", "complete"} else "in_progress" if "progress" in s else "pending"
+    return {"status": s, "text": redact(text, 140)}
+
+
+PROVIDERS = {"openai": "OpenAI", "azure": "Azure OpenAI", "anthropic": "Anthropic", "google": "Google",
+             "zai": "Z.ai", "zai-coding-plan": "Z.ai", "deepseek": "DeepSeek", "openrouter": "OpenRouter",
+             "ollama": "Ollama", "opencode": "OpenCode", "xai": "xAI", "mistral": "Mistral"}
+MODEL_FAMILIES = [(re.compile(r"^(?:gpt|o[1345])(?:[-.]|$)", re.I), "openai"), (re.compile(r"^claude", re.I), "anthropic"),
+                  (re.compile(r"^gemini", re.I), "google"), (re.compile(r"^glm", re.I), "zai"),
+                  (re.compile(r"^deepseek", re.I), "deepseek"), (re.compile(r"^grok", re.I), "xai"),
+                  (re.compile(r"^(?:mistral|codestral)", re.I), "mistral")]
+
+
+def _provider(card: dict[str, Any], recorded: Any = None) -> None:
+    """Recorded provider when the harness stored one; otherwise a labelled guess from the model name."""
+    rec = str(recorded or "").lower()
+    if rec in PROVIDERS:
+        pid, basis = ("zai" if rec == "zai-coding-plan" else rec), "recorded"
+    else:
+        pid = next((p for rx, p in MODEL_FAMILIES if rx.search(card.get("model") or "")), "")
+        basis = "model" if pid else "unknown"
+    card["provider"], card["provider_label"], card["provider_basis"] = pid, PROVIDERS.get(pid, "Unreported"), basis
+    card["provider_id"] = pid  # compatibility with the first map client
+
+
+def _session(harness: str, harness_name: str, sid: str, cwd: str, updated: float, model: str = "",
+             tokens: int = 0, owner_basis: str = "workspace") -> dict[str, Any] | None:
+    """A session card, or None when its working folder is outside the operator's roots."""
+    scope = _scope()
+    agent_id, agent_name, workspace = scope.identity(cwd)
+    if not agent_id:
+        return None
+    # Full id: sessions launched in the same millisecond share their first 12 characters. The short form
+    # is kept as `legacy_session_id` so keys stored before this change still match.
+    card = {"session_id": f"{harness}:{sid}"[:96], "legacy_session_id": f"{harness}:{sid[:12]}",
+            "host_id": scope.host_id, "harness": harness,
+            "harness_name": harness_name, "agent_id": agent_id, "agent_name": agent_name, "owner_basis": owner_basis,
+            "workspace": workspace, "model": _model(model), "tokens_used": int(tokens or 0),
+            "updated_at": updated, "status": "active" if time.time() - updated < ACTIVE_WINDOW_SEC else "idle",
+            "what_done": "", "plan": [], "how": {}, "steps": [], "files_edited": [], "files_read": [],
+            "files_delivered": []}
+    _provider(card)
+    return card
+
+
+def _finish(card: dict[str, Any], steps: list[dict[str, Any]], edited: list[str], read: list[str],
+            delivered: list[str] | None = None) -> dict[str, Any]:
+    card["how"] = dict(Counter(s["category"] for s in steps))
+    card["steps"] = steps[-10:]
+    if _CAPTURE is not None:
+        card["capture_steps"] = steps  # every step read in this scan, not only the last ten shown on the map
+
+    scope = _scope()
+    for step in steps:
+        if "files" in step:
+            step["files"] = [p for p in step["files"] if scope.contains(p)]
+            step.setdefault("file_basis", "confirmed" if step["files"] and step.get("status", "completed") == "completed"
+                            and step["category"] in ("file_edit", "file_read") else "recorded")
+
+    def uniq(items: list[str], n: int) -> list[str]:
+        out: list[str] = []
+        for p in reversed(items):
+            p = clean_path(p)
+            if p and p not in out and scope.contains(p):
+                out.append(p)
+        return out[:n]
+    card["files_edited"] = uniq(edited, 12)
+    card["files_read"] = [p for p in uniq(read, 12) if p not in card["files_edited"]][:8]
+    card["files_delivered"] = uniq(delivered or [], 8)
+    session_files = set(card["files_edited"] + card["files_read"] + card["files_delivered"])
+    for item in card["plan"]:
+        # A literal filename in the checklist is a reference, not evidence of an edit.
+        names = re.findall(r"`([^`\n]+)`|(?<![\w./-])([\w./-]+\.\w+)(?![\w/-])", item["text"])
+        mentioned = []
+        for quoted, plain in names:
+            token = (quoted or plain).removeprefix("./")
+            matches = [p for p in session_files if p == token or (not token.startswith("/") and p.endswith("/" + token))]
+            if len(matches) == 1 and matches[0] not in mentioned:
+                mentioned.append(matches[0])
+        if mentioned:
+            item["named_files"] = mentioned
+    card["what_done"] = readable(card["what_done"])
+    if not card["what_done"]:
+        card["what_done"] = "No written summary in the latest part of this session."
+    shown = card["steps"]
+    card["latest_action"] = shown[-1] if shown else None
+    # The step an operator usually wants: the last real piece of work, not a status message.
+    card["latest_work"] = next((s for s in reversed(shown) if s["category"] in
+                                ("file_edit", "shell", "file_read", "web", "visual")), card["latest_action"])
+    return card
+
+
+def _file_label(name: str, fp: Any) -> str:
+    """'<tool> <file>' only for a file inside the shared folders; otherwise a neutral phrase (no file name)."""
+    safe = clean_path(fp)
+    if safe and _scope().contains(safe):
+        return f"{name} {Path(safe).name}"
+    verb = {"file_edit": "Edit", "file_read": "Read"}.get(categorize_tool(name), "Use")
+    return f"{verb} a file outside the shared folders" if not is_sensitive_path(str(fp)) else f"{verb} a protected file"
+
+
+def _recorded_file(raw: Any, card: dict[str, Any]) -> str:
+    if not isinstance(raw, str) or not raw:
+        return ""
+    path = Path(card["workspace"]) / raw.removeprefix("file://")
+    safe = clean_path(path)
+    if not safe or redact(safe, 401) != safe or ".." in path.parts or any(ord(c) < 32 for c in safe):
+        return ""
+    # Any folder the operator opted in to; never a path outside those roots.
+    return safe if _scope().contains(safe) else ""
+
+
+def _codex_change(changes: Any, status: str, ts: Any, card: dict[str, Any]) -> dict[str, Any]:
+    # Completed FileChange records (and older patch_apply_end events) supply paths
+    # and the outcome separately from the patch/diff. A proposed patch is not an edit.
+    paths = []
+    verbs = set()
+    if status == "completed" and isinstance(changes, dict):
+        for raw, entry in changes.items():
+            if not isinstance(entry, dict):
+                continue
+            for target in (raw, entry.get("move_path")):
+                safe = _recorded_file(target, card)
+                if safe and safe not in paths:
+                    paths.append(safe)
+                    verbs.add("move" if entry.get("move_path") else str(entry.get("type")).lower())
+    verb = "Change"
+    if len(verbs) == 1:
+        verb = {"add": "Add", "delete": "Delete", "update": "Edit", "move": "Move"}.get(next(iter(verbs)), verb)
+    target = "files"
+    if len(paths) == 1:
+        target = Path(paths[0]).name
+    elif paths:
+        target = f"{len(paths)} files"
+    action = _step("apply_patch", f"{verb} {target}", ts)
+    action["status"] = status
+    action["files"] = paths[:12]
+    if len(paths) > 12:
+        action["file_count"] = len(paths)
+    return action
+
+
+# --- Codex ---------------------------------------------------------------------------
+CODE_TOOL = re.compile(r"tools\.([a-z_]+)\(")
+CODE_PLAN_STEP = re.compile(r"step\s*:\s*\"((?:[^\"\\]|\\.){2,200})\"\s*,\s*status\s*:\s*\"([a-z_]+)\"")
+
+
+def codex_sessions(limit: int = 8) -> list[dict[str, Any]]:
+    if _CAPTURE is not None:
+        limit = CAPTURE_SESSION_LIMIT
+    db = HOME / ".codex/state_5.sqlite"
+    if not db.is_file():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.5)
+        try:
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(threads)")}
+            provider_column = "model_provider" if "model_provider" in columns else "NULL"
+            rows = conn.execute(f"SELECT id, cwd, model, tokens_used, updated_at, rollout_path, {provider_column} "
+                                "FROM threads ORDER BY updated_at DESC LIMIT ?", (limit * 6,)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+    out = []
+    for tid, cwd, model, tokens, updated, rollout, provider in rows:
+        if len(out) >= limit:
+            break
+        ts = float(updated or 0)
+        ts = ts / 1000.0 if ts > 1e12 else ts
+        card = _session("codex", "Codex CLI", str(tid), str(cwd or ""), ts, model or "codex", tokens)
+        if card is None:
+            continue  # outside the operator's folders: not read
+        _provider(card, provider)
+        steps: list[dict[str, Any]] = []
+        read: list[str] = []
+        delivered: list[str] = []
+        legacy: list[dict[str, Any]] = []
+        change_slots: dict[str, int] = {}
+        path = Path(str(rollout or ""))
+        if _CAPTURE is not None and (not rollout or _CAPTURE.unchanged(path)):
+            continue  # nothing appended since the last scan
+        if rollout and path.is_file():
+            for ln in _lines(path, max_bytes=640_000, max_lines=1200):
+                try:
+                    o = json.loads(ln)
+                except ValueError:
+                    continue
+                p = o.get("payload") if isinstance(o, dict) else None
+                if not isinstance(p, dict):
+                    continue
+                kind, stamp = p.get("type"), o.get("timestamp")
+                item = p.get("item") if kind == "item_completed" else None
+                if kind == "patch_apply_end" or (isinstance(item, dict) and item.get("type") == "FileChange"):
+                    if kind == "patch_apply_end":
+                        change, status, key = p, "completed" if p.get("success") is True else "error", p.get("call_id")
+                    else:
+                        change, status, key = item, str(item.get("status") or "unreported"), item.get("id")
+                    normalized = {"failed": "error", "declined": "error", "error": "error", "completed": "completed",
+                                  "in_progress": "running", "pending": "pending"}.get(status, "unreported")
+                    step = _codex_change(change.get("changes"), normalized, stamp, card)
+                    slot = change_slots.get(key) if isinstance(key, str) else None
+                    if slot is None:
+                        if isinstance(key, str) and key:
+                            change_slots[key] = len(steps)
+                        steps.append(step)
+                    elif kind == "item_completed" and normalized != "unreported":
+                        if steps[slot].get("src"):
+                            step["src"] = steps[slot]["src"]  # same edit, now final: keep its original identity
+                        steps[slot] = step
+                    continue
+                if kind == "item_completed" and isinstance(p.get("item"), dict):
+                    # Structured items: readable intent, classified commands, tool calls.
+                    it = p["item"]
+                    t = it.get("type")
+                    if t == "Reasoning":
+                        heads = [h.strip("* ") for h in it.get("summary_text") or [] if isinstance(h, str)]
+                        if heads:
+                            steps.append(_step("reasoning", heads[-1], stamp))
+                            steps[-1]["category"] = "think"
+                    elif t == "CommandExecution":
+                        parsed = [c for c in it.get("parsed_cmd") or [] if isinstance(c, dict)]
+                        kinds = {c.get("type") for c in parsed}
+                        read_start = len(read)
+                        for c in parsed:
+                            if c.get("type") == "read" and c.get("path"):
+                                read.append(str(c["path"]) if str(c["path"]).startswith("/") else
+                                            str(Path(clean_path(it.get("cwd")) or "/") / str(c["path"])))
+                        linked_reads = [p for raw in read[read_start:] if (p := _recorded_file(raw, card))][:12]
+                        label = ("Read " + (", ".join(Path(p).name for p in linked_reads)[:100] or "files")
+                                 if kinds == {"read"} else "List or search files" if kinds <= {"list_files", "search"}
+                                 and kinds else command_kind((parsed[0].get("cmd") if parsed else "") or
+                                                             (it.get("command") or ["", "", ""])[-1]))
+                        steps.append(_step("exec_command", label, stamp))
+                        raw_command = it.get("command")
+                        command = raw_command[-1] if isinstance(raw_command, list) and raw_command else raw_command
+                        command = str((parsed[0].get("cmd") if parsed else None) or command or "").strip()
+                        steps[-1].update(command_info(command))
+                        steps[-1]["files"] = linked_reads
+                        steps[-1]["category"] = "file_read" if kinds and kinds <= {"read", "list_files", "search"} else "shell"
+                    elif t == "DynamicToolCall":
+                        tool, args = str(it.get("tool") or "tool"), it.get("arguments") or {}
+                        if tool == "tool_call" and isinstance(args, dict) and args.get("name"):
+                            tool = str(args["name"])
+                        if tool.endswith("attach_files_to_response") and isinstance(args, dict):
+                            delivered += [str(x) for x in args.get("paths") or []]
+                        steps.append(_step(tool, tool.replace("_", " "), stamp))
+                    elif t == "Extension" and it.get("query"):
+                        steps.append(_step("web_search", f"Search: {it['query']}", stamp))
+                    elif t == "AgentMessage":
+                        text = " ".join(str(b.get("text") or "") for b in it.get("content") or [] if isinstance(b, dict))
+                        if text.strip():
+                            card["what_done"] = redact(text, 260)
+                    continue
+                if kind in ("function_call", "custom_tool_call") and str(p.get("name")) == "exec":
+                    body = str(p.get("input") or p.get("arguments") or "")
+                    plan = CODE_PLAN_STEP.findall(body)
+                    if plan:
+                        card["plan"] = [_plan_item(st, text.replace('\\"', '"')) for text, st in plan][:12]
+                        steps.append(_step("update_plan", "Update the plan", stamp))  # a plan change is an action
+                    continue  # its other inner actions arrive as item_completed records
+                if kind in ("function_call", "custom_tool_call"):
+                    target = legacy
+                    name = str(p.get("name") or "tool")
+                    body = str(p.get("arguments") or p.get("input") or "")
+                    plan = CODE_PLAN_STEP.findall(body)
+                    if name == "update_plan" or plan:
+                        try:
+                            parsed = json.loads(body).get("plan", []) if name == "update_plan" else []
+                            plan = plan or [(i.get("step"), i.get("status")) for i in parsed if isinstance(i, dict)]
+                        except (ValueError, AttributeError):
+                            pass
+                        if plan:
+                            card["plan"] = [_plan_item(st, text.replace('\\"', '"')) for text, st in plan][:12]
+                    inner = [t for t in CODE_TOOL.findall(body) if t != "update_plan"]
+                    if name == "exec" and inner:
+                        for t in inner[:3]:
+                            target.append(_step(t, t.replace("_", " "), stamp))
+                    else:
+                        try:
+                            args = json.loads(body) if body.startswith("{") else {}
+                        except ValueError:
+                            args = {}
+                        label = args.get("name") if isinstance(args, dict) and name == "tool_call" else name
+                        target.append(_step(str(label or name), str(label or name).replace("_", " "), stamp))
+                elif kind in ("agent_message", "task_complete"):
+                    msg = p.get("message") or p.get("last_agent_message")
+                    if msg:
+                        card["what_done"] = redact(msg, 260)
+                        card["plan"] = card["plan"] or _checklist(msg)
+                elif kind == "message" and p.get("role") == "assistant":
+                    text = " ".join(b.get("text", "") for b in p.get("content") or [] if isinstance(b, dict))
+                    if text.strip():
+                        card["what_done"] = redact(text, 260)
+        edited = [path for step in steps if step["tool"] == "apply_patch" and step.get("status") == "completed"
+                  for path in step["files"]]
+        out.append(_finish(card, steps or legacy, edited, read, delivered))
+    return out
+
+
+# --- Claude Code -----------------------------------------------------------------------
+CLAUDE_EDIT = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+CLAUDE_READ = {"Read"}
+
+
+def _claude_launch_cwd(path: Path) -> str:
+    """First recorded working folder of a Claude Code session (its owner), from the head of the log."""
+    try:
+        with path.open("rb") as f:
+            for _ in range(200):
+                line = f.readline(2_000_000)
+                if not line:
+                    break
+                if b'"cwd"' in line:
+                    try:
+                        cwd = json.loads(line).get("cwd")
+                    except ValueError:
+                        continue
+                    if isinstance(cwd, str) and cwd:
+                        return cwd
+    except OSError:
+        pass
+    return ""
+
+
+def claude_sessions(limit: int = 6) -> list[dict[str, Any]]:
+    if _CAPTURE is not None:
+        limit = CAPTURE_SESSION_LIMIT
+    root = HOME / ".claude/projects"
+    try:
+        found = list(root.glob("*/*.jsonl")) + list(root.glob("*/*/subagents/*.jsonl"))  # Claude Code sub-agents too
+        files = sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)[:limit * 6]
+    except OSError:
+        return []
+    out = []
+    for jf in files:
+        if len(out) >= limit:
+            break
+        try:
+            mtime = jf.stat().st_mtime
+        except OSError:
+            continue
+        cwd, model = "", ""
+        steps: list[dict[str, Any]] = []
+        edited: list[str] = []
+        read: list[str] = []
+        summary, plan = "", []
+        delivered: list[str] = []
+        if _CAPTURE is not None and _CAPTURE.unchanged(jf):
+            continue
+        for ln in _lines(jf):
+            try:
+                o = json.loads(ln)
+            except ValueError:
+                continue
+            if not isinstance(o, dict):
+                continue
+            cwd = str(o.get("cwd") or cwd)  # latest working folder in the recent log
+            msg = o.get("message")
+            if o.get("type") != "assistant" or not isinstance(msg, dict):
+                continue
+            model = str(msg.get("model") or model)
+            for b in msg.get("content") or []:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "text" and str(b.get("text") or "").strip():
+                    summary = str(b["text"])
+                elif b.get("type") == "tool_use":
+                    name, inp = str(b.get("name") or "tool"), b.get("input") or {}
+                    if not isinstance(inp, dict):
+                        inp = {}
+                    fp = inp.get("file_path") or inp.get("notebook_path")
+                    if name in CLAUDE_EDIT and fp:
+                        edited.append(fp)
+                    elif name in CLAUDE_READ and fp:
+                        read.append(fp)
+                    if name == "TodoWrite" and isinstance(inp.get("todos"), list):
+                        plan = [_plan_item(t.get("status"), t.get("content")) for t in inp["todos"] if isinstance(t, dict)]
+                    if name.endswith("attach_files_to_response") and isinstance(inp.get("paths"), list):
+                        delivered += [str(x) for x in inp["paths"]]
+                    if _tool_key(name) == "channel_result" and inp.get("text"):
+                        summary = str(inp["text"])
+                    label = (inp.get("description") or inp.get("subject") or
+                             (_file_label(name, fp) if fp else "") or
+                             inp.get("query") or inp.get("name") or _tool_key(name))
+                    if _tool_key(name) == "tool_call" and isinstance(inp.get("name"), str) and not inp.get("description"):
+                        steps.append(_step(inp["name"], "", o.get("timestamp")))  # wrapper call: show the wrapped tool's action
+                    else:
+                        steps.append(_step(name, label, o.get("timestamp")))
+                    if name == "Bash" and inp.get("command"):
+                        steps[-1].update(command_info(inp["command"]))
+                        if not inp.get("description"):
+                            steps[-1]["label"] = command_kind(inp["command"])
+                    if (name in CLAUDE_EDIT or name in CLAUDE_READ) and clean_path(fp):
+                        steps[-1]["files"] = [clean_path(fp)]
+        tasks = HOME / ".claude/tasks" / jf.stem
+        if tasks.is_dir():
+            items = []
+            for tf in sorted(tasks.glob("*.json"), key=lambda p: (len(p.stem), p.stem))[:15]:
+                try:
+                    td = json.loads(tf.read_text(encoding="utf-8", errors="ignore")[:20000])
+                except (OSError, ValueError):
+                    continue
+                if isinstance(td, dict) and td.get("status") != "deleted" and (td.get("subject") or td.get("description")):
+                    items.append(_plan_item(td.get("status"), td.get("subject") or td.get("description")))
+            plan = items or plan
+        launch = _claude_launch_cwd(jf) or cwd
+        card = _session("claude-code", "Claude Code", jf.stem, launch, mtime, model or "claude")
+        if card is not None and cwd and cwd != launch and _scope().contains(cwd):
+            card["current_folder"] = cwd  # where it is working now; the owner stays the launch folder
+        if card is None:
+            continue  # outside the operator's folders
+        if jf.parent.name == "subagents":  # a Task sub-agent: owned by its own launch folder, linked to its parent
+            card["parent_session"] = f"claude-code:{jf.parent.parent.name}"[:96]
+            card["harness_name"] = "Claude Code · sub-agent"
+        card["what_done"] = redact(summary, 260)
+        card["plan"] = (plan or _checklist(summary))[:12]
+        out.append(_finish(card, steps, edited, read, delivered))
+    return out
+
+
+# --- Gemini / Antigravity -------------------------------------------------------------
+AG_EDIT = {"write_file", "edit_file", "write_to_file", "replace_file_content", "multi_replace_file_content"}
+AG_READ = {"read_file", "view_file", "list_dir"}
+
+
+def _antigravity_workspace(conv_id: str) -> tuple[str, str]:
+    """Working folder = first workspace URI, in the conversation's own metadata, that lies in a root.
+
+    Paths mentioned in transcript text never decide ownership (they may name someone else's folder)."""
+    scope = _scope()
+    base = HOME / ".gemini/antigravity-acp"
+    db = base / "conversations" / f"{conv_id}.db"
+    if db.is_file():
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+            try:
+                row = conn.execute("SELECT data FROM trajectory_metadata_blob LIMIT 1").fetchone()
+            finally:
+                conn.close()
+            for raw in re.findall(rb"file://(/[\x21-\x7e]{1,300})", bytes(row[0] or b"") if row else b""):
+                for cut in range(len(raw), 0, -1):  # protobuf fields may be glued to the URI; try prefixes
+                    cand = raw[:cut].decode("utf-8", "ignore")
+                    if scope.contains(cand) and Path(cand).is_dir():
+                        return cand, "conversation metadata"
+        except sqlite3.Error:
+            pass
+    for sub in base.glob(f"brain/*/.system_generated/subagents/{conv_id}.json"):
+        try:
+            uris = json.loads(sub.read_text(encoding="utf-8", errors="ignore")[:20000]).get("workspaceUris") or []
+        except (OSError, ValueError, AttributeError):
+            continue
+        for uri in uris:
+            cand = clean_path(uri)
+            if cand and scope.contains(cand) and cand != "/":
+                return cand, "subagent metadata"
+    return "", "unknown"
+
+
+def antigravity_sessions(limit: int = 8) -> list[dict[str, Any]]:
+    if _CAPTURE is not None:
+        limit = CAPTURE_SESSION_LIMIT
+    brain = HOME / ".gemini/antigravity-acp/brain"
+    try:
+        dirs = [(d / ".system_generated/logs/transcript.jsonl", d) for d in brain.iterdir() if d.is_dir()]
+        dirs = sorted(((t.stat().st_mtime, d) for t, d in dirs if t.is_file()), reverse=True)[:limit * 4]
+    except OSError:
+        return []
+    out = []
+    for mtime, d in dirs:
+        if _CAPTURE is not None and _CAPTURE.unchanged(d / ".system_generated/logs/transcript.jsonl"):
+            continue
+        workspace, basis = _antigravity_workspace(d.name)
+        card = _session("antigravity", "Gemini / Antigravity", d.name, workspace, mtime, "gemini", owner_basis=basis)
+        if card is None:
+            continue  # no workspace inside the operator's folders
+        steps: list[dict[str, Any]] = []
+        edited: list[str] = []
+        read: list[str] = []
+        plan: list[dict[str, Any]] = []
+        delivered: list[str] = []
+        for md in sorted(d.glob("*.md"))[:4]:
+            if not is_sensitive_path(str(md)):
+                try:
+                    plan = plan or _checklist(md.read_text(encoding="utf-8", errors="ignore")[:12000])
+                except OSError:
+                    pass
+        for ln in _lines(d / ".system_generated/logs/transcript.jsonl"):
+            try:
+                o = json.loads(ln)
+            except ValueError:
+                continue
+            if not isinstance(o, dict):
+                continue
+            calls = o.get("tool_calls") or []
+            if isinstance(calls, str):
+                continue
+            if o.get("type") == "PLANNER_RESPONSE" and str(o.get("content") or "").strip():
+                card["what_done"] = redact(o["content"], 260)
+                plan = _checklist(o["content"]) or plan
+                card["model"] = _model(o.get("model") or card["model"])
+            for c in calls:
+                if not isinstance(c, dict):
+                    continue
+                name, args = str(c.get("name") or "tool"), c.get("args") or {}
+                if not isinstance(args, dict):
+                    args = {}
+                fp = args.get("Path") or args.get("TargetFile") or args.get("AbsolutePath")
+                if name in AG_EDIT and fp:
+                    edited.append(fp)
+                elif name in AG_READ and fp:
+                    read.append(fp)
+                if name.endswith("attach_files_to_response") and isinstance(args.get("paths"), list):
+                    delivered += [str(x) for x in args["paths"]]
+                if _tool_key(name) == "tool_call" and isinstance(args.get("arguments"), dict):
+                    inner = args["arguments"]
+                    if _tool_key(str(args.get("name"))) == "channel_result" and inner.get("text"):
+                        card["what_done"] = redact(inner["text"], 260)
+                label = args.get("toolSummary") or (_file_label(name, fp) if fp else "") or \
+                    args.get("query") or _tool_key(name).replace("_", " ")
+                steps.append(_step(name, str(label).strip('"'), o.get("created_at")))
+                if _tool_key(name) in ("run_command", "run_terminal_command", "execute_command") and args.get("CommandLine"):
+                    raw_cmd = str(args["CommandLine"]).strip()
+                    try:
+                        raw_cmd = json.loads(raw_cmd) if raw_cmd.startswith('"') else raw_cmd
+                    except ValueError:
+                        raw_cmd = raw_cmd.strip('"')
+                    steps[-1].update(command_info(raw_cmd))
+                if (name in AG_EDIT or name in AG_READ) and clean_path(fp):
+                    steps[-1]["files"] = [clean_path(fp)]
+        card["plan"] = plan[:12]
+        _provider(card)
+        out.append(_finish(card, steps, edited, read, delivered))
+        if len(out) >= limit:
+            break
+    return out
+
+
+# --- OpenCode --------------------------------------------------------------------------
+def _opencode_tools(conn: sqlite3.Connection, sid: str) -> list[sqlite3.Row]:
+    # Only extract structured tool metadata. Never select message text, command lines,
+    # reasoning, tool output, or the contents passed to an editor.
+    messages, parts = (400, CAPTURE_OPENCODE_PARTS) if _CAPTURE is not None else (24, 40)
+    max_message = CAPTURE_MAX_RECORD if _CAPTURE is not None else 196_608  # whole messages for the journal
+    try:
+        return conn.execute("""
+            WITH recent AS (
+                SELECT seq, time_created, data FROM session_message
+                WHERE session_id = ? AND type = 'assistant' ORDER BY seq DESC LIMIT ?
+            )
+            SELECT m.seq AS seq, CAST(p.key AS INTEGER) AS part, json_extract(p.value, '$.name') AS name,
+                   json_extract(p.value, '$.state.status') AS status,
+                   coalesce(json_extract(p.value, '$.time.completed'), json_extract(p.value, '$.time.created'),
+                            m.time_created) AS stamp,
+                   CASE WHEN json_extract(p.value, '$.name') IN ('read', 'edit', 'write')
+                        THEN coalesce(json_extract(p.value, '$.state.input.path'),
+                                      json_extract(p.value, '$.state.input.filePath')) END AS path,
+                   CASE WHEN json_extract(p.value, '$.name') = 'todowrite'
+                        THEN json_extract(p.value, '$.state.input.todos') END AS todos,
+                   CASE WHEN json_extract(p.value, '$.name') IN ('bash', 'shell')
+                        THEN json_extract(p.value, '$.state.input.command') END AS command
+              FROM recent m, json_each(
+                     CASE WHEN length(m.data) <= ? AND json_valid(m.data) THEN m.data ELSE '{}' END,
+                     '$.content') p
+             WHERE p.type = 'object' AND json_extract(p.value, '$.type') = 'tool'
+             ORDER BY m.seq DESC, CAST(p.key AS INTEGER) DESC LIMIT ?
+        """, (sid, messages, max_message, parts)).fetchall()[::-1]
+    except sqlite3.Error:
+        # Older OpenCode versions store session headers without message parts.
+        return []
+
+
+def _opencode_activity(card: dict[str, Any], rows: list[sqlite3.Row], source: str = "") -> dict[str, Any]:
+    global _POS, _POS_N
+    steps, edited, read = [], [], []
+    for row in rows:
+        if source and "seq" in row.keys() and isinstance(row["seq"], int):
+            _POS, _POS_N = (source, row["seq"] * 10_000 + int(row["part"] or 0)), 0  # message + part = exact origin
+        name, status = row["name"], row["status"]
+        if not isinstance(name, str) or status not in {"completed", "error", "running", "pending"}:
+            continue
+        label = {"read": "Read a file", "edit": "Edit a file", "write": "Write a file", "shell": "Run a command", "bash": "Run a command",
+                 "execute": "Run a tool", "webfetch": "Read a web page", "websearch": "Search the web",
+                 "grep": "Search files", "todowrite": "Update the plan", "subagent": "Delegate a task"}.get(name, "Use a tool")
+        stamp = row["stamp"]
+        stamp = stamp / 1000 if isinstance(stamp, (int, float)) and stamp > 1e12 else stamp
+        when = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(stamp)) if isinstance(stamp, (int, float)) and 0 < stamp < 1e10 else ""
+        step = _step(name, label, when)
+        step["status"] = status
+        raw_path = row["path"]
+        safe = _recorded_file(raw_path, card) if status == "completed" else ""
+        if safe:
+            (read if name == "read" else edited).append(safe)
+            step["files"] = [safe]
+            step["label"] = readable(f"{name.capitalize()} {Path(safe).name}", 110)
+        if "command" in row.keys() and isinstance(row["command"], str):
+            step.update(command_info(row["command"]))  # program name (and opt-in redacted preview) only
+        if status == "completed" and name == "todowrite" and isinstance(row["todos"], str):
+            try:
+                items = json.loads(row["todos"])
+            except ValueError:
+                items = []
+            if isinstance(items, list):
+                card["plan"] = [_plan_item(i.get("status"), i["content"]) for i in items[:12]
+                                if isinstance(i, dict) and isinstance(i.get("content"), str)]
+        steps.append(step)
+    _POS = None
+    return _finish(card, steps, edited, read)
+
+
+def opencode_sessions(limit: int = 6) -> list[dict[str, Any]]:
+    if _CAPTURE is not None:
+        limit = CAPTURE_SESSION_LIMIT
+    db = HOME / ".local/share/opencode/opencode.db"
+    if not db.is_file():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.5)
+        conn.row_factory = sqlite3.Row
+        try:
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(session_v2)")}
+            fields = ("id", "directory", "time_updated", "model", "title", "slug", "tokens_input", "tokens_output",
+                      "summary_files", "summary_additions", "summary_deletions")
+            projection = ", ".join(field for field in fields if field in columns)
+            if not {"id", "time_updated"} <= columns:
+                return []
+            rows = conn.execute(f"SELECT {projection} FROM session_v2 ORDER BY time_updated DESC LIMIT ?",
+                                (limit * 6,)).fetchall()
+            scope = _scope()
+            rows = [row for row in rows if "directory" in row.keys() and scope.contains(str(row["directory"]))][:limit]
+            if _CAPTURE is not None:  # only sessions updated since the last scan
+                rows = [row for row in rows if (_CAPTURE.offsets.get(_file_key("opencode:" + str(row["id"]))) or {})
+                        .get("offset") != int(float(row["time_updated"] or 0))]
+            by_session = {row["id"]: _opencode_tools(conn, row["id"]) for row in rows}
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+    out = []
+    for r in rows:
+        keys = r.keys()
+        get = lambda k: r[k] if k in keys else None  # noqa: E731
+        ts = float(get("time_updated") or 0)
+        ts = ts / 1000.0 if ts > 1e12 else ts
+        directory = str(get("directory") or "")
+        tokens = int(get("tokens_input") or 0) + int(get("tokens_output") or 0)
+        card = _session("opencode", "OpenCode", str(get("id")), directory, ts, str(get("model") or "opencode"), tokens)
+        if card is None:
+            continue
+        try:
+            spec = json.loads(get("model") or "{}")
+        except (TypeError, ValueError):
+            spec = {}
+        _provider(card, spec.get("providerID") if isinstance(spec, dict) else None)
+        files, adds, dels = (int(get(k) or 0) for k in ("summary_files", "summary_additions", "summary_deletions"))
+        title = redact(get("title") or get("slug") or "OpenCode session", 160)
+        card["what_done"] = f"{title} · {files} file(s) changed, +{adds}/−{dels} lines" if files else title
+        tools = by_session.get(r["id"], [])
+        source = ""
+        if _CAPTURE is not None:
+            source = _file_key("opencode:" + str(get("id")))
+            prev = _CAPTURE.offsets.get(source)
+            top = max((t["seq"] * 10_000 + int(t["part"] or 0) for t in tools if isinstance(t["seq"], int)), default=0)
+            _CAPTURE.note(source, {"inode": 0, "offset": int(float(get("time_updated") or 0)),
+                                   "legacy_until": prev["legacy_until"] if prev else (top + 1 if _CAPTURE.first_run else 0)})
+        out.append(_opencode_activity(card, tools, source))
+    return out
+
+
+# --- harnesses & workspaces -----------------------------------------------------------
+HARNESSES = [
+    ("claude-code", "Claude Code", ["claude"], "claude"),
+    ("codex", "Codex CLI", ["codex", "codex-code-mode"], "codex"),
+    ("antigravity", "Gemini / Antigravity", ["gemini", "antigravity", "agy"], "antigravity"),
+    ("opencode", "OpenCode", ["opencode"], "opencode"),
+    ("openclaw", "OpenClaw", ["openclaw"], "openclaw"),
+    ("paperclip", "Paperclip", ["paperclip"], "paperclip"),
+    ("ollama", "Ollama", ["ollama"], None),
+]
+
+
+def harnesses() -> list[dict[str, Any]]:
+    try:
+        ps = subprocess.run(["ps", "-eo", "comm=,pcpu=,rss="], capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.SubprocessError):
+        ps = ""
+    procs = []
+    for line in ps.splitlines():
+        parts = line.rsplit(None, 2)
+        if len(parts) == 3:
+            try:
+                procs.append((parts[0].strip().lower(), float(parts[1]), int(parts[2])))
+            except ValueError:
+                continue
+    known: dict[str, list[str]] = {}
+    for adapter in _scope().adapters:  # e.g. versions from a host app's managed runtimes
+        try:
+            for key, vers in (adapter.runtime_versions(HOME) or {}).items():
+                known[key] = sorted({v for v in vers if re.fullmatch(r"[0-9][0-9A-Za-z.+-]{0,39}", str(v))})
+        except Exception:
+            continue
+    out = []
+    specs = list(HARNESSES)
+    for adapter in _scope().adapters:
+        specs = list(getattr(adapter, "HARNESSES", [])) + specs
+    for hid, name, names, rt in specs:
+        versions = known.get(rt or "", [])
+        mine = [p for p in procs if p[0] in names]
+        binary = next((shutil.which(n) for n in names if shutil.which(n)), None)
+        if not (versions or mine or binary):
+            continue
+        out.append({"id": hid, "name": name, "version": versions[-1] if versions else "",
+                    "status": "running" if mine else "installed", "process_count": len(mine),
+                    "cpu_pct": round(sum(p[1] for p in mine), 1), "rss_mb": round(sum(p[2] for p in mine) / 1024, 1),
+                    "evidence": ([f"runtime {rt}@{versions[-1]}"] if versions else []) +
+                                ([f"binary {binary}"] if binary else []) + ([f"{len(mine)} process(es)"] if mine else [])})
+    return out
+
+
+def _category(path: Path) -> str:
+    ext = path.suffix.lower()
+    for cat, exts in (("code", {".py", ".js", ".ts", ".tsx", ".go", ".rs", ".sh", ".sql"}),
+                      ("ui", {".html", ".css", ".svg"}), ("doc", {".md", ".txt", ".pdf", ".docx"}),
+                      ("data", {".json", ".jsonl", ".csv", ".db", ".sqlite", ".yaml", ".yml", ".toml"}),
+                      ("asset", {".png", ".jpg", ".jpeg", ".webp", ".gif", ".zip"})):
+        if ext in exts:
+            return cat
+    return "other"
+
+
+def workspaces(max_files: int = 600) -> list[dict[str, Any]]:
+    """One entry per opted-in root. Nothing outside the roots is listed."""
+    scope = _scope()
+    roots = []
+    for root in scope.roots:
+        agent_id, label, _ = scope.identity(root)
+        roots.append((f"workspace:{agent_id}", label, root, "workspace", agent_id))
+    out = []
+    for wid, label, path, kind, agent_id in roots:
+        files: list[dict[str, Any]] = []
+        folders: Counter[str] = Counter()
+        total, latest = 0, 0.0
+        base_depth = len(path.parts)
+        for cur, dirs, names in os.walk(path):
+            cur_p = Path(cur)
+            depth = len(cur_p.parts) - base_depth
+            dirs[:] = sorted(d for d in dirs if depth < 5 and d not in SKIP_WALK_DIRS and not d.startswith(".")
+                             and not is_sensitive_path(str(cur_p / d)))
+            for n in names:
+                fp = cur_p / n
+                if n.startswith(".") or is_sensitive_path(str(fp)):
+                    continue
+                try:
+                    st = fp.lstat()
+                except OSError:
+                    continue
+                if not os.path.isfile(fp) or fp.is_symlink():
+                    continue
+                total += 1
+                rel = str(fp.relative_to(path))
+                folders[rel.split("/", 1)[0] if "/" in rel else "."] += 1
+                latest = max(latest, st.st_mtime)
+                files.append({"path": str(fp), "rel_path": rel, "size_kb": round(st.st_size / 1024, 1),
+                              "mtime": st.st_mtime, "category": _category(fp)})
+                if total >= max_files:
+                    break
+            if total >= max_files:
+                break
+        files.sort(key=lambda f: f["mtime"], reverse=True)
+        out.append({"id": wid, "host_id": scope.host_id, "label": label, "kind": kind, "agent_id": agent_id,
+                    "path": str(path),
+                    "file_count": total, "truncated": total >= max_files, "last_modified": latest,
+                    "folders": [{"name": k, "files": v} for k, v in folders.most_common(8)],
+                    "recent_files": files[:8]})
+    out.sort(key=lambda w: w["last_modified"], reverse=True)
+    return out
+
+
+# --- snapshot -----------------------------------------------------------------------------
+def collect_activity(scope: Scope | None = None, capture: "Capture | None" = None) -> dict[str, Any]:
+    """Map snapshot. With `capture` (the work journal), every session's `capture_steps` holds all steps appended
+    since the offsets in `capture`, each with its source position; `capture.read` holds the offsets to persist."""
+    global _CURRENT, _CAPTURE, _POS
+    t0 = time.perf_counter()
+    _CURRENT = scope or load_scope()
+    _CAPTURE, _POS = capture, None
+    try:
+        return _collect(t0)
+    finally:
+        _CURRENT, _CAPTURE, _POS = None, None, None
+
+
+def _collect(t0: float) -> dict[str, Any]:
+    scope = _scope()
+    sessions: list[dict[str, Any]] = []
+    for reader in ((codex_sessions, claude_sessions, antigravity_sessions, opencode_sessions) if scope.enabled else ()):
+        if _CAPTURE is not None:
+            _CAPTURE.reader = reader.__name__
+        try:
+            sessions += reader()
+        except Exception:  # one broken source must not hide the others
+            if _CAPTURE is not None:
+                _CAPTURE.fail_reader(reader.__name__)  # keep its offsets: the next scan re-reads the same bytes
+            continue
+    sessions.sort(key=lambda s: s["updated_at"], reverse=True)
+    if _CAPTURE is None:
+        sessions = sessions[:20]  # the map shows the most recent; the journal needs every changed session
+    ws = workspaces()
+
+    # Which sessions said they edited each file: stronger than a timestamp alone.
+    editors: dict[str, list[str]] = {}
+    for s in sessions:
+        for p in s["files_edited"]:
+            editors.setdefault(p, [])
+            tag = f"{s['agent_name']} · {s['harness_name']}"
+            if tag not in editors[p]:
+                editors[p].append(tag)
+    for w in ws:
+        for f in w["recent_files"]:
+            f["edited_by"] = editors.get(f["path"], [])
+
+    agents: dict[str, dict[str, Any]] = {}
+    for s in sessions:
+        key = s["agent_id"] or f"unattributed:{s['harness']}"
+        a = agents.setdefault(key, {"agent_id": s["agent_id"], "host_id": s["host_id"], "name": s["agent_name"], "harnesses": [],
+                                    "workspace": s["workspace"], "status": "idle", "last_active": 0.0,
+                                    "sessions": 0, "files_edited": 0})
+        if s["harness_name"] not in a["harnesses"]:
+            a["harnesses"].append(s["harness_name"])
+        a["sessions"] += 1
+        a["files_edited"] += len(s["files_edited"])
+        a["last_active"] = max(a["last_active"], s["updated_at"])
+        if s["status"] == "active":
+            a["status"] = "active"
+    how = Counter()
+    for s in sessions:
+        how.update(s["how"])
+    hs = harnesses()
+    now = time.time()
+    return {
+        "schema_version": SCHEMA_VERSION, "host": scope.host_id, "host_id": scope.host_id,
+        "hostname": socket.gethostname(), "collected_at": now,
+        "scan_ms": round((time.perf_counter() - t0) * 1000, 1),
+        "activity_enabled": scope.enabled, "activity_roots": [str(r) for r in scope.roots],
+        "hosts": [{"host_id": scope.host_id, "hostname": socket.gethostname(), "updated_at": now,
+                   "activity_roots": [str(r) for r in scope.roots], "activity_enabled": scope.enabled}],
+        "summary": {"harnesses_installed": len(hs), "harnesses_running": sum(h["status"] == "running" for h in hs),
+                    "agents": len(agents), "agents_active": sum(a["status"] == "active" for a in agents.values()),
+                    "sessions": len(sessions), "files_edited": len(editors), "workspaces": len(ws),
+                    "how": {CATEGORY_LABEL.get(k, k): v for k, v in how.most_common()}},
+        "harnesses": hs,
+        "agents": sorted(agents.values(), key=lambda a: a["last_active"], reverse=True),
+        "sessions": sessions,
+        "workspaces": ws,
+        "category_labels": CATEGORY_LABEL,
+    }
+
+
+class CachedActivity:
+    """Serve one scan to concurrent dashboard polls; rescan after `ttl` seconds."""
+
+    def __init__(self, ttl: float = 15.0, collector=collect_activity):
+        self.ttl, self.collector = ttl, collector
+        self._lock = threading.Lock()
+        self._at, self._snap = 0.0, None
+
+    def get(self) -> dict[str, Any]:
+        with self._lock:
+            if self._snap is None or time.monotonic() - self._at >= self.ttl:
+                self._snap = self.collector()
+                self._at = time.monotonic()
+            return self._snap
+
+
+ACTIVITY = CachedActivity()
+
+if __name__ == "__main__":
+    print(json.dumps(collect_activity(), indent=2, ensure_ascii=False))

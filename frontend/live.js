@@ -1,0 +1,2020 @@
+/* NeuroSwarm Live NOC Console (OMi / SCOM / Nagios style)
+   - Dual-mode real-time transport: cursor-based /api/v1/event-feed (EVENT-FEED-CONTRACT.md)
+     with automatic fallback to /api/v1/live-records + /alerts + /events
+   - Real agent work visibility from /api/v1/activity (file edits, commands, workspaces, plans)
+     plus multi-agent collaboration tasks from /api/v1/work-board and admin audit trail
+   - Multi-signal correlations (same file, same workspace, same session/change, same host, same agent)
+   - Zero external CDNs, zero inline handlers (100% CSP-safe). */
+(() => {
+  "use strict";
+
+  const el = (id) => document.getElementById(id);
+  const authGate = el("auth-gate");
+  const appEl = el("app");
+  const tbody = el("rows");
+  const emptyEl = el("empty");
+  const detailEl = el("detail");
+  const detailQuick = el("detail-quick");
+  const orgSwitcher = el("org-switcher");
+  const orgBadge = el("org-badge");
+  const liveBadge = el("live-badge");
+  const feedModeBadge = el("feed-mode-badge");
+  const syncEl = el("sync");
+  const toastEl = el("toast");
+  const caseDialog = el("incident-dialog");
+  let caseView = null;
+
+  const MAX_RECORDS = 5000;
+  const SEV_RANK = { CRITICAL: 5, ERROR: 4, WARNING: 3, INFO: 2, NORMAL: 1 };
+  const CAT_LABELS = {
+    file_edit: "Edit files",
+    shell: "Run commands",
+    file_read: "Read files",
+    plan: "Plan",
+    coordination: "Coordinate",
+    web: "Web & browser",
+    think: "Reason",
+    visual: "Images",
+    guardrail: "Guardrail",
+    audit: "Audit",
+    other: "Action",
+  };
+
+  const state = {
+    user: null,
+    org: null,
+    memberships: [],
+    hosts: [],
+    // Separated maps by stream so cursor upserts never get wiped by activity refreshes
+    feedMap: new Map(),       // alert:* and event:* (from /event-feed or /live-records)
+    historyMap: new Map(),    // older paginated pages from /live-records?before=...
+    workMap: new Map(),       // work:* (from /activity steps & plans)
+    collabMap: new Map(),     // collab:* (from /work-board collaboration)
+    auditMap: new Map(),      // audit:* (admin only from /overview)
+    feedCursor: null,
+    historyCursor: null,
+    useEventFeed: true,
+    seenKeys: new Set(),
+    newKeys: new Set(),
+    bufferedWhilePaused: 0,
+    displaySnapshot: null,    // frozen array while paused
+    selectedKey: "",
+    detailTab: "general",
+    perspective: "all",
+    scopeHost: "",
+    scopeAgent: "",
+    scopeWorkspace: "",
+    scopeTask: "",
+    scopeSession: "",
+    scopeFile: "",
+    scopeRuntime: "",
+    pendingEventKey: "",
+    returnUrl: "",
+    linksByTask: {},
+    linksBySession: {},
+    windowSec: "all",
+    filterSev: "",
+    filterKind: "",
+    filterCat: "",
+    filterStatus: "",
+    search: "",
+    groupMode: "none",
+    rowTint: true,
+    comfortable: false,
+    sortKey: "ts",
+    sortDir: "desc",
+    paused: false,
+    intervalMs: 2500,
+    timer: null,
+    pollSeq: 0,
+    generation: 0,
+    busy: false,
+    searchDebounce: null,
+    cmdkOpen: false,
+    cmdkIdx: 0,
+    cmdkItems: [],
+  };
+
+  function esc(v) {
+    return String(v ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function safeCls(v, fb = "info") {
+    const c = String(v ?? "").toLowerCase().replace(/[^a-z0-9_-]/g, "");
+    return c || fb;
+  }
+
+  function toast(msg) {
+    if (!toastEl || !msg) return;
+    toastEl.textContent = msg;
+    toastEl.classList.remove("hidden");
+    clearTimeout(toastEl._t);
+    toastEl._t = setTimeout(() => toastEl.classList.add("hidden"), 3000);
+  }
+
+  function roleOf() { return String(state.user?.role || "viewer").toLowerCase(); }
+  function isAdmin() { return roleOf() === "admin"; }
+  function canAck() { const r = roleOf(); return r === "admin" || r === "operator"; }
+
+  function normSev(raw, status = "") {
+    const s = String(raw || "").toUpperCase();
+    const st = String(status || "").toUpperCase();
+    if (st === "RESOLVED" || st === "COMPLETED" || st === "DONE" || s === "NORMAL" || s === "OK" || s === "HEALTHY") return "NORMAL";
+    if (s.includes("CRIT") || s === "HIGH" || st === "FAILED" || st === "BLOCKED") return "CRITICAL";
+    if (s.includes("ERR") || s.includes("FAIL")) return "ERROR";
+    if (s.includes("WARN") || s.includes("DEGRAD") || s === "MEDIUM") return "WARNING";
+    return "INFO";
+  }
+
+  function normStatus(raw) {
+    const s = String(raw || "").toUpperCase();
+    if (["OPEN", "ACTIVE", "RUNNING", "IN_PROGRESS", "QUEUED", "PENDING"].includes(s)) return "OPEN";
+    if (["ACKED", "ACKNOWLEDGED"].includes(s)) return "ACKED";
+    if (["RESOLVED", "COMPLETED", "DONE", "FINISHED"].includes(s)) return "RESOLVED";
+    return s || "RECORDED";
+  }
+
+  function parseTs(v, fallback = 0) {
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
+    if (typeof v === "string" && v.trim()) {
+      const n = Number(v);
+      if (Number.isFinite(n) && n > 0) return n;
+      const ms = Date.parse(v.endsWith("Z") || /[+-]\d{2}:\d{2}$/.test(v) ? v : v + "Z");
+      if (Number.isFinite(ms) && ms > 0) return ms / 1000;
+    }
+    return fallback;
+  }
+
+  function fmtTime(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return "—";
+    const d = new Date(n * 1000);
+    return Number.isNaN(d.getTime())
+      ? "—"
+      : d.toLocaleString([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  function fmtAge(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return "—";
+    const d = Math.max(0, Math.floor(Date.now() / 1000 - n));
+    if (d < 60) return `${d}s`;
+    if (d < 3600) return `${Math.floor(d / 60)}m`;
+    if (d < 86400) return `${Math.floor(d / 3600)}h`;
+    return `${Math.floor(d / 86400)}d`;
+  }
+
+  function shortPath(p) {
+    const s = String(p || "").trim();
+    if (!s) return "";
+    const parts = s.replace(/\\/g, "/").split("/").filter(Boolean);
+    return parts.length > 2 ? parts.slice(-2).join("/") : s;
+  }
+
+  function safeRelativeUrl(raw) {
+    const s = String(raw || "").trim();
+    if (!s || !s.startsWith("/") || s.startsWith("//") || /[\r\n\0]/.test(s)) return "";
+    return s;
+  }
+
+  function currentLiveUrl() {
+    const qs = new URLSearchParams();
+    if (state.perspective && state.perspective !== "all") qs.set("persp", state.perspective);
+    if (state.scopeTask) qs.set("task", state.scopeTask);
+    if (state.scopeSession) qs.set("session", state.scopeSession);
+    if (state.scopeHost) qs.set("host", state.scopeHost);
+    if (state.scopeAgent) qs.set("agent", state.scopeAgent);
+    if (state.scopeRuntime) qs.set("runtime", state.scopeRuntime);
+    if (state.scopeWorkspace) qs.set("ws", state.scopeWorkspace);
+    if (state.scopeFile) qs.set("file", state.scopeFile);
+    if (state.windowSec && state.windowSec !== "all") qs.set("win", state.windowSec);
+    if (state.filterSev) qs.set("sev", state.filterSev);
+    if (state.filterKind) qs.set("kind", state.filterKind);
+    if (state.filterCat) qs.set("cat", state.filterCat);
+    if (state.filterStatus) qs.set("status", state.filterStatus);
+    if (state.groupMode && state.groupMode !== "none") qs.set("group", state.groupMode);
+    if (state.search.trim()) qs.set("q", state.search.trim());
+    if (state.selectedKey) qs.set("event", state.selectedKey);
+    if (state.returnUrl) qs.set("from", state.returnUrl);
+    const str = qs.toString();
+    return "/live" + (str ? `?${str}` : "");
+  }
+
+  function syncLiveUrl() {
+    if (!window.history?.replaceState) return;
+    window.history.replaceState(null, "", currentLiveUrl());
+  }
+
+  function applyUrlParams() {
+    const p = new URLSearchParams(window.location.search);
+    state.scopeTask = (p.get("task") || "").trim();
+    state.scopeSession = (p.get("session") || "").trim();
+    state.scopeHost = (p.get("host") || "").trim();
+    state.scopeAgent = (p.get("agent") || "").trim();
+    state.scopeRuntime = (p.get("runtime") || "").trim();
+    state.scopeWorkspace = (p.get("ws") || "").trim();
+    state.scopeFile = (p.get("file") || "").trim();
+    state.pendingEventKey = (p.get("event") || "").trim();
+    state.returnUrl = safeRelativeUrl(p.get("from"));
+    if (p.get("persp")) state.perspective = p.get("persp").trim();
+    if (p.get("win")) { state.windowSec = p.get("win").trim(); if (el("window")) el("window").value = state.windowSec; }
+    if (p.get("sev")) { state.filterSev = p.get("sev").trim().toUpperCase(); if (el("severity")) el("severity").value = state.filterSev; }
+    if (p.get("kind")) { state.filterKind = p.get("kind").trim(); if (el("kind")) el("kind").value = state.filterKind; }
+    if (p.get("cat")) { state.filterCat = p.get("cat").trim(); if (el("category")) el("category").value = state.filterCat; }
+    if (p.get("status")) { state.filterStatus = p.get("status").trim().toUpperCase(); if (el("status")) el("status").value = state.filterStatus; }
+    if (p.get("group")) { state.groupMode = p.get("group").trim(); if (el("group-mode")) el("group-mode").value = state.groupMode; }
+    if (p.get("q")) { state.search = p.get("q"); if (el("search")) el("search").value = state.search; }
+    const retEl = el("return-link");
+    if (retEl) {
+      if (state.returnUrl) {
+        retEl.href = state.returnUrl;
+        retEl.textContent = state.returnUrl.includes("#activity")
+          ? "← Return to Activity Map (filters preserved)"
+          : "← Return to Assignment (filters preserved)";
+        retEl.classList.remove("hidden");
+      } else {
+        retEl.classList.add("hidden");
+      }
+    }
+  }
+
+  async function api(path, opts = {}) {
+    const res = await fetch(path, {
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+      ...opts,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data.message || data.error || `HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    return data;
+  }
+
+  /* ---------- Record Normalizers ---------- */
+  function normalizeFeedRecord(r) {
+    const isAlert = String(r.kind || "").toLowerCase() === "alert";
+    const src = String(r.source || r.rule_code || r.event_type || "");
+    const work = r.work && typeof r.work === "object" ? r.work : null;
+    const rawDetails = r.details || r.evidence || r.metadata || {};
+    const details = work ? { ...rawDetails, ...work, persisted_journal: true } : rawDetails;
+    const isObservedWork = !isAlert && (src === "observed_step" || Boolean(work));
+
+    if (isObservedWork) {
+      const cat = String(details.action || "other");
+      const files = Array.isArray(details.files) ? details.files.map(String) : [];
+      const ws = String(details.workspace || "");
+      const program = String(details.program || "");
+      const command = String(details.command || "");
+      const currentFolder = String(details.current_folder || "");
+      const outcome = String(details.outcome || "recorded");
+      const rawSev = normSev(r.severity, outcome);
+      const sev =
+        ["CRITICAL", "ERROR", "WARNING"].includes(rawSev)
+          ? rawSev
+          : outcome.toLowerCase().includes("err") || outcome.toLowerCase().includes("fail")
+            ? "ERROR"
+            : cat === "file_edit"
+              ? "NORMAL"
+              : "INFO";
+      const where = files.length
+        ? shortPath(files[0])
+        : program
+          ? `${shortPath(ws) || "shell"} · ${program}`
+          : shortPath(ws) || String(details.tool || "observed_step");
+      return {
+        key: String(r.key || `event:${r.id}`),
+        rawId: r.id,
+        kind: "Agent Work",
+        severity: sev,
+        status: normStatus(outcome),
+        rawStatus: outcome,
+        ts: parseTs(r.ts || r.created_at),
+        createdAt: parseTs(r.created_at || r.ts),
+        host_id: String(r.host_id || "console"),
+        agent: String(r.agent || details.agent || r.agent_name || r.detail || "agent"),
+        harness: String(r.runtime || details.runtime || r.harness || "runtime"),
+        source: String(details.tool || "observed_step"),
+        category: cat,
+        categoryLabel: CAT_LABELS[cat] || cat,
+        workspace: ws,
+        files,
+        where,
+        program,
+        command,
+        currentFolder,
+        message: String(r.message || r.title || CAT_LABELS[cat] || "Agent work"),
+        summary: program ? `Program: ${program}${files.length ? " · Files: " + files.join(", ") : ""}` : files.length ? files.join(", ") : String(r.message || ""),
+        ackedBy: "",
+        ackedAt: 0,
+        sessionId: String(details.session || ""),
+        taskId: String(details.task_id || r.task_id || ""),
+        changeId: "",
+        fileBasis: String(details.basis || "journal"),
+        sessionFiles: { edited: cat === "file_edit" ? files : [], delivered: [], read: cat === "file_read" ? files : [] },
+        details,
+        canAck: false,
+      };
+    }
+
+    const rawState = String(r.state || r.status || (isAlert ? "OPEN" : "RECORDED")).toUpperCase();
+    const files = Array.isArray(details.files) ? details.files.map(String) : [];
+    const ws = String(details.workspace || "");
+    const cat = isAlert
+      ? "guardrail"
+      : src.includes("work_") || src === "plan"
+        ? "plan"
+        : src.includes("error")
+          ? "shell"
+          : "other";
+    return {
+      key: String(r.key || `${isAlert ? "alert" : "event"}:${r.id}`),
+      rawId: r.id,
+      kind: isAlert ? "Alert" : "Event",
+      severity: normSev(r.severity, rawState),
+      status: normStatus(rawState),
+      rawStatus: rawState,
+      ts: parseTs(r.ts || r.updated_at || r.created_at),
+      createdAt: parseTs(r.created_at || r.ts),
+      host_id: String(r.host_id || "console"),
+      agent: String(r.agent || r.agent_name || details.agent_name || details.comm || (isAlert ? "host guardrail" : r.detail || "observer")),
+      harness: String(r.runtime || r.harness || details.harness || (isAlert ? "guardrail" : "observer")),
+      source: src,
+      category: cat,
+      categoryLabel: CAT_LABELS[cat] || "Event",
+      workspace: ws,
+      files,
+      where: files.length ? shortPath(files[0]) : shortPath(ws) || src,
+      program: "",
+      message: String(r.title || r.message || src || "Record"),
+      summary: String(r.summary || r.detail || r.message || ""),
+      ackedBy: String(r.acked_by || ""),
+      ackedAt: parseTs(r.acked_at),
+      owner: r.owner || "",
+      signalCount: r.occurrence_count,
+      countIsMinimum: r.count_is_minimum,
+      previousCase: r.previous_id,
+      sessionId: "",
+      taskId: String(details.task_id || ""),
+      changeId: String(details.task_id || ""),
+      sessionFiles: { edited: [], delivered: [], read: [] },
+      details,
+      canAck: isAlert && rawState === "OPEN" && canAck(),
+    };
+  }
+
+  function normalizeActivitySessions(activity) {
+    const next = new Map();
+    const sessions = Array.isArray(activity?.sessions) ? activity.sessions : [];
+    const labels = activity?.category_labels || CAT_LABELS;
+
+    for (const s of sessions) {
+      const hostId = String(s.host_id || activity?.host || "host");
+      const agent = String(s.agent_name || s.workspace_label || "agent");
+      const harness = String(s.harness_name || s.harness || "runtime");
+      const model = String(s.model || "");
+      const ws = String(s.workspace_label || shortPath(s.workspace) || "");
+      const sid = String(s.session_id || `${hostId}:${agent}`);
+      const sessionFiles = {
+        edited: Array.isArray(s.files_edited) ? s.files_edited : [],
+        delivered: Array.isArray(s.files_delivered) ? s.files_delivered : [],
+        read: Array.isArray(s.files_read) ? s.files_read : [],
+      };
+
+      const steps = Array.isArray(s.steps) ? s.steps : [];
+      steps.forEach((st, idx) => {
+        const cat = String(st.category || "other");
+        const stepFiles = Array.isArray(st.files) ? st.files.map(String) : [];
+        const stepTs = parseTs(st.time, parseTs(s.updated_at) - Math.max(0, steps.length - 1 - idx));
+        const stStatus = normStatus(st.status || (s.status === "active" && idx === steps.length - 1 ? "OPEN" : "RESOLVED"));
+        const sev = String(st.status || "").toLowerCase().includes("fail") || String(st.status || "").toLowerCase().includes("err")
+          ? "ERROR"
+          : cat === "file_edit"
+            ? "NORMAL"
+            : "INFO";
+        const where = stepFiles.length ? shortPath(stepFiles[0]) : ws;
+        const k = `work:${sid}:step:${idx}:${String(st.time || "")}`;
+        next.set(k, {
+          key: k,
+          rawId: k,
+          kind: "Agent Work",
+          severity: sev,
+          status: stStatus,
+          rawStatus: String(st.status || "recorded"),
+          ts: stepTs,
+          createdAt: stepTs,
+          host_id: hostId,
+          agent,
+          harness: model ? `${harness} · ${model}` : harness,
+          source: String(st.tool || cat),
+          category: cat,
+          categoryLabel: labels[cat] || CAT_LABELS[cat] || cat,
+          workspace: ws,
+          files: stepFiles,
+          where: where || harness,
+          program: String(st.program || ""),
+          command: String(st.command || ""),
+          currentFolder: String(s.current_folder || st.current_folder || ""),
+          message: String(st.label || "Agent action"),
+          summary: stepFiles.length ? stepFiles.slice(0, 3).map(shortPath).join(", ") : String(st.program ? `Program: ${st.program}` : ""),
+          sessionSummary: String(s.what_done || ""),
+          ackedBy: "",
+          ackedAt: 0,
+          sessionId: sid,
+          taskId: String(st.task_id || s.task_id || ""),
+          changeId: "",
+          fileBasis: String(st.file_basis || ""),
+          sessionFiles,
+          details: {
+            tool: st.tool,
+            category: cat,
+            file_basis: st.file_basis || "session",
+            files: stepFiles,
+            workspace: s.workspace || ws,
+            model,
+            provider: s.provider_label || s.provider || "",
+            provider_basis: s.provider_basis || "",
+            tokens_used: s.tokens_used || 0,
+          },
+          canAck: false,
+        });
+      });
+
+      // Also include active / completed plan milestones if no steps or in_progress plan exists
+      const plans = Array.isArray(s.plan) ? s.plan : [];
+      plans.forEach((p, idx) => {
+        if (!p || !p.text) return;
+        const pStatus = normStatus(p.status);
+        const pFiles = Array.isArray(p.named_files) ? p.named_files.map(String) : [];
+        const pTs = parseTs(s.updated_at);
+        const k = `work:${sid}:plan:${idx}`;
+        next.set(k, {
+          key: k,
+          rawId: k,
+          kind: "Agent Work",
+          severity: pStatus === "RESOLVED" ? "NORMAL" : "INFO",
+          status: pStatus,
+          rawStatus: String(p.status || "pending"),
+          ts: pTs,
+          createdAt: pTs,
+          host_id: hostId,
+          agent,
+          harness: model ? `${harness} · ${model}` : harness,
+          source: "plan",
+          category: "plan",
+          categoryLabel: "Plan",
+          workspace: ws,
+          files: pFiles,
+          where: pFiles.length ? shortPath(pFiles[0]) : ws,
+          program: "",
+          message: `[Plan] ${String(p.text)}`,
+          summary: pFiles.length ? pFiles.slice(0, 3).map(shortPath).join(", ") : "",
+          sessionSummary: String(s.what_done || ""),
+          ackedBy: "",
+          ackedAt: 0,
+          sessionId: sid,
+          taskId: String(p.task_id || s.task_id || ""),
+          changeId: "",
+          fileBasis: pFiles.length ? "mentioned" : "",
+          sessionFiles,
+          details: { plan_status: p.status, named_files: pFiles, workspace: s.workspace || ws, model },
+          canAck: false,
+        });
+      });
+    }
+    return next;
+  }
+
+  function normalizeCollaboration(workBoard) {
+    const next = new Map();
+    const changes = Array.isArray(workBoard?.collaboration?.changes) ? workBoard.collaboration.changes : [];
+    for (const ch of changes) {
+      const tasks = Array.isArray(ch.tasks) ? ch.tasks : [];
+      for (const t of tasks) {
+        const st = normStatus(t.status);
+        const k = `collab:${ch.id}:${t.id}`;
+        next.set(k, {
+          key: k,
+          rawId: t.id,
+          kind: "Collaboration",
+          severity: normSev(t.status, t.status),
+          status: st,
+          rawStatus: String(t.status || "recorded"),
+          ts: parseTs(t.updated_at || ch.updated_at),
+          createdAt: parseTs(t.updated_at || ch.updated_at),
+          host_id: "channel",
+          agent: String(t.agent || "unassigned"),
+          harness: "collaboration",
+          source: String(ch.id || "change"),
+          category: "coordination",
+          categoryLabel: "Coordinate",
+          workspace: "",
+          files: [],
+          where: String(ch.title || "change").slice(0, 36),
+          message: String(t.title || "Assigned task"),
+          summary: String(t.result || "No formal result recorded yet."),
+          ackedBy: "",
+          ackedAt: 0,
+          sessionId: "",
+          taskId: String(t.id || ""),
+          changeId: String(ch.id || ""),
+          sessionFiles: { edited: [], delivered: [], read: [] },
+          details: { change_id: ch.id, change_title: ch.title, task_id: t.id, parent_id: t.parent_id || null, status: t.status },
+          canAck: false,
+        });
+      }
+    }
+    return next;
+  }
+
+  function normalizeAudit(overview) {
+    const next = new Map();
+    if (!isAdmin() || !Array.isArray(overview?.audit)) return next;
+    overview.audit.forEach((au, idx) => {
+      const aid = au.id !== undefined && au.id !== null ? au.id : `${au.created_at || 0}:${idx}`;
+      const action = String(au.action || "audit");
+      const detail = String(au.detail || "").trim();
+      const k = `audit:${aid}`;
+      next.set(k, {
+        key: k,
+        rawId: aid,
+        kind: "Audit",
+        severity: "INFO",
+        status: "RECORDED",
+        rawStatus: "recorded",
+        ts: parseTs(au.created_at),
+        createdAt: parseTs(au.created_at),
+        host_id: "console",
+        agent: String(au.actor || "system"),
+        harness: "audit",
+        source: action,
+        category: "audit",
+        categoryLabel: "Audit",
+        workspace: "",
+        files: [],
+        where: "console",
+        message: detail ? `${action} — ${detail}` : action,
+        summary: detail || action,
+        ackedBy: "",
+        ackedAt: 0,
+        sessionId: "",
+        changeId: "",
+        sessionFiles: { edited: [], delivered: [], read: [] },
+        details: { actor: au.actor, action, detail },
+        canAck: false,
+      });
+    });
+    return next;
+  }
+
+  function allMergedRecords() {
+    if (state.paused && Array.isArray(state.displaySnapshot)) return state.displaySnapshot;
+    const byKey = new Map();
+    for (const r of state.historyMap.values()) byKey.set(r.key, r);
+    for (const r of state.feedMap.values()) byKey.set(r.key, r);
+
+    // Deduplicate live activity tail steps already persisted as observed_step journal events
+    const journalSigs = new Set();
+    for (const r of byKey.values()) {
+      if (r.kind === "Agent Work" && r.sessionId) {
+        const f0 = shortPath((r.files && r.files[0]) || "");
+        journalSigs.add(`${r.sessionId}|${r.category}|${Math.round(r.ts / 2)}|${f0}`);
+      }
+    }
+    for (const r of state.workMap.values()) {
+      const f0 = shortPath((r.files && r.files[0]) || "");
+      const sig = `${r.sessionId}|${r.category}|${Math.round(r.ts / 2)}|${f0}`;
+      if (!journalSigs.has(sig)) byKey.set(r.key, r);
+    }
+    for (const r of state.collabMap.values()) byKey.set(r.key, r);
+    for (const r of state.auditMap.values()) byKey.set(r.key, r);
+
+    const merged = [...byKey.values()];
+    if (merged.length > MAX_RECORDS) {
+      merged.sort((a, b) => b.ts - a.ts);
+      merged.length = MAX_RECORDS;
+    }
+    return merged;
+  }
+
+  /* ---------- Multi-Signal Correlation Engine ---------- */
+  function findCorrelations(item, pool) {
+    if (!item) return [];
+    const itemFiles = new Set((item.files || []).map((f) => shortPath(f).toLowerCase()).filter(Boolean));
+    const hits = [];
+    for (const other of pool) {
+      if (other.key === item.key) continue;
+      const reasons = [];
+      let score = 0;
+
+      if (item.sessionId && other.sessionId && item.sessionId === other.sessionId) {
+        reasons.push("Same session");
+        score += 5;
+      }
+      if (item.changeId && other.changeId && item.changeId === other.changeId) {
+        reasons.push("Same change");
+        score += 5;
+      }
+      if (itemFiles.size && other.files && other.files.length) {
+        const shared = other.files.find((f) => itemFiles.has(shortPath(f).toLowerCase()));
+        if (shared) {
+          reasons.push(`Same file: ${shortPath(shared)}`);
+          score += 6;
+        }
+      }
+      if (item.workspace && other.workspace && item.workspace === other.workspace && !reasons.some((r) => r.startsWith("Same file"))) {
+        reasons.push("Same workspace");
+        score += 3;
+      }
+      if (item.agent && other.agent && item.agent === other.agent && item.kind !== "Audit") {
+        reasons.push("Same agent");
+        score += 2;
+      }
+      if (item.host_id && other.host_id && item.host_id === other.host_id && item.host_id !== "console" && item.host_id !== "channel") {
+        const nearTime = Math.abs((item.ts || 0) - (other.ts || 0)) <= 600;
+        if (nearTime || other.kind === "Alert" || item.kind === "Alert") {
+          reasons.push(nearTime ? "Same host (±10m)" : "Same host");
+          score += nearTime ? 3 : 1;
+        }
+      }
+      if (score > 0) hits.push({ item: other, reasons, score });
+    }
+    hits.sort((a, b) => b.score - a.score || Math.abs(a.item.ts - item.ts) - Math.abs(b.item.ts - item.ts));
+    return hits.slice(0, 18);
+  }
+
+  /* ---------- Filtering & Sorting ---------- */
+  function getFiltered(pool) {
+    const q = state.search.trim().toLowerCase();
+    const nowSec = Date.now() / 1000;
+    const winSec = state.windowSec === "all" ? 0 : Number(state.windowSec) || 0;
+
+    const list = pool.filter((r) => {
+      if (winSec > 0 && r.ts > 0 && nowSec - r.ts > winSec) return false;
+      if (state.perspective === "open_alerts" && !(r.kind === "Alert" && r.status === "OPEN")) return false;
+      if (state.perspective === "crit_warn" && !["CRITICAL", "ERROR", "WARNING"].includes(r.severity)) return false;
+      if (state.perspective === "agent_work" && r.kind !== "Agent Work") return false;
+      if (state.perspective === "file_edits" && r.category !== "file_edit") return false;
+      if (state.perspective === "shell_cmds" && r.category !== "shell") return false;
+      if (state.perspective === "collab" && r.kind !== "Collaboration") return false;
+      if (state.perspective === "events" && r.kind !== "Event") return false;
+      if (state.perspective === "audit" && r.kind !== "Audit") return false;
+
+      if (state.scopeHost && r.host_id !== state.scopeHost) return false;
+      if (state.scopeAgent && r.agent !== state.scopeAgent) return false;
+      if (state.scopeWorkspace && r.workspace !== state.scopeWorkspace) return false;
+      if (state.scopeTask) {
+        const linkedForTask = state.linksByTask[state.scopeTask];
+        const explicitMatch = r.taskId === state.scopeTask || (r.kind === "Collaboration" && r.rawId === state.scopeTask);
+        const turnMatch =
+          linkedForTask &&
+          linkedForTask.status === "linked" &&
+          linkedForTask.basis === "explicit_turn_session" &&
+          linkedForTask.session_id &&
+          r.sessionId === linkedForTask.session_id &&
+          (!r.taskId || r.taskId === state.scopeTask);
+        if (!explicitMatch && !turnMatch) return false;
+      }
+      if (state.scopeSession && r.sessionId !== state.scopeSession) return false;
+      if (state.scopeFile) {
+        const wantFile = state.scopeFile.toLowerCase();
+        const fileList = (r.files || []).map((f) => String(f).toLowerCase());
+        const matchesFile = fileList.some((f) => f === wantFile || f.endsWith("/" + wantFile) || wantFile.endsWith("/" + f));
+        if (!matchesFile) return false;
+      }
+
+      if (state.filterSev && r.severity !== state.filterSev) return false;
+      if (state.filterKind && r.kind !== state.filterKind) return false;
+      if (state.filterCat && r.category !== state.filterCat) return false;
+      if (state.filterStatus && r.status !== state.filterStatus) return false;
+
+      if (q) {
+        const hay = `${r.message} ${r.summary} ${r.host_id} ${r.agent} ${r.harness} ${r.workspace} ${r.where} ${(r.files || []).join(" ")} ${r.source} ${r.severity} ${r.status}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+
+    const dir = state.sortDir === "asc" ? 1 : -1;
+    list.sort((a, b) => {
+      let cmp = 0;
+      if (state.sortKey === "severity") cmp = (SEV_RANK[a.severity] || 0) - (SEV_RANK[b.severity] || 0);
+      else if (state.sortKey === "ts") cmp = a.ts - b.ts;
+      else cmp = String(a[state.sortKey] || "").localeCompare(String(b[state.sortKey] || ""));
+      return cmp !== 0 ? cmp * dir : b.ts - a.ts;
+    });
+    return list;
+  }
+
+  /* ---------- Render View Explorer ---------- */
+  function renderExplorer(pool) {
+    const persp = [
+      { id: "all", label: "All Live Stream", count: pool.length, dot: "online" },
+      { id: "agent_work", label: "Agent Work (All)", count: pool.filter((r) => r.kind === "Agent Work").length, dot: "work" },
+      { id: "file_edits", label: "File Edits Only", count: pool.filter((r) => r.category === "file_edit").length, dot: "online" },
+      { id: "shell_cmds", label: "Commands & Tests", count: pool.filter((r) => r.category === "shell").length, dot: "work" },
+      { id: "open_alerts", label: "Open Alerts", count: pool.filter((r) => r.kind === "Alert" && r.status === "OPEN").length, dot: "warn" },
+      { id: "crit_warn", label: "Critical & Warning", count: pool.filter((r) => ["CRITICAL", "ERROR", "WARNING"].includes(r.severity)).length, dot: "crit" },
+      { id: "collab", label: "Collaboration", count: pool.filter((r) => r.kind === "Collaboration").length, dot: "online" },
+      { id: "events", label: "System Events", count: pool.filter((r) => r.kind === "Event").length, dot: "online" },
+    ];
+    if (isAdmin()) persp.push({ id: "audit", label: "Audit Trail", count: pool.filter((r) => r.kind === "Audit").length, dot: "" });
+
+    el("perspectives").innerHTML = persp
+      .map(
+        (p) => `<li><button type="button" class="tree-btn${state.perspective === p.id && !state.scopeHost && !state.scopeAgent && !state.scopeWorkspace ? " active" : ""}" data-persp="${esc(p.id)}">
+          <span class="tree-name"><i class="dot ${p.dot}" aria-hidden="true"></i>${esc(p.label)}</span>
+          <span class="tree-cnt">${p.count}</span>
+        </button></li>`
+      )
+      .join("");
+
+    // Hosts
+    const hCounts = new Map();
+    for (const r of pool) if (r.host_id) hCounts.set(r.host_id, (hCounts.get(r.host_id) || 0) + 1);
+    const hosts = [...new Set([...state.hosts.map((h) => h.host_id), ...hCounts.keys()])].filter(Boolean);
+    el("host-tree").innerHTML = hosts.length
+      ? hosts
+          .map((hid) => {
+            const hasCrit = pool.some((r) => r.host_id === hid && ["CRITICAL", "ERROR"].includes(r.severity) && r.status === "OPEN");
+            const hasWarn = pool.some((r) => r.host_id === hid && r.severity === "WARNING" && r.status === "OPEN");
+            const dot = hasCrit ? "crit" : hasWarn ? "warn" : "online";
+            return `<li><button type="button" class="tree-btn${state.scopeHost === hid ? " active" : ""}" data-scope-host="${esc(hid)}">
+              <span class="tree-name"><i class="dot ${dot}" aria-hidden="true"></i>${esc(hid)}</span>
+              <span class="tree-cnt">${hCounts.get(hid) || 0}</span>
+            </button></li>`;
+          })
+          .join("")
+      : '<li class="muted" style="padding:4px 8px;font-size:.76rem;">No hosts reporting</li>';
+
+    // Agents
+    const aCounts = new Map();
+    for (const r of pool) {
+      if (r.agent && (r.kind === "Agent Work" || r.kind === "Collaboration")) {
+        aCounts.set(r.agent, (aCounts.get(r.agent) || 0) + 1);
+      }
+    }
+    const agents = [...aCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14);
+    el("agent-tree").innerHTML = agents.length
+      ? agents
+          .map(
+            ([ag, cnt]) => `<li><button type="button" class="tree-btn${state.scopeAgent === ag ? " active" : ""}" data-scope-agent="${esc(ag)}">
+              <span class="tree-name"><i class="dot work" aria-hidden="true"></i>${esc(ag)}</span>
+              <span class="tree-cnt">${cnt}</span>
+            </button></li>`
+          )
+          .join("")
+      : '<li class="muted" style="padding:4px 8px;font-size:.76rem;">No agent activity yet</li>';
+
+    // Workspaces
+    const wCounts = new Map();
+    for (const r of pool) if (r.workspace) wCounts.set(r.workspace, (wCounts.get(r.workspace) || 0) + 1);
+    const wsList = [...wCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
+    el("workspace-tree").innerHTML = wsList.length
+      ? wsList
+          .map(
+            ([ws, cnt]) => `<li><button type="button" class="tree-btn${state.scopeWorkspace === ws ? " active" : ""}" data-scope-ws="${esc(ws)}">
+              <span class="tree-name"><i class="dot online" aria-hidden="true"></i>${esc(ws)}</span>
+              <span class="tree-cnt">${cnt}</span>
+            </button></li>`
+          )
+          .join("")
+      : '<li class="muted" style="padding:4px 8px;font-size:.76rem;">No shared workspaces</li>';
+  }
+
+  /* ---------- Render Main Table & Status Bar ---------- */
+  function renderRow(r) {
+    const sel = r.key === state.selectedKey ? " selected" : "";
+    const fresh = state.newKeys.has(r.key) ? " is-new" : "";
+    const sevCls = safeCls(r.severity, "info");
+    const kindCls = safeCls(r.kind.replace(/\s+/g, "-"), "event");
+    const catCls = safeCls(r.category, "other");
+    const stCls = safeCls(r.status, "recorded");
+    const progHtml = r.program ? `<span class="prog-badge" title="Program executed">${esc(r.program)}</span>` : "";
+    return `<tr class="row sev-${sevCls}${sel}${fresh}" data-key="${esc(r.key)}" tabindex="0" aria-selected="${r.key === state.selectedKey ? "true" : "false"}">
+      <td class="col-sev"><span class="sev-pill ${sevCls}">${esc(r.severity)}</span></td>
+      <td class="col-kind"><span class="kind-pill ${kindCls}">${esc(r.kind)}</span></td>
+      <td class="col-cat"><span class="cat-pill cat-${catCls}">${esc(r.categoryLabel)}</span></td>
+      <td class="col-state"><span class="state-pill ${stCls}">${esc(r.status)}</span></td>
+      <td class="col-time num">${esc(fmtTime(r.ts))}</td>
+      <td class="col-age num">${esc(fmtAge(r.ts))}</td>
+      <td class="col-host" title="${esc(r.host_id)}">${esc(r.host_id)}</td>
+      <td class="col-agent" title="${esc(r.agent)} · ${esc(r.harness)}">${esc(r.agent)}</td>
+      <td class="col-where" title="${esc((r.files || []).join(", ") || r.workspace)}"><code>${esc(r.where || "—")}</code></td>
+      <td class="col-msg" title="${esc(r.message)}${r.command ? " · " + esc(r.command) : ""}">${progHtml}<strong>${esc(r.message)}</strong>${r.summary && !r.message.includes(r.summary.slice(0, 24)) ? ` <span class="muted">— ${esc(r.summary)}</span>` : ""}</td>
+    </tr>`;
+  }
+
+  function renderActiveChips() {
+    const chips = [];
+    if (state.perspective !== "all") chips.push({ id: "perspective", label: `Perspective: ${state.perspective.replace(/_/g, " ")}` });
+    if (state.scopeTask) chips.push({ id: "scopeTask", label: `Assignment: ${state.scopeTask}` });
+    if (state.scopeSession) chips.push({ id: "scopeSession", label: `Session: ${state.scopeSession}` });
+    if (state.scopeFile) chips.push({ id: "scopeFile", label: `File: ${state.scopeFile}` });
+    if (state.scopeHost) chips.push({ id: "scopeHost", label: `Host: ${state.scopeHost}` });
+    if (state.scopeAgent) chips.push({ id: "scopeAgent", label: `Agent: ${state.scopeAgent}` });
+    if (state.scopeWorkspace) chips.push({ id: "scopeWorkspace", label: `Folder: ${state.scopeWorkspace}` });
+    if (state.windowSec !== "all") chips.push({ id: "windowSec", label: `Window: ${el("window")?.selectedOptions?.[0]?.textContent || state.windowSec}` });
+    if (state.filterSev) chips.push({ id: "filterSev", label: `Severity: ${state.filterSev}` });
+    if (state.filterKind) chips.push({ id: "filterKind", label: `Source: ${state.filterKind}` });
+    if (state.filterCat) chips.push({ id: "filterCat", label: `Action: ${CAT_LABELS[state.filterCat] || state.filterCat}` });
+    if (state.filterStatus) chips.push({ id: "filterStatus", label: `State: ${state.filterStatus}` });
+    if (state.search.trim()) chips.push({ id: "search", label: `Search: “${state.search.trim()}”` });
+    const banner = el("scope-banner");
+    const box = el("active-chips");
+    if (!chips.length) {
+      banner.classList.add("hidden");
+      if (box) box.innerHTML = "";
+      return;
+    }
+    if (box) {
+      box.innerHTML =
+        '<span class="muted" style="font-weight:700;font-size:.73rem;">Active filters:</span>' +
+        chips.map((c) => `<button type="button" class="filter-chip" data-clear-chip="${esc(c.id)}" title="Remove filter">${esc(c.label)} <span class="x" aria-hidden="true">×</span></button>`).join("");
+    }
+    banner.classList.remove("hidden");
+  }
+
+  function render() {
+    appEl.classList.toggle("row-tint", state.rowTint);
+    appEl.classList.toggle("comfortable", state.comfortable);
+    const wrap = el("table-wrap");
+    const prevScroll = wrap ? wrap.scrollTop : 0;
+    const pool = allMergedRecords();
+    renderExplorer(pool);
+    const filtered = getFiltered(pool);
+    renderActiveChips();
+
+    if (state.pendingEventKey && filtered.some((r) => r.key === state.pendingEventKey)) {
+      state.selectedKey = state.pendingEventKey;
+      state.pendingEventKey = "";
+    }
+
+    if (!filtered.length) {
+      tbody.innerHTML = "";
+      emptyEl.textContent = state.scopeTask
+        ? `No confirmed steps or files explicitly linked to assignment "${state.scopeTask}" in this organization (link unknown).`
+        : pool.length
+          ? "No records match the active filters."
+          : "No events, alerts, or agent work recorded for this organization yet.";
+      emptyEl.hidden = false;
+    } else {
+      emptyEl.hidden = true;
+      if (state.groupMode === "severity") {
+        const order = ["CRITICAL", "ERROR", "WARNING", "INFO", "NORMAL"];
+        let html = "";
+        for (const sev of order) {
+          const grp = filtered.filter((r) => r.severity === sev);
+          if (!grp.length) continue;
+          html += `<tr class="group-row"><td colspan="10">Severity: ${esc(sev)} (${grp.length})</td></tr>`;
+          html += grp.map(renderRow).join("");
+        }
+        tbody.innerHTML = html;
+      } else if (state.groupMode === "agent" || state.groupMode === "workspace") {
+        const field = state.groupMode === "agent" ? "agent" : "workspace";
+        const groups = new Map();
+        for (const r of filtered) {
+          const k = String(r[field] || "(unspecified)");
+          if (!groups.has(k)) groups.set(k, []);
+          groups.get(k).push(r);
+        }
+        let html = "";
+        for (const [gName, items] of groups.entries()) {
+          html += `<tr class="group-row"><td colspan="10">${esc(field === "agent" ? "Agent" : "Workspace")}: ${esc(gName)} (${items.length})</td></tr>`;
+          html += items.map(renderRow).join("");
+        }
+        tbody.innerHTML = html;
+      } else {
+        tbody.innerHTML = filtered.map(renderRow).join("");
+      }
+      if (wrap && prevScroll > 0) wrap.scrollTop = prevScroll;
+    }
+
+    if (state.selectedKey && !filtered.some((r) => r.key === state.selectedKey)) {
+      state.selectedKey = filtered[0]?.key || "";
+    } else if (!state.selectedKey && filtered.length) {
+      state.selectedKey = filtered[0].key;
+    }
+    const sel = filtered.find((r) => r.key === state.selectedKey) || null;
+    el("ack-selected").classList.toggle("hidden", !(sel && sel.canAck));
+
+    // OMi Status Bar Counters + 5-min velocity
+    el("count").textContent = `${filtered.length} of ${pool.length} records`;
+    el("cnt-critical").textContent = pool.filter((r) => r.severity === "CRITICAL" || r.severity === "ERROR").length;
+    el("cnt-warning").textContent = pool.filter((r) => r.severity === "WARNING").length;
+    el("cnt-info").textContent = pool.filter((r) => r.severity === "INFO").length;
+    el("cnt-normal").textContent = pool.filter((r) => r.severity === "NORMAL").length;
+    const openAlerts = pool.filter((r) => r.kind === "Alert" && r.status === "OPEN").length;
+    const workCnt = pool.filter((r) => r.kind === "Agent Work").length;
+    el("open-alerts-cnt").textContent = `${openAlerts} open alert${openAlerts === 1 ? "" : "s"}`;
+    el("work-steps-cnt").textContent = `${workCnt} agent action${workCnt === 1 ? "" : "s"}`;
+    const recent5m = pool.filter((r) => r.ts > Date.now() / 1000 - 300).length;
+    const rateEl = el("rate-badge");
+    if (rateEl) rateEl.textContent = `${recent5m} / 5m`;
+
+    renderDetails(sel, pool);
+    if (caseView?.updated && state.feedMap.get(`alert:${caseView.id}`)?.ts > caseView.updated) {
+      el("incident-refresh").textContent = "Refresh · case updated";
+    }
+    syncLiveUrl();
+  }
+
+  /* ---------- Bottom Split Inspector ---------- */
+  function renderDetails(item, pool) {
+    document.querySelectorAll("[data-dtab]").forEach((btn) => {
+      const active = btn.dataset.dtab === state.detailTab;
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-selected", String(active));
+    });
+
+    if (!item) {
+      detailQuick.innerHTML = "";
+      el("corr-count").textContent = "0";
+      el("files-count").textContent = "0";
+      detailEl.innerHTML = '<p class="muted">Select any alert, event, file edit, or command row above to inspect its full details, correlations, and files touched.</p>';
+      return;
+    }
+
+    const corrs = findCorrelations(item, pool);
+    const allFilesCount = (item.files || []).length + (item.sessionFiles?.edited?.length || 0) + (item.sessionFiles?.delivered?.length || 0);
+    el("corr-count").textContent = String(corrs.length);
+    el("files-count").textContent = String(allFilesCount);
+
+    const liveReturn = encodeURIComponent(currentLiveUrl());
+    const turnOnlyLinks =
+      item.sessionId && Array.isArray(state.linksBySession[item.sessionId])
+        ? state.linksBySession[item.sessionId].filter((l) => l && l.basis === "explicit_turn_session")
+        : [];
+    const explicitTaskId = item.taskId || (turnOnlyLinks.length === 1 ? turnOnlyLinks[0].task_id : "");
+    const assignHref = explicitTaskId ? `/?task=${encodeURIComponent(explicitTaskId)}&return_to=${liveReturn}#agent-work` : "";
+    const sessionMapHref = item.sessionId ? `/?am_view=sessions&am_session=${encodeURIComponent(item.sessionId)}&return_to=${liveReturn}#activity` : "";
+
+    detailQuick.innerHTML = `
+      ${item.kind === "Alert" ? `<button type="button" class="btn primary" data-act="incident" data-id="${esc(item.rawId)}">Incident #${esc(item.rawId)} · History</button>` : ""}
+      ${item.canAck ? `<button type="button" class="btn primary" data-act="ack" data-id="${esc(item.rawId)}">Acknowledge</button>` : ""}
+      ${assignHref ? `<a href="${esc(assignHref)}" class="btn" id="detail-open-assignment">Open assignment ↗</a>` : ""}
+      ${sessionMapHref ? `<a href="${esc(sessionMapHref)}" class="btn" id="detail-open-session-map">Session in Map ↗</a>` : ""}
+      ${item.agent ? `<button type="button" class="btn" data-act="scope-agent" data-val="${esc(item.agent)}">Filter agent</button>` : ""}
+      ${item.workspace ? `<button type="button" class="btn" data-act="scope-ws" data-val="${esc(item.workspace)}">Filter folder</button>` : ""}
+      <button type="button" class="btn" data-act="copy-json">Copy JSON</button>`;
+
+    if (state.detailTab === "correlations") {
+      detailEl.innerHTML = corrs.length
+        ? `<ul class="corr-list">${corrs
+            .map(
+              (c) => `<li><button type="button" class="corr-btn" data-jump="${esc(c.item.key)}">
+                <span>
+                  <span class="sev-pill ${safeCls(c.item.severity)}">${esc(c.item.severity)}</span>
+                  <span class="kind-pill ${safeCls(c.item.kind.replace(/\s+/g, "-"))}">${esc(c.item.kind)}</span>
+                  ${c.reasons.map((rs) => `<span class="chip reason">${esc(rs)}</span>`).join(" ")}
+                  <strong>${esc(c.item.message)}</strong>
+                  <span class="muted">(${esc(c.item.agent)} · ${esc(c.item.host_id)})</span>
+                </span>
+                <time class="muted">${esc(fmtTime(c.item.ts))}</time>
+              </button></li>`
+            )
+            .join("")}</ul>`
+        : '<p class="muted">No correlated events found on the same file, workspace, session, agent, or host.</p>';
+      return;
+    }
+
+    if (state.detailTab === "files") {
+      const grp = (title, arr, cls) =>
+        arr && arr.length
+          ? `<div class="file-group"><h4>${esc(title)} (${arr.length})</h4><div class="chips">${arr.map((f) => `<span class="chip ${cls}" title="${esc(f)}">${esc(shortPath(f))}</span>`).join("")}</div></div>`
+          : "";
+      const body =
+        (item.workspace ? `<p style="margin:0 0 8px;"><strong>Workspace:</strong> <code>${esc(item.workspace)}</code>${item.fileBasis ? ` <span class="muted">(${esc(item.fileBasis)})</span>` : ""}</p>` : "") +
+        grp("Directly linked to this step / event", item.files, "edited") +
+        grp("Session edited files", item.sessionFiles?.edited, "edited") +
+        grp("Session delivered files", item.sessionFiles?.delivered, "") +
+        grp("Session read files", item.sessionFiles?.read, "");
+      detailEl.innerHTML = body || '<p class="muted">No file paths or workspace folder recorded for this item.</p>';
+      return;
+    }
+
+    if (state.detailTab === "evidence") {
+      detailEl.innerHTML = `
+        <p class="muted" style="margin:0 0 6px;">Redacted structured details for <code>${esc(item.key)}</code>:</p>
+        <pre class="pre">${esc(JSON.stringify(item.details || {}, null, 2))}</pre>`;
+      return;
+    }
+
+    if (state.detailTab === "actions") {
+      detailEl.innerHTML = `
+        <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:8px;">
+          ${item.canAck ? `<button type="button" class="btn primary" data-act="ack" data-id="${esc(item.rawId)}">Acknowledge alert</button>` : `<span class="muted">${item.kind === "Alert" ? (canAck() ? "Alert already acknowledged/resolved." : "Viewer role is read-only.") : "Observation record (read-only)."}</span>`}
+          <button type="button" class="btn" data-act="scope-host" data-val="${esc(item.host_id)}">Scope host: ${esc(item.host_id)}</button>
+          <button type="button" class="btn" data-act="scope-agent" data-val="${esc(item.agent)}">Scope agent: ${esc(item.agent)}</button>
+          ${item.workspace ? `<button type="button" class="btn" data-act="scope-ws" data-val="${esc(item.workspace)}">Scope folder: ${esc(item.workspace)}</button>` : ""}
+          <a href="/#activity" class="btn">Activity Map ↗</a>
+          <a href="/#agent-work" class="btn">Agent Work ↗</a>
+        </div>
+        <div class="keys-grid">
+          <div class="key-item"><kbd>⌘K</kbd> / <kbd>Ctrl+K</kbd> Quick jump palette</div>
+          <div class="key-item"><kbd>↑</kbd> / <kbd>↓</kbd> Navigate rows</div>
+          <div class="key-item"><kbd>/</kbd> Focus search</div>
+          <div class="key-item"><kbd>A</kbd> Acknowledge open alert</div>
+          <div class="key-item"><kbd>P</kbd> Pause / resume display</div>
+          <div class="key-item"><kbd>D</kbd> Toggle density</div>
+          <div class="key-item"><kbd>F</kbd> Toggle full screen</div>
+        </div>`;
+      return;
+    }
+
+    // General tab
+    const fileChips = (item.files || []).length
+      ? `<div class="chips">${item.files.map((f) => `<span class="chip edited" title="${esc(f)}">${esc(shortPath(f))}</span>`).join("")}</div>`
+      : "";
+    const cmdBlock = item.command
+      ? `<div class="cmd-wrap"><div class="cmd-bar"><span>Redacted command</span><button type="button" class="btn" data-act="copy-cmd">Copy</button></div><pre class="cmd-preview">$ ${esc(item.command)}</pre></div>`
+      : "";
+    detailEl.innerHTML = `
+      <div class="detail-grid">
+        <div>
+          <h3 class="detail-title">
+            <span class="sev-pill ${safeCls(item.severity)}">${esc(item.severity)}</span>
+            <span class="kind-pill ${safeCls(item.kind.replace(/\s+/g, "-"))}">${esc(item.kind)}</span>
+            <span class="state-pill ${safeCls(item.status)}">${esc(item.status)}</span>
+            ${item.program ? `<span class="prog-badge">${esc(item.program)}</span>` : ""}
+            ${esc(item.message)}
+          </h3>
+          <div class="detail-msg">${esc(item.summary || item.sessionSummary || item.message)}</div>
+          ${item.kind === "Alert" && item.signalCount ? `<p>${item.countIsMinimum ? "At least " : ""}${esc(item.signalCount)} signals · ${esc(item.owner || "Unassigned")}${item.previousCase ? ` · Recurrence after #${esc(item.previousCase)}` : ""}</p>` : ""}
+          ${cmdBlock}
+          ${item.sessionSummary && item.summary && item.sessionSummary !== item.summary ? `<div class="muted" style="font-size:.78rem;margin-top:4px;"><strong>Session context:</strong> ${esc(item.sessionSummary)}</div>` : ""}
+          ${fileChips}
+        </div>
+        <dl class="kv">
+          <dt>Agent</dt><dd><strong>${esc(item.agent)}</strong></dd>
+          <dt>Harness / Tool</dt><dd>${esc(item.harness)} <code>${esc(item.source)}</code>${item.program ? ` · <code>${esc(item.program)}</code>` : ""}</dd>
+          <dt>Session</dt><dd>${item.sessionId ? `<code>${esc(item.sessionId)}</code>${sessionMapHref ? ` <a href="${esc(sessionMapHref)}" class="detail-link-hop">Activity Map ↗</a>` : ""}` : '<span class="muted">None recorded</span>'}</dd>
+          <dt>Assignment</dt><dd>${
+            assignHref
+              ? `<a href="${esc(assignHref)}" class="detail-link-hop" data-detail-link="linked">Open assignment <code>${esc(explicitTaskId)}</code> ↗</a>`
+              : '<span class="detail-link-unknown" data-detail-link="unknown">Link unknown (no explicit task link)</span>'
+          }</dd>
+          <dt>Host / Node</dt><dd><code>${esc(item.host_id)}</code></dd>
+          <dt>Workspace</dt><dd><code>${esc(item.workspace || "—")}</code></dd>
+          ${item.currentFolder && item.currentFolder !== item.workspace ? `<dt>Working dir</dt><dd><code>${esc(item.currentFolder)}</code></dd>` : ""}
+          <dt>Received</dt><dd class="num">${esc(fmtTime(item.ts))} (${esc(fmtAge(item.ts))} ago)</dd>
+          ${item.ackedBy ? `<dt>Acknowledged</dt><dd>${esc(item.ackedBy)} · ${esc(fmtTime(item.ackedAt))}</dd>` : ""}
+          <dt>Organization</dt><dd>${esc(state.org?.name || "Active organization")}</dd>
+        </dl>
+      </div>`;
+  }
+
+
+  // Keep the incident history outside the polling table so reading or assigning a case
+  // never loses focus on refresh. All actions are bound to the organization that opened it.
+  function closeIncident() {
+    caseView = null;
+    if (caseDialog.open) caseDialog.close();
+    el("incident-content").replaceChildren();
+    el("incident-feedback").textContent = "";
+    el("incident-heading").textContent = "Incident";
+  }
+
+  function incidentTime(ts) {
+    return ts ? new Date(Number(ts) * 1000).toLocaleString() : "Time unknown";
+  }
+
+  function resolutionLabel(reason) {
+    return ({
+      measurement_recovered: "Reading returned below threshold",
+      heartbeat_resumed: "Heartbeat resumed",
+      operator_verified: "Recovery verified by operator",
+      legacy_resolution: "Resolution imported from an earlier version",
+    })[reason] || "Resolved";
+  }
+
+  function incidentStep(step) {
+    if (!step) return '<p class="muted">No verified journal step available at observation time.</p>';
+    const files = (step.confirmed_files || []).map(f => `<code>${esc(f)}</code>`).join(", ");
+    return `<p>${esc(step.action || "Step")} · ${esc(step.agent || "Unknown agent")} · ${esc(step.tool)} · ${esc(incidentTime(step.at))}<br>
+      Session <code>${esc(step.session || "Unknown")}</code> · ${files ? "Confirmed file: " + files : "No confirmed file recorded"}</p>`;
+  }
+
+  function historyRow(entry) {
+    const data = entry.data || {};
+    const labels = {opened: "First signal", repeated: "Repeated signal", acknowledged: "Acknowledged",
+      assigned: data.owner ? "Assigned to " + data.owner : "Unassigned", resolved: resolutionLabel(data.reason),
+      legacy_snapshot: "Imported alert #" + data.source_id};
+    const hasEvidence = data.evidence && Object.keys(data.evidence).length;
+    return `<li><strong>${esc(labels[entry.kind] || entry.kind)}</strong>${entry.actor ? ` · ${esc(entry.actor)}` : ""}
+      <time>${esc(incidentTime(entry.at))}</time>
+      ${hasEvidence || data.last_step ? `<details><summary>Recorded evidence</summary>
+        ${hasEvidence ? `<pre>${esc(JSON.stringify(data.evidence, null, 2))}</pre>` : ""}
+        ${data.last_step ? incidentStep(data.last_step) : ""}</details>` : ""}
+    </li>`;
+  }
+
+  function renderIncident(page) {
+    const a = page.alert;
+    const step = a.last_step;
+    const active = a.status !== "RESOLVED";
+    const manage = canAck() && active && Array.isArray(page.assignees);
+    const previous = a.previous_id ? `<button class="btn" type="button" data-case-previous="${esc(a.previous_id)}">Previous incident #${esc(a.previous_id)}</button>` : "";
+    el("incident-heading").textContent = `Incident #${a.id} · ${a.status}`;
+    el("incident-content").innerHTML = `
+      <h3>${esc(a.title)}</h3><p>${esc(a.summary)}</p>
+      <dl class="kv">
+        <dt>Host / rule</dt><dd>${esc(a.host_id)} · <code>${esc(a.rule_code)}</code></dd>
+        <dt>Signals</dt><dd>${a.count_is_minimum ? "At least " : ""}<strong id="incident-count">${esc(a.occurrence_count)}</strong> · Last observed ${esc(incidentTime(a.last_seen_at))}</dd>
+        <dt>Owner</dt><dd id="incident-current-owner">${esc(a.owner || "Unassigned")}</dd>
+        <dt>Acknowledgement</dt><dd>${a.acked_at ? `${esc(a.acked_by || "Unknown")} · ${esc(incidentTime(a.acked_at))}` : "None recorded"}</dd>
+        <dt>Resolution</dt><dd>${active ? "Awaiting recovery" : `${esc(resolutionLabel(a.resolution))} · ${esc(a.resolved_by || "Unknown")} · ${esc(incidentTime(a.resolved_at))}`}</dd>
+      </dl>
+      ${previous}
+      <h3>Last observed step on this host</h3>
+      ${incidentStep(step)}
+      ${step ? '<p class="muted">The journal recorded this step on the host. Its connection to the alert is unverified.</p>' : ""}
+      ${manage ? `<div class="incident-controls">
+        <label for="incident-owner">Owner</label><select id="incident-owner"><option value="">Unassigned</option>
+          ${a.owner && !page.assignees.some(m => m.username === a.owner) ? `<option selected disabled>${esc(a.owner)} (former operator)</option>` : ""}
+          ${page.assignees.map(m => `<option value="${esc(m.id)}"${m.username === a.owner ? " selected" : ""}>${esc(m.username)}</option>`).join("")}
+        </select><button type="button" class="btn" data-case-action="owner">Save owner</button>
+        ${a.status === "OPEN" ? `<button type="button" class="btn primary" data-case-action="ack">Acknowledge</button>` : ""}
+        <button type="button" class="btn" data-case-action="resolve">Confirm recovery</button></div>` : ""}
+      <h3>Incident history</h3>
+      <ol id="incident-history" class="incident-history">${page.history.map(historyRow).join("")}</ol>
+      <button type="button" class="btn" id="incident-older" ${page.next_before ? "" : "hidden"}>Earlier history</button>`;
+  }
+
+  async function loadIncident(view, before = null) {
+    if (view.busy) return;
+    view.busy = true;
+    el("incident-feedback").textContent = "Loading…";
+    try {
+      const qs = new URLSearchParams({organization_id: view.org});
+      if (before) qs.set("before", before);
+      const p = await api(`/api/v1/alerts/${encodeURIComponent(view.id)}?${qs}`);
+      if (view !== caseView || String(p.organization) !== view.org) return;
+      view.id = p.alert.id; // A v1 alias resolves to its canonical episode.
+      if (before) {
+        el("incident-history").insertAdjacentHTML("beforeend", p.history.map(historyRow).join(""));
+        el("incident-older").hidden = !p.next_before;
+      } else {
+        renderIncident(p);
+        view.updated = p.alert.updated_at;
+        el("incident-refresh").textContent = "Refresh";
+        const record = normalizeFeedRecord({...p.alert, kind: "alert"});
+        const visible = state.feedMap.get(record.key) || state.historyMap.get(record.key);
+        if (visible && record.ts >= visible.ts) {
+          state.feedMap.set(record.key, record);
+          if (!state.paused) render();
+        }
+      }
+      view.before = p.next_before;
+      el("incident-feedback").textContent = "";
+    } catch (err) {
+      if (view !== caseView) return;
+      if ([401, 403, 409].includes(err.status)) {
+        closeIncident();
+        toast(err.message);
+      } else el("incident-feedback").textContent = err.message;
+    } finally { view.busy = false; }
+  }
+
+  function openIncident(id) {
+    if (!/^[1-9]\d{0,18}$/.test(String(id)) || !state.org) return;
+    caseView = {id, org: String(state.org.id), before: null, busy: false};
+    el("incident-content").replaceChildren();
+    el("incident-heading").textContent = `Incident #${id}`;
+    if (!caseDialog.open) caseDialog.showModal();
+    loadIncident(caseView);
+  }
+
+  el("incident-close").addEventListener("click", closeIncident);
+  caseDialog.addEventListener("close", () => { if (!caseDialog.open) closeIncident(); });
+  el("incident-refresh").addEventListener("click", () => { if (caseView) loadIncident(caseView); });
+  el("incident-content").addEventListener("click", async (event) => {
+    const btn = event.target.closest("button");
+    const view = caseView;
+    if (!btn || !view || view.busy) return;
+    if (btn.dataset.casePrevious) { openIncident(btn.dataset.casePrevious); return; }
+    if (btn.id === "incident-older") { if (view.before) loadIncident(view, view.before); return; }
+    const action = btn.dataset.caseAction;
+    if (!action || !canAck()) return;
+    const data = {organization_id: view.org};
+    if (action === "resolve") data.reason = "operator_verified";
+    if (action === "owner") {
+      const option = el("incident-owner").selectedOptions[0];
+      if (!option || option.disabled) return;
+      data.owner_id = option.value ? Number(option.value) : null;
+    }
+    view.busy = true;
+    try {
+      await api(`/api/v1/alerts/${view.id}/${action}`, {method: "POST", body: JSON.stringify(data)});
+      if (caseView !== view) return;
+      view.busy = false;
+      await loadIncident(view);
+      if (caseView === view) await poll(true);
+    } catch (err) {
+      if (caseView !== view) return;
+      if ([401, 403, 409].includes(err.status)) { closeIncident(); toast(err.message); }
+      else el("incident-feedback").textContent = err.message;
+    } finally { view.busy = false; }
+  });
+
+  /* ---------- Cursor Feed + Multi-Stream Polling ---------- */
+  function clearState() {
+    closeIncident();
+    state.generation++;
+    state.feedMap.clear();
+    state.historyMap.clear();
+    state.workMap.clear();
+    state.collabMap.clear();
+    state.auditMap.clear();
+    state.hosts = [];
+    state.feedCursor = null;
+    state.historyCursor = null;
+    state.seenKeys = new Set();
+    state.newKeys = new Set();
+    state.bufferedWhilePaused = 0;
+    state.displaySnapshot = null;
+    state.selectedKey = "";
+    state.scopeHost = "";
+    state.scopeAgent = "";
+    state.scopeWorkspace = "";
+    state.scopeTask = "";
+    state.scopeSession = "";
+    state.scopeFile = "";
+    state.scopeRuntime = "";
+    state.pendingEventKey = "";
+    state.linksByTask = {};
+    state.linksBySession = {};
+    el("load-older")?.classList.add("hidden");
+    syncLiveUrl();
+    updatePauseUi();
+    tbody.innerHTML = "";
+    emptyEl.textContent = "Loading live records…";
+    emptyEl.hidden = false;
+    renderDetails(null, []);
+  }
+
+  function applySession(me) {
+    state.user = me.user || null;
+    state.org = me.organization || { id: "default", name: "Default Organization" };
+    state.memberships = Array.isArray(me.memberships) && me.memberships.length
+      ? me.memberships
+      : [{ id: state.org.id, name: state.org.name, role: roleOf() }];
+    el("user-label").textContent = state.user?.username || "";
+    el("role-badge").textContent = roleOf().toUpperCase();
+    if (state.memberships.length > 1) {
+      orgSwitcher.innerHTML = state.memberships
+        .map((m) => `<option value="${esc(m.id)}"${m.id === state.org.id ? " selected" : ""}>${esc(m.name)} (${esc(m.role)})</option>`)
+        .join("");
+      orgSwitcher.classList.remove("hidden");
+      orgBadge.classList.add("hidden");
+    } else {
+      orgBadge.textContent = state.org.name;
+      orgBadge.classList.remove("hidden");
+      orgSwitcher.classList.add("hidden");
+    }
+  }
+
+  function sameActiveOrg(orgId) {
+    return orgId === undefined || orgId === null || !state.org || String(orgId) === String(state.org.id);
+  }
+
+  async function seedLiveHistory(gen) {
+    try {
+      const data = await api("/api/v1/live-records");
+      if (gen !== state.generation || !sameActiveOrg(data.organization)) return;
+      for (const rec of data.records || []) {
+        const norm = normalizeFeedRecord(rec);
+        if (!state.historyMap.has(norm.key)) state.historyMap.set(norm.key, norm);
+      }
+      state.historyCursor = data.next || null;
+      el("load-older")?.classList.toggle("hidden", !state.historyCursor);
+    } catch (err) {
+      if (err.status === 401 || err.status === 403) throw err;
+    }
+  }
+
+  async function pullEventFeed(gen) {
+    if (!state.useEventFeed) return false;
+    let loops = 0;
+    let added = 0;
+    let sawReset = false;
+    while (loops < 8) {
+      loops++;
+      const qs = state.feedCursor ? `?cursor=${encodeURIComponent(state.feedCursor)}&limit=500` : "?limit=500";
+      let res;
+      try {
+        res = await api(`/api/v1/event-feed${qs}`);
+      } catch (err) {
+        if (err.status === 404) {
+          state.useEventFeed = false;
+          feedModeBadge.textContent = "POLL";
+          return false;
+        }
+        if (err.status === 400 && state.feedCursor) {
+          state.feedCursor = null;
+          continue;
+        }
+        throw err;
+      }
+      if (gen !== state.generation) return true;
+      feedModeBadge.textContent = "CURSOR FEED";
+      if (res.reset) {
+        sawReset = true;
+        state.feedMap.clear();
+        state.historyMap.clear();
+        state.historyCursor = null;
+      }
+      for (const rec of res.records || []) {
+        const norm = normalizeFeedRecord(rec);
+        const current = state.feedMap.get(norm.key);
+        if (!current) added++;
+        // A just-refreshed incident can be newer than a poll already in flight.
+        if (current && norm.kind === "Alert" && norm.ts < current.ts) continue;
+        state.feedMap.set(norm.key, norm);
+      }
+      if (res.cursor) state.feedCursor = res.cursor;
+      if (!res.more) break;
+    }
+    if (sawReset) await seedLiveHistory(gen);
+    if (gen !== state.generation) return true;
+    if (state.paused && added > 0) {
+      state.bufferedWhilePaused += added;
+      updatePauseUi();
+    }
+    return true;
+  }
+
+  async function pullLegacyFeed(gen) {
+    const [liveData, alertsData] = await Promise.all([
+      api("/api/v1/live-records").catch((e) => (e.status === 401 ? Promise.reject(e) : null)),
+      api("/api/v1/alerts?status=ALL").catch((e) => (e.status === 401 ? Promise.reject(e) : { alerts: [] })),
+    ]);
+    if (gen !== state.generation) return;
+    let added = 0;
+    const next = new Map();
+
+    // Index full alert payloads (evidence + acked_by) so live-records alert rows get complete metadata
+    const alertMeta = new Map();
+    for (const a of alertsData.alerts || []) {
+      alertMeta.set(String(a.id), a);
+      const norm = normalizeFeedRecord({ ...a, kind: "alert", source: a.rule_code, ts: a.updated_at || a.created_at, details: a.evidence });
+      if (!state.feedMap.has(norm.key)) added++;
+      next.set(norm.key, norm);
+    }
+
+    if (liveData && Array.isArray(liveData.records)) {
+      feedModeBadge.textContent = "LIVE HISTORY";
+      if (!state.historyMap.size) state.historyCursor = liveData.next || null;
+      el("load-older")?.classList.toggle("hidden", !state.historyCursor);
+      for (const rec of liveData.records) {
+        if (String(rec.kind || "").toLowerCase() === "alert" && alertMeta.has(String(rec.id))) {
+          continue; // already added with full evidence & acked_by above
+        }
+        const norm = normalizeFeedRecord(rec);
+        if (!state.feedMap.has(norm.key)) added++;
+        next.set(norm.key, norm);
+      }
+    } else {
+      feedModeBadge.textContent = "POLL";
+      const eventsData = await api("/api/v1/events").catch((e) => (e.status === 401 ? Promise.reject(e) : { events: [] }));
+      if (gen !== state.generation) return;
+      for (const e of eventsData.events || []) {
+        const norm = normalizeFeedRecord({ ...e, kind: "event", source: e.event_type, ts: e.created_at, details: e.metadata });
+        if (!state.feedMap.has(norm.key)) added++;
+        next.set(norm.key, norm);
+      }
+    }
+    state.feedMap = next;
+    if (state.paused && added > 0) {
+      state.bufferedWhilePaused += added;
+      updatePauseUi();
+    }
+  }
+
+  async function loadOlderHistory() {
+    if (!state.historyCursor) return;
+    const btn = el("load-older");
+    const gen = state.generation;
+    btn.disabled = true;
+    btn.textContent = "Loading…";
+    try {
+      let loaded = 0;
+      let pages = 0;
+      while (state.historyCursor && loaded === 0 && pages < 6) {
+        pages++;
+        const data = await api(`/api/v1/live-records?before=${encodeURIComponent(state.historyCursor)}`);
+        if (gen !== state.generation || !sameActiveOrg(data.organization)) return;
+        for (const rec of data.records || []) {
+          const norm = normalizeFeedRecord(rec);
+          const alreadyKnown = state.feedMap.has(norm.key) || state.historyMap.has(norm.key);
+          state.historyMap.set(norm.key, norm);
+          if (!alreadyKnown) loaded++;
+        }
+        state.historyCursor = data.next || null;
+      }
+      btn.classList.toggle("hidden", !state.historyCursor);
+      toast(loaded ? `Loaded ${loaded} older history record${loaded === 1 ? "" : "s"}.` : "Reached end of persisted history.");
+      render();
+    } catch (err) {
+      toast(err.message || "Could not load older history.");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Load older history";
+    }
+  }
+
+  async function pullScopedRecords(gen) {
+    const reqs = [];
+    if (state.scopeTask) {
+      reqs.push(api(`/api/v1/live-records?task_id=${encodeURIComponent(state.scopeTask)}`).catch((e) => (e.status === 401 ? Promise.reject(e) : null)));
+    }
+    if (state.scopeSession && state.scopeHost && state.scopeAgent && state.scopeRuntime) {
+      const qs = new URLSearchParams({
+        session: state.scopeSession,
+        host: state.scopeHost,
+        agent: state.scopeAgent,
+        runtime: state.scopeRuntime,
+      });
+      reqs.push(api(`/api/v1/live-records?${qs.toString()}`).catch((e) => (e.status === 401 ? Promise.reject(e) : null)));
+    }
+    if (!reqs.length) return;
+    const pages = await Promise.all(reqs);
+    if (gen !== state.generation) return;
+    for (const data of pages) {
+      if (!data || !sameActiveOrg(data.organization)) continue;
+      for (const rec of data.records || []) {
+        const norm = normalizeFeedRecord(rec);
+        state.historyMap.set(norm.key, norm);
+      }
+    }
+  }
+
+  async function poll(forceAll = false) {
+    if (state.busy) return;
+    state.busy = true;
+    const gen = state.generation;
+    state.pollSeq++;
+    const fetchRich = forceAll || state.pollSeq % 2 === 1;
+    try {
+      const usedFeed = await pullEventFeed(gen);
+      if (gen !== state.generation) return;
+      if (!usedFeed) await pullLegacyFeed(gen);
+      if (gen !== state.generation) return;
+      if (forceAll) await pullScopedRecords(gen);
+      if (gen !== state.generation) return;
+
+      if (fetchRich) {
+        const [overview, activity, workBoard] = await Promise.all([
+          api("/api/v1/overview").catch((e) => (e.status === 401 ? Promise.reject(e) : {})),
+          api("/api/v1/activity").catch((e) => (e.status === 401 ? Promise.reject(e) : {})),
+          api("/api/v1/work-board").catch((e) => (e.status === 401 ? Promise.reject(e) : {})),
+        ]);
+        if (gen !== state.generation) return;
+        state.hosts = Array.isArray(overview.hosts) ? overview.hosts : [];
+        const prevWorkCount = state.workMap.size;
+        state.workMap = normalizeActivitySessions(activity);
+        state.collabMap = normalizeCollaboration(workBoard);
+        state.linksByTask = workBoard?.links?.by_task && typeof workBoard.links.by_task === "object" ? workBoard.links.by_task : {};
+        state.linksBySession = workBoard?.links?.by_session && typeof workBoard.links.by_session === "object" ? workBoard.links.by_session : {};
+        state.auditMap = normalizeAudit(overview);
+        if (state.paused && state.workMap.size > prevWorkCount) {
+          state.bufferedWhilePaused += state.workMap.size - prevWorkCount;
+          updatePauseUi();
+        }
+      }
+
+      // Highlight newly arrived keys
+      const currentAll = [
+        ...state.feedMap.values(),
+        ...state.workMap.values(),
+        ...state.collabMap.values(),
+        ...state.auditMap.values(),
+      ];
+      const fresh = new Set();
+      if (state.seenKeys.size > 0) {
+        for (const r of currentAll) if (!state.seenKeys.has(r.key)) fresh.add(r.key);
+      }
+      state.seenKeys = new Set(currentAll.map((r) => r.key));
+      state.newKeys = fresh;
+
+      liveBadge.className = `live-pill ${state.paused ? "paused" : "live"}`;
+      liveBadge.innerHTML = `<i aria-hidden="true"></i>${state.paused ? "PAUSED" : "LIVE"}`;
+      syncEl.textContent = state.paused
+        ? `Display paused (${state.bufferedWhilePaused} new buffered) · ${new Date().toLocaleTimeString()}`
+        : `Connected · Synced ${new Date().toLocaleTimeString()}`;
+
+      if (!state.paused) render();
+    } catch (err) {
+      if (gen !== state.generation) return;
+      if (err.status === 401 || err.status === 403) {
+        stopTimer();
+        clearState();
+        appEl.classList.add("hidden");
+        authGate.classList.remove("hidden");
+        return;
+      }
+      liveBadge.className = "live-pill offline";
+      liveBadge.innerHTML = '<i aria-hidden="true"></i>RETRYING';
+      syncEl.textContent = `Disconnected (${err.message}) · retrying…`;
+    } finally {
+      state.busy = false;
+    }
+  }
+
+  function startTimer() {
+    stopTimer();
+    state.timer = setInterval(() => poll(false), state.intervalMs);
+  }
+  function stopTimer() {
+    if (state.timer) { clearInterval(state.timer); state.timer = null; }
+  }
+
+  function updatePauseUi() {
+    const btn = el("pause");
+    btn.setAttribute("aria-pressed", String(state.paused));
+    btn.textContent = state.paused
+      ? state.bufferedWhilePaused > 0
+        ? `Resume (+${state.bufferedWhilePaused} new)`
+        : "Resume"
+      : "Pause";
+  }
+
+  function togglePause() {
+    state.paused = !state.paused;
+    if (state.paused) {
+      state.displaySnapshot = allMergedRecords();
+      state.bufferedWhilePaused = 0;
+    } else {
+      state.displaySnapshot = null;
+      state.bufferedWhilePaused = 0;
+      render();
+    }
+    updatePauseUi();
+    liveBadge.className = `live-pill ${state.paused ? "paused" : "live"}`;
+    liveBadge.innerHTML = `<i aria-hidden="true"></i>${state.paused ? "PAUSED" : "LIVE"}`;
+  }
+
+  async function ackAlert(id) {
+    const gen = state.generation;
+    try {
+      const result = await api(`/api/v1/alerts/${encodeURIComponent(id)}/ack`, {
+        method: "POST", body: JSON.stringify({organization_id: state.org?.id})
+      });
+      if (gen !== state.generation || !sameActiveOrg(result.organization)) return;
+      if (result.alert) {
+        const updated = normalizeFeedRecord({...result.alert, kind: "alert"});
+        state.feedMap.set(updated.key, updated);
+      }
+      toast("Alert acknowledged.");
+      if (state.paused) togglePause();
+      render();
+      if (state.busy) setTimeout(() => poll(true), 350);
+      else await poll(true);
+    } catch (err) {
+      toast(err.message || "Could not acknowledge alert.");
+    }
+  }
+
+  function downloadFile(content, mime, filename) {
+    const blob = new Blob([content], { type: mime });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function exportCsv() {
+    const rows = getFiltered(allMergedRecords());
+    const cols = ["severity", "kind", "categoryLabel", "status", "ts", "host_id", "agent", "harness", "workspace", "where", "message", "summary"];
+    const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const csv = [cols.join(","), ...rows.map((r) => cols.map((c) => q(c === "ts" && r.ts ? new Date(r.ts * 1000).toISOString() : r[c])).join(","))].join("\n");
+    downloadFile(csv, "text/csv;charset=utf-8", `swarmcontrol-live-${Date.now()}.csv`);
+    toast(`Exported ${rows.length} rows to CSV.`);
+  }
+
+  function exportJson() {
+    const rows = getFiltered(allMergedRecords());
+    downloadFile(JSON.stringify({ organization: state.org?.name, exported_at: new Date().toISOString(), count: rows.length, records: rows }, null, 2), "application/json;charset=utf-8", `swarmcontrol-live-${Date.now()}.json`);
+    toast(`Exported ${rows.length} rows to JSON.`);
+  }
+
+  /* ---------- Event Wiring ---------- */
+  el("sidebar-toggle").addEventListener("click", () => el("sidebar").classList.toggle("collapsed"));
+  el("mobile-tree-btn").addEventListener("click", () => el("sidebar").classList.toggle("mobile-open"));
+
+  el("sidebar").addEventListener("click", (e) => {
+    const pBtn = e.target.closest("[data-persp]");
+    if (pBtn) {
+      state.perspective = pBtn.dataset.persp;
+      state.scopeHost = ""; state.scopeAgent = ""; state.scopeWorkspace = "";
+      el("sidebar").classList.remove("mobile-open");
+      render();
+      return;
+    }
+    const hBtn = e.target.closest("[data-scope-host]");
+    if (hBtn) {
+      state.scopeHost = state.scopeHost === hBtn.dataset.scopeHost ? "" : hBtn.dataset.scopeHost;
+      el("sidebar").classList.remove("mobile-open");
+      render();
+      return;
+    }
+    const aBtn = e.target.closest("[data-scope-agent]");
+    if (aBtn) {
+      state.scopeAgent = state.scopeAgent === aBtn.dataset.scopeAgent ? "" : aBtn.dataset.scopeAgent;
+      el("sidebar").classList.remove("mobile-open");
+      render();
+      return;
+    }
+    const wBtn = e.target.closest("[data-scope-ws]");
+    if (wBtn) {
+      state.scopeWorkspace = state.scopeWorkspace === wBtn.dataset.scopeWs ? "" : wBtn.dataset.scopeWs;
+      el("sidebar").classList.remove("mobile-open");
+      render();
+    }
+  });
+
+  tbody.addEventListener("click", (e) => {
+    const row = e.target.closest("tr[data-key]");
+    if (!row) return;
+    state.selectedKey = row.dataset.key;
+    render();
+  });
+
+  document.querySelector(".tbl thead").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-sort]");
+    if (!btn) return;
+    const k = btn.dataset.sort;
+    if (state.sortKey === k) state.sortDir = state.sortDir === "desc" ? "asc" : "desc";
+    else { state.sortKey = k; state.sortDir = k === "ts" || k === "severity" ? "desc" : "asc"; }
+    render();
+  });
+
+  document.querySelector(".statusbar").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-quick-sev]");
+    if (!btn) return;
+    const sev = btn.dataset.quickSev;
+    state.filterSev = state.filterSev === sev ? "" : sev;
+    el("severity").value = state.filterSev;
+    render();
+  });
+
+  document.querySelector(".detail-tabs").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-dtab]");
+    if (!btn) return;
+    state.detailTab = btn.dataset.dtab;
+    const pool = allMergedRecords();
+    renderDetails(pool.find((r) => r.key === state.selectedKey) || null, pool);
+  });
+
+  el("details").addEventListener("click", (e) => {
+    const jump = e.target.closest("[data-jump]");
+    if (jump) {
+      state.selectedKey = jump.dataset.jump;
+      state.detailTab = "general";
+      render();
+      tbody.querySelector(`tr[data-key="${CSS.escape(state.selectedKey)}"]`)?.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    const act = e.target.closest("[data-act]");
+    if (!act) return;
+    const kind = act.dataset.act;
+    if (kind === "ack") ackAlert(act.dataset.id);
+    else if (kind === "incident") openIncident(act.dataset.id);
+    else if (kind === "scope-host") { state.scopeHost = act.dataset.val; render(); }
+    else if (kind === "scope-agent") { state.scopeAgent = act.dataset.val; render(); }
+    else if (kind === "scope-ws") { state.scopeWorkspace = act.dataset.val; render(); }
+    else if (kind === "copy-json") {
+      const it = allMergedRecords().find((r) => r.key === state.selectedKey);
+      if (it) navigator.clipboard?.writeText(JSON.stringify(it, null, 2)).then(() => {
+        act.classList.add("copied");
+        setTimeout(() => act.classList.remove("copied"), 1100);
+        toast("Event JSON copied.");
+      }).catch(() => {});
+    } else if (kind === "copy-cmd") {
+      const it = allMergedRecords().find((r) => r.key === state.selectedKey);
+      if (it && it.command) navigator.clipboard?.writeText(it.command).then(() => {
+        act.classList.add("copied");
+        act.textContent = "Copied ✓";
+        setTimeout(() => { act.classList.remove("copied"); act.textContent = "Copy"; }, 1100);
+        toast("Command copied.");
+      }).catch(() => {});
+    }
+  });
+
+  el("search").addEventListener("input", (e) => {
+    state.search = e.target.value;
+    clearTimeout(state.searchDebounce);
+    state.searchDebounce = setTimeout(render, 80);
+  });
+  el("window").addEventListener("change", (e) => { state.windowSec = e.target.value; render(); });
+  el("severity").addEventListener("change", (e) => { state.filterSev = e.target.value; render(); });
+  el("kind").addEventListener("change", (e) => { state.filterKind = e.target.value; render(); });
+  el("category").addEventListener("change", (e) => { state.filterCat = e.target.value; render(); });
+  el("status").addEventListener("change", (e) => { state.filterStatus = e.target.value; render(); });
+  el("group-mode").addEventListener("change", (e) => { state.groupMode = e.target.value; render(); });
+
+  el("tint-btn").addEventListener("click", (e) => {
+    state.rowTint = !state.rowTint;
+    e.currentTarget.classList.toggle("active", state.rowTint);
+    e.currentTarget.setAttribute("aria-pressed", String(state.rowTint));
+    render();
+  });
+
+  function applyDensity(comfortable) {
+    state.comfortable = Boolean(comfortable);
+    const btn = el("density-btn");
+    if (btn) {
+      btn.textContent = state.comfortable ? "Comfortable" : "Compact";
+      btn.classList.toggle("active", state.comfortable);
+      btn.setAttribute("aria-pressed", String(state.comfortable));
+    }
+    try { localStorage.setItem("sc_live_density", state.comfortable ? "comfortable" : "compact"); } catch {}
+    render();
+  }
+  el("density-btn")?.addEventListener("click", () => applyDensity(!state.comfortable));
+
+  el("ack-selected").addEventListener("click", () => {
+    const it = allMergedRecords().find((r) => r.key === state.selectedKey);
+    if (it && it.canAck) ackAlert(it.rawId);
+  });
+  el("export-csv").addEventListener("click", exportCsv);
+  el("export-json").addEventListener("click", exportJson);
+
+  function resetAllFilters() {
+    state.perspective = "all"; state.scopeHost = ""; state.scopeAgent = ""; state.scopeWorkspace = "";
+    state.scopeTask = ""; state.scopeSession = ""; state.scopeFile = ""; state.scopeRuntime = "";
+    state.windowSec = "all"; state.filterSev = ""; state.filterKind = ""; state.filterCat = ""; state.filterStatus = "";
+    state.search = ""; state.groupMode = "none";
+    el("search").value = ""; el("window").value = "all"; el("severity").value = ""; el("kind").value = "";
+    el("category").value = ""; el("status").value = ""; el("group-mode").value = "none";
+    syncLiveUrl();
+    render();
+  }
+  el("reset-filters").addEventListener("click", resetAllFilters);
+  el("clear-scope").addEventListener("click", resetAllFilters);
+
+  el("active-chips")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-clear-chip]");
+    if (!btn) return;
+    const id = btn.dataset.clearChip;
+    if (id === "perspective") state.perspective = "all";
+    else if (id === "scopeTask") state.scopeTask = "";
+    else if (id === "scopeSession") { state.scopeSession = ""; state.scopeRuntime = ""; }
+    else if (id === "scopeFile") state.scopeFile = "";
+    else if (id === "scopeHost") state.scopeHost = "";
+    else if (id === "scopeAgent") state.scopeAgent = "";
+    else if (id === "scopeWorkspace") state.scopeWorkspace = "";
+    else if (id === "windowSec") { state.windowSec = "all"; el("window").value = "all"; }
+    else if (id === "filterSev") { state.filterSev = ""; el("severity").value = ""; }
+    else if (id === "filterKind") { state.filterKind = ""; el("kind").value = ""; }
+    else if (id === "filterCat") { state.filterCat = ""; el("category").value = ""; }
+    else if (id === "filterStatus") { state.filterStatus = ""; el("status").value = ""; }
+    else if (id === "search") { state.search = ""; el("search").value = ""; }
+    syncLiveUrl();
+    render();
+  });
+
+  /* ---------- Draggable Split-Pane Resizer ---------- */
+  (function initSplitResizer() {
+    const handle = el("split-handle");
+    if (!handle) return;
+    const setH = (px) => {
+      const clamped = Math.round(Math.max(180, Math.min(window.innerHeight * 0.62, px)));
+      document.documentElement.style.setProperty("--sc-detail-h", `${clamped}px`);
+      handle.setAttribute("aria-valuenow", String(clamped));
+      try { localStorage.setItem("sc_live_detail_h", String(clamped)); } catch {}
+    };
+    try {
+      const saved = Number(localStorage.getItem("sc_live_detail_h"));
+      if (Number.isFinite(saved) && saved >= 180) setH(saved);
+      if (localStorage.getItem("sc_live_density") === "comfortable") state.comfortable = true;
+    } catch {}
+    let dragging = false;
+    handle.addEventListener("pointerdown", (e) => {
+      dragging = true;
+      handle.classList.add("dragging");
+      handle.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+    });
+    handle.addEventListener("pointermove", (e) => {
+      if (!dragging) return;
+      setH(window.innerHeight - e.clientY);
+    });
+    const endDrag = () => { dragging = false; handle.classList.remove("dragging"); };
+    handle.addEventListener("pointerup", endDrag);
+    handle.addEventListener("pointercancel", endDrag);
+    handle.addEventListener("keydown", (e) => {
+      const cur = Number(handle.getAttribute("aria-valuenow")) || 272;
+      if (e.key === "ArrowUp") { e.preventDefault(); setH(cur + 28); }
+      else if (e.key === "ArrowDown") { e.preventDefault(); setH(cur - 28); }
+    });
+  })();
+
+  /* ---------- Quick Command Palette (Ctrl+K / Cmd+K) ---------- */
+  function buildCmdkActions() {
+    const pool = allMergedRecords();
+    const items = [
+      { cat: "View", label: "All Live Stream", hint: "Reset scope", run: () => resetAllFilters() },
+      { cat: "View", label: "Agent Work (All)", hint: "Perspective", run: () => { state.perspective = "agent_work"; render(); } },
+      { cat: "View", label: "File Edits Only", hint: "Perspective", run: () => { state.perspective = "file_edits"; render(); } },
+      { cat: "View", label: "Commands & Tests", hint: "Perspective", run: () => { state.perspective = "shell_cmds"; render(); } },
+      { cat: "View", label: "Open Alerts", hint: "Perspective", run: () => { state.perspective = "open_alerts"; render(); } },
+      { cat: "View", label: "Critical & Warning", hint: "Perspective", run: () => { state.perspective = "crit_warn"; render(); } },
+      { cat: "View", label: "Collaboration Tasks", hint: "Perspective", run: () => { state.perspective = "collab"; render(); } },
+      { cat: "Group", label: "Group by Severity (SCOM)", hint: "Grouping", run: () => { state.groupMode = "severity"; el("group-mode").value = "severity"; render(); } },
+      { cat: "Group", label: "Group by Agent", hint: "Grouping", run: () => { state.groupMode = "agent"; el("group-mode").value = "agent"; render(); } },
+      { cat: "Group", label: "Group by Workspace", hint: "Grouping", run: () => { state.groupMode = "workspace"; el("group-mode").value = "workspace"; render(); } },
+      { cat: "Group", label: "Flat Timeline", hint: "Grouping", run: () => { state.groupMode = "none"; el("group-mode").value = "none"; render(); } },
+      { cat: "Action", label: state.paused ? "Resume Live Display" : "Pause Display (Buffer New)", hint: "P", run: () => togglePause() },
+      { cat: "Action", label: state.comfortable ? "Switch to Compact Density" : "Switch to Comfortable Density", hint: "D", run: () => applyDensity(!state.comfortable) },
+      { cat: "Action", label: "Export Filtered CSV", hint: "CSV", run: () => exportCsv() },
+      { cat: "Action", label: "Export Filtered JSON", hint: "JSON", run: () => exportJson() },
+      { cat: "Nav", label: "Back to Main Control Room", hint: "/", run: () => { window.location.href = "/"; } },
+    ];
+    const agents = [...new Set(pool.filter((r) => r.kind === "Agent Work" || r.kind === "Collaboration").map((r) => r.agent).filter(Boolean))].slice(0, 10);
+    for (const ag of agents) {
+      items.push({ cat: "Agent", label: `Filter agent: ${ag}`, hint: "Scope", run: () => { state.scopeAgent = ag; render(); } });
+    }
+    const hosts = [...new Set(pool.map((r) => r.host_id).filter(Boolean))].slice(0, 8);
+    for (const h of hosts) {
+      items.push({ cat: "Host", label: `Filter host: ${h}`, hint: "Scope", run: () => { state.scopeHost = h; render(); } });
+    }
+    return items;
+  }
+
+  function renderCmdkList() {
+    const q = (el("cmdk-input")?.value || "").trim().toLowerCase();
+    const all = buildCmdkActions();
+    state.cmdkItems = q ? all.filter((it) => `${it.cat} ${it.label} ${it.hint}`.toLowerCase().includes(q)) : all;
+    if (state.cmdkIdx >= state.cmdkItems.length) state.cmdkIdx = 0;
+    const list = el("cmdk-list");
+    if (!list) return;
+    list.innerHTML = state.cmdkItems.length
+      ? state.cmdkItems
+          .map(
+            (it, i) => `<li><button type="button" class="cmdk-item${i === state.cmdkIdx ? " active" : ""}" data-cmdk-idx="${i}">
+              <span><span class="cmdk-cat">${esc(it.cat)}</span>${esc(it.label)}</span>
+              <kbd>${esc(it.hint)}</kbd>
+            </button></li>`
+          )
+          .join("")
+      : '<li class="muted" style="padding:12px;text-align:center;">No matching command or scope.</li>';
+  }
+
+  function openCmdk() {
+    const ov = el("cmdk-overlay");
+    if (!ov) return;
+    state.cmdkOpen = true;
+    state.cmdkIdx = 0;
+    ov.classList.remove("hidden");
+    const inp = el("cmdk-input");
+    if (inp) { inp.value = ""; inp.focus(); }
+    renderCmdkList();
+  }
+
+  function closeCmdk() {
+    state.cmdkOpen = false;
+    el("cmdk-overlay")?.classList.add("hidden");
+  }
+
+  el("cmdk-btn")?.addEventListener("click", openCmdk);
+  el("cmdk-overlay")?.addEventListener("click", (e) => {
+    if (e.target === el("cmdk-overlay")) { closeCmdk(); return; }
+    const btn = e.target.closest("[data-cmdk-idx]");
+    if (btn) {
+      const it = state.cmdkItems[Number(btn.dataset.cmdkIdx)];
+      closeCmdk();
+      if (it) it.run();
+    }
+  });
+  el("cmdk-input")?.addEventListener("input", () => { state.cmdkIdx = 0; renderCmdkList(); });
+  el("cmdk-input")?.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); closeCmdk(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); state.cmdkIdx = (state.cmdkIdx + 1) % Math.max(1, state.cmdkItems.length); renderCmdkList(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); state.cmdkIdx = (state.cmdkIdx - 1 + Math.max(1, state.cmdkItems.length)) % Math.max(1, state.cmdkItems.length); renderCmdkList(); }
+    else if (e.key === "Enter") {
+      e.preventDefault();
+      const it = state.cmdkItems[state.cmdkIdx];
+      closeCmdk();
+      if (it) it.run();
+    }
+  });
+
+  el("pause").addEventListener("click", togglePause);
+  el("load-older")?.addEventListener("click", loadOlderHistory);
+  el("refresh").addEventListener("click", () => {
+    if (state.paused) togglePause();
+    poll(true);
+  });
+  el("interval").addEventListener("change", (e) => {
+    state.intervalMs = Number(e.target.value) || 2500;
+    startTimer();
+  });
+
+  el("fullscreen").addEventListener("click", async () => {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await document.documentElement.requestFullscreen();
+    } catch { toast("Browser full screen unavailable."); }
+  });
+  document.addEventListener("fullscreenchange", () => {
+    el("fullscreen").textContent = document.fullscreenElement ? "Exit full screen" : "Full screen";
+  });
+
+  orgSwitcher.addEventListener("change", async () => {
+    const orgId = orgSwitcher.value;
+    if (!orgId || orgId === state.org?.id) return;
+    try {
+      const res = await api("/api/v1/auth/switch", { method: "POST", body: JSON.stringify({ organization_id: orgId }) });
+      clearState();
+      applySession(res);
+      toast(`Switched to ${res.organization?.name || "organization"}.`);
+      await poll(true);
+    } catch (err) {
+      toast(err.message || "Could not switch organization.");
+    }
+  });
+
+  el("logout").addEventListener("click", async () => {
+    await api("/api/v1/auth/logout", { method: "POST", body: "{}" }).catch(() => {});
+    stopTimer();
+    clearState();
+    appEl.classList.add("hidden");
+    authGate.classList.remove("hidden");
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (caseDialog.open) return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      if (state.cmdkOpen) closeCmdk();
+      else openCmdk();
+      return;
+    }
+    if (state.cmdkOpen) {
+      if (e.key === "Escape") { e.preventDefault(); closeCmdk(); }
+      return;
+    }
+    const tag = (e.target.tagName || "").toLowerCase();
+    const typing = tag === "input" || tag === "textarea" || tag === "select";
+    if (e.key === "/" && !typing) { e.preventDefault(); el("search").focus(); return; }
+    if (typing) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      const list = getFiltered(allMergedRecords());
+      if (!list.length) return;
+      e.preventDefault();
+      const idx = list.findIndex((r) => r.key === state.selectedKey);
+      const next = e.key === "ArrowDown" ? Math.min(list.length - 1, idx + 1) : Math.max(0, idx - 1);
+      state.selectedKey = list[next].key;
+      render();
+      tbody.querySelector(`tr[data-key="${CSS.escape(state.selectedKey)}"]`)?.scrollIntoView({ block: "nearest" });
+    } else if (e.key === "a" || e.key === "A") {
+      const it = allMergedRecords().find((r) => r.key === state.selectedKey);
+      if (it && it.canAck) ackAlert(it.rawId);
+    } else if (e.key === "p" || e.key === "P") {
+      togglePause();
+    } else if (e.key === "d" || e.key === "D") {
+      applyDensity(!state.comfortable);
+    } else if (e.key === "f" || e.key === "F") {
+      el("fullscreen").click();
+    }
+  });
+
+  async function boot() {
+    const initial = new URLSearchParams(window.location.search);
+    applyUrlParams();
+    try {
+      const me = await api("/api/v1/auth/me");
+      if (!me.authenticated) throw new Error("unauthenticated");
+      applySession(me);
+      authGate.classList.add("hidden");
+      appEl.classList.remove("hidden");
+      const dBtn = el("density-btn");
+      if (dBtn && state.comfortable) {
+        dBtn.textContent = "Comfortable";
+        dBtn.classList.add("active");
+        dBtn.setAttribute("aria-pressed", "true");
+      }
+      await poll(true);
+      if (initial.has("incident") && initial.get("organization") === String(state.org?.id)) {
+        openIncident(initial.get("incident"));
+      }
+      startTimer();
+    } catch (_) {
+      appEl.classList.add("hidden");
+      authGate.classList.remove("hidden");
+    }
+  }
+
+  window.addEventListener("focus", () => { if (!state.paused) poll(false); });
+  boot();
+})();

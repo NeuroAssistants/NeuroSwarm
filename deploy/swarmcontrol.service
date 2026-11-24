@@ -1,0 +1,23 @@
+[Unit]
+Description=NeuroSwarm Monitoring Console & Guardrail Backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/swarmcontrol
+Environment=SWARMCONTROL_HOST=127.0.0.1
+Environment=SWARMCONTROL_PORT=8790
+StateDirectory=swarmcontrol
+DynamicUser=yes
+Environment=SWARMCONTROL_STATE_DIR=/var/lib/swarmcontrol
+# Provide SWARMCONTROL_ADMIN_PASS and SWARMCONTROL_SESSION_SECRET via an EnvironmentFile outside Git:
+# EnvironmentFile=/etc/swarmcontrol/server.env
+ExecStart=/usr/bin/python3 /opt/swarmcontrol/deploy/start_console.py
+Restart=always
+RestartSec=5
+Nice=10
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target
