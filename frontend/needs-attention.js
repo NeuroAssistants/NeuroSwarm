@@ -16,6 +16,7 @@
     data: null,
     filter: "all",
     resolvedOpen: false,
+    expanded: false,
     busy: false,
     pending: null,
   };
@@ -71,6 +72,8 @@
     state.data = null;
     state.filter = "all";
     state.resolvedOpen = false;
+    state.expanded = false;
+    root.classList.remove("is-expanded");
     if (statusPill) {
       statusPill.className = "pill waiting";
       statusPill.textContent = "CHECKING";
@@ -216,10 +219,19 @@
         </details>`
       : "";
 
+    root.classList.toggle("is-expanded", state.expanded);
+    const totalRecords = items.length + noSignal.length + resolved.length;
+    const expandBtnHtml = totalRecords > 0
+      ? `<button type="button" class="btn small na-expand-btn" data-na-toggle="expand" aria-expanded="${state.expanded ? "true" : "false"}">${state.expanded ? "Compact view" : `Expand all (${esc(totalRecords)})`}</button>`
+      : "";
+
     root.innerHTML = `
       <div class="na-summary-bar">
         <div class="na-filters" role="group" aria-label="Filter attention items">${filterBtns}</div>
-        <span class="na-updated">Updated ${esc(fmtTs(data.generated_at))}</span>
+        <div class="na-summary-right">
+          ${expandBtnHtml}
+          <span class="na-updated">Updated ${esc(fmtTs(data.generated_at))}</span>
+        </div>
       </div>
       <div class="na-grid">
         <div class="na-block" id="na-sessions-panel">
@@ -241,6 +253,12 @@
   }
 
   root.addEventListener("click", (e) => {
+    const expandBtn = e.target.closest("[data-na-toggle='expand']");
+    if (expandBtn) {
+      state.expanded = !state.expanded;
+      render();
+      return;
+    }
     const btn = e.target.closest("[data-na-filter]");
     if (!btn) return;
     state.filter = btn.dataset.naFilter || "all";
