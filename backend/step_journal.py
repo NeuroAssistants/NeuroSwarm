@@ -638,7 +638,7 @@ def project_rows(
                         display = primary or extra
                         if display and display[0] in all_files:
                             shared_paths.append((field, item, display[0]))
-                if ref or shared_paths or any(k in step for k in ("command_input", "command_output", "exit_code")):
+                if ref or shared_paths or any(k in step for k in ("command_input", "command_output", "exit_code", "native_call_ref")):
                     evidence_by_key.setdefault(key, (step, shared_paths, ref))
             severity = step_severity(outcome)
             yield key, legacy, timestamp, (
@@ -737,6 +737,7 @@ def persist_steps(
     """Persist new observed steps, capture gaps, offsets, and scan metrics inside the caller's transaction."""
     counts: collections.Counter[str] = collections.Counter()
     ensure_journal_tables(conn)
+    conn.execute("DELETE FROM verification_receipts WHERE received < ?", (now - RETENTION,))
     conn.execute("DELETE FROM observed_step_keys WHERE ts < ?", (now - RETENTION,))
     conn.execute(
         "DELETE FROM events WHERE event_type IN ('observed_step','capture_gap','clock_skew','reader_fallback') AND created_at < ?",

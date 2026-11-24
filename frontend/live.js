@@ -1242,11 +1242,11 @@
     return `${(v / 1048576).toFixed(1)} MB`;
   }
 
-  function fetchEventEvidence(item, orgId) {
+  function fetchEventEvidence(item, orgId, fresh = false) {
     const evId = getEvidenceEventId(item);
     if (!evId || !orgId) return Promise.resolve(null);
     const cacheKey = `${orgId}:${evId}`;
-    if (state.evidenceCache.has(cacheKey)) {
+    if (!fresh && state.evidenceCache.has(cacheKey) && item.category !== "file_edit") {
       return Promise.resolve(state.evidenceCache.get(cacheKey));
     }
     if (evidenceInFlight.has(cacheKey)) {
@@ -1255,7 +1255,7 @@
     const qs = new URLSearchParams({ organization_id: String(orgId) });
     const req = api(`/api/v1/events/${encodeURIComponent(evId)}/evidence?${qs.toString()}`)
       .then((data) => {
-        if (data && String(data.organization) === String(orgId)) {
+        if (data && String(data.organization) === String(orgId) && String(data.event_id) === evId) {
           state.evidenceCache.set(cacheKey, data);
           return data;
         }
@@ -1276,6 +1276,16 @@
 
   function renderEvidenceHtml(ev, item, opts = {}) {
     const sections = [];
+    if (ev?.verification) {
+      const proof = ev.verification;
+      const tests = (proof.tests || []).filter(t => Number.isSafeInteger(t.event_id) && t.event_id > 0);
+      const links = tests.map(t =>
+        `<li><button type="button" class="btn" data-verification-test="${t.event_id}" data-org="${esc(ev.organization)}">${t.result === "passed" ? "Passed" : "Failed"} · ${esc(t.program || "Test")} · Open command and output</button></li>`
+      ).join("");
+      sections.push(`<section class="ev-section" aria-label="Verification after edit"><h3>Verification after edit</h3>
+        ${tests.length ? `<p>Task <code>${esc(proof.task_id)}</code> · ${esc(proof.actor)} · Revision <code title="${esc(proof.revision)}">${esc(proof.revision.slice(0, 12))}</code></p><ul>${links}</ul>`
+                       : '<p class="muted">No verification recorded</p>'}</section>`);
+    }
     const cmdIn = (ev && ev.command_input) || item.command || "";
     const cmdOut = (ev && ev.command_output) || "";
     const hasExit = ev && ev.exit_code !== null && ev.exit_code !== undefined;
@@ -1385,7 +1395,7 @@
     const cacheKey = `${orgId}:${evId}`;
     const expectedKey = item.key;
     const gen = state.generation;
-    if (state.evidenceCache.has(cacheKey)) {
+    if (state.evidenceCache.has(cacheKey) && item.category !== "file_edit") {
       slotEl.innerHTML = renderEvidenceHtml(state.evidenceCache.get(cacheKey), item, opts);
       return;
     }
@@ -1456,9 +1466,29 @@
     }
   }
 
-  function openEventPopup(key, openerEl = null) {
+  async function openVerificationTest(button) {
+    const org = state.org?.id, gen = state.generation;
+    const id = button.dataset.verificationTest;
+    if (!org || !sameActiveOrg(button.dataset.org) || !/^[1-9]\d{0,18}$/.test(id)) return;
+    const key = `event:${id}`;
+    try {
+      // A linked test can be older than every loaded feed/history page.
+      const ev = await fetchEventEvidence({key, rawId: id}, org, true);
+      if (gen !== state.generation || !sameActiveOrg(org) || !button.isConnected) return;
+      if (!ev?.record) { toast("This test event is no longer available."); return; }
+      const record = normalizeFeedRecord(ev.record);
+      state.historyMap.set(key, record);
+      markPoolDirty();
+      const opener = eventDialog?.contains(button) ? state.eventModalOpener : button;
+      openEventPopup(key, opener, record);
+    } catch (err) {
+      if (gen === state.generation) toast(err.message || "Could not open the test event.");
+    }
+  }
+
+  function openEventPopup(key, openerEl = null, exactRecord = null) {
     if (!eventDialog) return;
-    const item = getRecordByKey(key) || allMergedRecords().find((r) => r.key === key);
+    const item = exactRecord || getRecordByKey(key) || allMergedRecords().find((r) => r.key === key);
     if (!item) return;
     closeImageZoom();
     state.eventModalKey = item.key;
@@ -1480,7 +1510,7 @@
 
     const evId = getEvidenceEventId(item);
     const canFetchEv = Boolean(evId);
-    const cachedEv = canFetchEv && state.org ? state.evidenceCache.get(`${state.org.id}:${evId}`) : null;
+    const cachedEv = canFetchEv && state.org && item.category !== "file_edit" ? state.evidenceCache.get(`${state.org.id}:${evId}`) : null;
     const initialEvidence = cachedEv
       ? renderEvidenceHtml(cachedEv, item, { includeFiles: true })
       : canFetchEv
@@ -2383,6 +2413,8 @@
       }).catch(() => {});
     });
     eventDialog.addEventListener("click", (e) => {
+      const test = e.target.closest("[data-verification-test]");
+      if (test) { openVerificationTest(test); return; }
       if (e.target === eventDialog) {
         closeEventPopup();
         return;
@@ -2415,7 +2447,8 @@
       }
     });
     eventDialog.addEventListener("close", () => {
-      closeEventPopup({ fromNativeClose: true });
+      // The native close event can arrive after another row has already opened.
+      if (!eventDialog.open && state.eventModalKey) closeEventPopup({ fromNativeClose: true });
     });
   }
 
@@ -2446,6 +2479,8 @@
   });
 
   el("details").addEventListener("click", (e) => {
+    const test = e.target.closest("[data-verification-test]");
+    if (test) { openVerificationTest(test); return; }
     const zoomBtn = e.target.closest("[data-zoom-src]");
     if (zoomBtn) {
       openImageZoom(zoomBtn.dataset.zoomSrc, zoomBtn.dataset.zoomLabel, zoomBtn.dataset.zoomSource);
