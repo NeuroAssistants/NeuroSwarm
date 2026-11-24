@@ -66,3 +66,5 @@ Use work_started or work_done for later updates. The task feed shows reports
 from the latest 30 fleet events. Only supply details intended for operators.
 
 **Agent work** also lists runtimes detected on the console host and the evidence used to identify each one. The [observer guide](../REMOTE-CONTRACT.md) explains how to see activity from other machines.
+
+To see which test ran after an edit, enable the optional Claude Code hook on the development machine. It links a recorded test result to the edits in the same task, agent session and working-tree revision. [Setup and capture limits](../LINK-CONTRACT.md#edit-verification)

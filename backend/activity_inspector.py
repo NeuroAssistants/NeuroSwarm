@@ -618,6 +618,13 @@ def _file_key(path: Any) -> str:
     return hashlib.sha256(str(path).encode()).hexdigest()[:20]
 
 
+def native_call_ref(session, call_id):
+    """Opaque correlation with the source hook for the same native tool call."""
+    if not isinstance(call_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", call_id):
+        return None
+    return hashlib.sha256(json.dumps([session, call_id]).encode()).hexdigest()
+
+
 class Capture:
     """Per-scan read state. `offsets` comes from storage; `read` holds the new positions to persist on success."""
 
@@ -859,7 +866,8 @@ def _finish(card: dict[str, Any], steps: list[dict[str, Any]], edited: list[str]
     card["what_done"] = readable(card["what_done"])
     if not card["what_done"]:
         card["what_done"] = "No written summary in the latest part of this session."
-    private_fields = {"command_input", "command_output", "exit_code", "output_truncated", "image_previews", "text_previews"}
+    private_fields = {"command_input", "command_output", "exit_code", "output_truncated", "image_previews", "text_previews",
+                      "native_call_ref"}
     shown = [{k: v for k, v in s.items() if k not in private_fields} for s in steps[-10:]]
     card["steps"] = shown
     card["latest_action"] = shown[-1] if shown else None
@@ -1183,7 +1191,9 @@ def claude_sessions(limit: int = 6) -> list[dict[str, Any]]:
                         if isinstance(payload, list):
                             payload = "\n".join(block["text"] for block in payload if isinstance(block, dict)
                                                 and block.get("type") == "text" and isinstance(block.get("text"), str))
-                        step.update(execution_detail(command, payload, None))
+                        result_meta = o.get("toolUseResult")
+                        code = result_meta.get("exitCode", result_meta.get("exit_code")) if isinstance(result_meta, dict) else None
+                        step.update(execution_detail(command, payload, code))
                     elif step.get("files") and step["status"] == "completed":
                         previews = _tool_result_image({"result": payload}, step["files"][0])
                         if previews:
@@ -1224,6 +1234,10 @@ def claude_sessions(limit: int = 6) -> list[dict[str, Any]]:
                         steps.append(_step(inp["name"], "", o.get("timestamp")))  # wrapper call: show the wrapped tool's action
                     else:
                         steps.append(_step(name, label, o.get("timestamp")))
+                    if _CAPTURE is not None and (name in CLAUDE_EDIT or name == "Bash"):
+                        ref = native_call_ref(f"claude-code:{jf.stem}", b.get("id"))
+                        if ref:
+                            steps[-1]["native_call_ref"] = ref
                     if name == "Bash" and inp.get("command"):
                         steps[-1].update(execution_detail(inp["command"], None, None))
                         if not inp.get("description"):

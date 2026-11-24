@@ -188,6 +188,9 @@ def _clean_step(raw: Any, *, capture=False) -> dict[str, Any]:
     if capture and isinstance(raw.get("cwd"), str):
         step["cwd"] = _redact_str(raw["cwd"], 320)
     if capture:
+        native_ref = raw.get("native_call_ref")
+        if isinstance(native_ref, str) and re.fullmatch(r"[0-9a-f]{64}", native_ref):
+            step["native_call_ref"] = native_ref
         for field in ("command_input", "command_output", "exit_code", "output_truncated", "image_previews", "text_previews"):
             if field in raw:
                 step[field] = raw[field]

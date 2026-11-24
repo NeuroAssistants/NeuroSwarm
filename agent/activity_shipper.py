@@ -291,6 +291,7 @@ def command_info(cmd: Any) -> dict[str, str]:
 
 
 PRIVATE_STEP_FIELDS = (
+    "native_call_ref",
     "command_input",
     "command_output",
     "exit_code",
@@ -1159,7 +1160,9 @@ def _collect_claude_sessions(
                                 and block.get("type") == "text"
                                 and isinstance(block.get("text"), str)
                             )
-                        paired_step.update(execution_detail(paired_cmd, payload, None, capture_mode=True))
+                        result_meta = o.get("toolUseResult")
+                        code = result_meta.get("exitCode", result_meta.get("exit_code")) if isinstance(result_meta, dict) else None
+                        paired_step.update(execution_detail(paired_cmd, payload, code, capture_mode=True))
                     elif paired_step.get("files") and paired_step["status"] == "completed":
                         previews = _tool_result_image({"result": payload}, paired_step["files"][0], capture_mode=True)
                         if previews:
@@ -1232,6 +1235,11 @@ def _collect_claude_sessions(
                             "file_basis": "confirmed" if cat in {"file_edit", "file_read"} and step_files else "recorded",
                         }
                         step_obj.update(cmd_meta)
+                        call_id = blk.get("id")
+                        if (capture is not None and tname in ("Write", "Edit", "Bash") and
+                                isinstance(call_id, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", call_id)):
+                            native = json.dumps([f"claude-code:{jf.stem}", call_id]).encode()
+                            step_obj["native_call_ref"] = hashlib.sha256(native).hexdigest()
                         steps.append(step_obj)
                         if (
                             capture is not None

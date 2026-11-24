@@ -8,6 +8,8 @@ import json
 import re
 import zlib
 
+import edit_verification
+
 from activity_inspector import evidence_text, is_sensitive_path, protected_command
 
 MAX_IMAGE_BYTES = 160 * 1024
@@ -94,6 +96,7 @@ def work_summary(raw):
 
 
 def ensure_tables(conn):
+    edit_verification.ensure_tables(conn)
     conn.execute("""CREATE TABLE IF NOT EXISTS event_origins (
         event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE, ref TEXT NOT NULL UNIQUE)""")
     conn.execute("""CREATE TRIGGER IF NOT EXISTS delete_event_origin AFTER DELETE ON events BEGIN
@@ -207,6 +210,16 @@ def complete_recorded_result(conn, step, shared_paths, stamp, ref):
 def store(conn, event_id, step, shared_paths, stamp, ref=None):
     if ref:
         conn.execute("INSERT INTO event_origins(event_id,ref) VALUES(?,?)", (event_id, ref))
+    native = step.get("native_call_ref")
+    if isinstance(native, str) and edit_verification.DIGEST.fullmatch(native):
+        src = step.get("src")
+        stream, byte_pos, ordinal = None, None, None
+        if isinstance(src, str) and SOURCE_POSITION.fullmatch(src):
+            stream, offset, index = src.split(":")
+            byte_pos, ordinal = int(offset), int(index)
+        conn.execute("""INSERT OR IGNORE INTO verification_calls(event_id,host,session,ref,stream,byte_pos,ordinal)
+                        SELECT id,host_id,json_extract(metadata_json,'$.session'),?,?,?,? FROM events WHERE id=?""",
+                     (native, stream, byte_pos, ordinal, event_id))
     if step.get("category") in ("shell", "file_read"):
         inp, _ = evidence_text(step.get("command_input"), 1024)
         raw_output = None if protected_command(step.get("command_input")) else step.get("command_output")
@@ -252,10 +265,12 @@ def store(conn, event_id, step, shared_paths, stamp, ref=None):
 
 
 def detail(db, org, event_id):
-    event = db.query_one("SELECT metadata_json,event_type FROM events WHERE id=?", (event_id,))
+    event = db.query_one("SELECT id,host_id,harness AS runtime,agent_name AS agent,event_type AS source,"
+                         "severity,message,created_at AS ts,metadata_json FROM events WHERE id=?", (event_id,))
     if event is None:
         return None
-    work = work_summary(event["metadata_json"]) if event["event_type"] == "observed_step" else {}
+    metadata = event.pop("metadata_json")
+    work = work_summary(metadata) if event["source"] == "observed_step" else {}
     execution = db.query_one("SELECT command_input,command_output,exit_code,output_truncated "
                              "FROM event_execution WHERE event_id=?", (event_id,)) or {}
     images = db.query_all("SELECT path,digest AS sha256,mime_type,source,captured_at,length(content) AS size_bytes "
@@ -266,7 +281,9 @@ def detail(db, org, event_id):
         snippet["truncated"] = bool(snippet["truncated"])
     for image in images:
         image["url"] = f"/api/v1/events/{event_id}/images/{image['sha256']}?organization_id={org}"
-    return {"organization": org, "event_id": event_id, "files": work.get("files", []),
+    verification = {"verification": edit_verification.for_edit(db, event_id, work)} if work.get("action") == "file_edit" else {}
+    return {"organization": org, "event_id": event_id, "files": work.get("files", []), **verification,
+            "record": {**event, "kind": "Event", "work": work} if work else None,
             "workspace": work.get("workspace"), "session": work.get("session"), "program": work.get("program"),
             "command_input": execution.get("command_input"), "command_output": execution.get("command_output"),
             "exit_code": execution.get("exit_code"), "output_truncated": bool(execution.get("output_truncated")),

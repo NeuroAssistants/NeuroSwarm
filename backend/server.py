@@ -33,6 +33,7 @@ from auth import LoginRateLimiter, SESSION_TTL_SECONDS, token_organization  # no
 from db import Database  # noqa: E402
 import incidents
 import event_evidence
+import edit_verification
 from event_feed import MAX_LIMIT as FEED_MAX_LIMIT, FeedError, feed as event_feed
 from identity import Directory, IdentityError, role
 from live_history import history
@@ -751,7 +752,8 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
         db = self.resources.db
         rules = self.resources.guardrails
         with db.transaction() as conn:
-            self._authorize_host(token, validate_host_id(body.get("host_id")))
+            host = validate_host_id(body.get("host_id"))
+            self._authorize_host(token, host)
             if path == "/api/v1/ingest/heartbeat":
                 clean = sanitize_heartbeat(body)
                 clean["ip_hint"] = self._client_ip()
@@ -763,6 +765,8 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
             elif path == "/api/v1/ingest/event":
                 event, alerts = rules.evaluate_event(sanitize_event(body))
                 result = {"ok": True, **event, "alerts_triggered": alerts}
+            elif path == "/api/v1/ingest/verification":
+                result = edit_verification.receive(conn, host, body)
             else:
                 result = ingest_remote_activity(db, body)
         http_status = 422 if path == "/api/v1/ingest/activity" and result.get("commit_offsets") is False else 200
@@ -787,7 +791,7 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
 
     def _do_post(self) -> None:
         path = urlparse(self.path).path
-        if path in {"/api/v1/ingest/heartbeat", "/api/v1/ingest/event", "/api/v1/ingest/activity"}:
+        if path in {"/api/v1/ingest/heartbeat", "/api/v1/ingest/event", "/api/v1/ingest/activity", "/api/v1/ingest/verification"}:
             self._ingest(path)
             return
         self._check_origin()

@@ -98,3 +98,48 @@ For every assignment (`task_id`) in the active organization:
 - **Control Room (`/`):** supports `?am_view`, `?am_host`, `?am_agent`, `?am_q`, `?am_span`, `?am_session`, `?task`, and `?return_to`.
 - **Live NOC Console (`/live`):** supports `?task`, `?session`, `?host`, `?agent`, `?runtime`, `?file`, `?event`, `?persp`, `?sev`, `?kind`, `?cat`, `?status`, `?win`, `?group`, `?q`, and `?from`.
 - **`from` / `return_to` safety:** both surfaces accept **only** same-origin relative paths starting with `/` (rejecting `//`, schemes, and control characters) so operators can jump **Assignment → Session → Last Step / Confirmed File** and return with all previous filters preserved, with zero open-redirect exposure.
+
+## Edit verification
+
+Open a file edit in **Live Events**. Under **Verification after edit**, select a passed or failed test to open its recorded command and output. **No verification recorded** means the observer has no matching test result for that edit. A test result describes the command that ran on that revision. Line coverage requires separate evidence.
+
+### Enable capture on a development machine
+
+Use an enrolled observer or local journal that captures Claude Code transcripts. Keep a NeuroSwarm checkout on that machine for the optional hook and use the same server, host ID and ingest token as the observer. From the Git project being tested, set the task and agent explicitly for that session. Set different agent names for different workers.
+
+```sh
+export SWARMCONTROL_ACTIVITY_ROOTS="$PWD"
+export SWARMCONTROL_TASK_ID=task-41
+export SWARMCONTROL_AGENT_NAME=builder-a
+python3 /path/to/NeuroSwarm/integrations/verification_hook.py --print-settings
+```
+
+Merge the printed entries into your Claude Code settings and start the session with those environment variables. The hook uses the existing enrollment environment or `agent.env`. On the observer, enable `SWARMCONTROL_SHARE_COMMANDS=1` for command arguments and `SWARMCONTROL_SHARE_COMMAND_OUTPUT=1` for redacted output. Each is a separate choice. [Observer settings](deploy/work-journal.md#command-output-and-image-previews) · [Claude Code hook events](https://code.claude.com/docs/en/hooks)
+
+### What establishes the link
+
+1. Before a native `Write` or `Edit`, the hook calculates the expected file contents. After success it checks that the file changed as requested and fingerprints the working tree.
+2. Before a foreground test, the hook records the completed edit IDs in that same checkout, task, actor, session and revision. On completion it checks the revision again, together with file change times and identities. The resulting receipt names up to 32 edits. Clock proximity and shared filenames never establish a link.
+3. The observer independently reads the native tool IDs from the transcript. The server matches both receipts to their own events in the enrolled host and organization. It checks their order using positions within the transcript, including when timestamps are identical. A conflict or an ambiguous tool ID leaves the edit unverified. Receipts and transcript events may arrive in either order. The hook retries unsent receipts on later calls or with `--flush`, using its private, enrollment-specific queue for up to seven days. Keep that queue outside the project.
+
+The revision is a SHA-256 fingerprint of Git HEAD and the names, execute bits and exact bytes of tracked and unignored new files in the working tree. The hook samples the tree before and after the test. Temporary files created and removed between those snapshots, ignored build products, installed dependencies and external services are outside its scope. Capture requires a committed Git project within the selected roots. Protected files, symlinks, detected changes and projects over 2,048 files, 4 MiB per file or 32 MiB in total cause capture to skip the link.
+
+The included producer handles Claude Code main sessions with native tool IDs and direct foreground commands such as `python3 -m unittest`, `pytest`, `go test`, `cargo test` and `npm test`. Compound shell commands, background runs, subagents and custom wrappers have no producer in this version. Older records and other runtimes continue to open normally with **No verification recorded**.
+
+### HTTP contract and acceptance
+
+`POST /api/v1/ingest/verification` accepts independent edit and test receipts with an ingest token bound to the host. Each has `host_id`, `session_id`, `actor`, `task_id`, `revision`, `role` and `call_ref`. Both identifiers are full lowercase SHA-256 digests. A test receipt adds `result` (`passed` or `failed`) and `edits` (the explicit edit references). Identical retries succeed. Changing the receipt for an existing call returns HTTP 400. The observer supplies the matching `native_call_ref` only on captured steps. Hook payloads contain IDs and digests. The existing observer controls file and command detail.
+
+`GET /api/v1/events/{id}/evidence?organization_id={org}` adds a `verification` field on edits. Its `status` is `not_recorded` with an empty `tests` list, or `recorded` with the task, actor, revision and up to ten recent test events. Each result includes `event_id`, `result`, time, program and an exit code when the native record supplies one. Opening that exact event fetches the command and output under the active organization's permissions.
+
+Run the two-agent browser and capture tests from the NeuroSwarm checkout.
+
+```sh
+python3 -m unittest discover -s tests -p test_edit_verification.py -v
+```
+
+With Claude Code installed, the following acceptance run uses two actual sessions, temporary Git projects and a scripted model on loopback. Claude runs its own tools and hooks and writes its normal transcripts.
+
+```sh
+python3 tests/run_native_edit_verification.py "$(command -v claude)"
+```
