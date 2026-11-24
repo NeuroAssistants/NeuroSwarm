@@ -3,9 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#22231f">
+  <meta name="theme-color" content="#192823">
+  <link rel="preload" href="/instrument-serif.ttf" as="font" type="font/ttf" crossorigin>
   <title>NeuroSwarm · Coding agent monitor</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%20role%3D%22img%22%3E%3Ctitle%3ENeuroSwarm%3C%2Ftitle%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2210%22%20fill%3D%22%2322231f%22%2F%3E%3Cg%20transform%3D%22translate%288%2013%29%22%3E%3Cpolygon%20fill%3D%22%23f2b79a%22%20points%3D%2216%2C2%2048%2C2%2040%2C10%208%2C10%22%2F%3E%3Cpolygon%20fill%3D%22%23f2b79a%22%20points%3D%228%2C15%2040%2C15%2032%2C23%200%2C23%22%2F%3E%3Cpolygon%20fill%3D%22%23f2b79a%22%20points%3D%228%2C28%2032%2C28%2024%2C36%200%2C36%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E" type="image/svg+xml">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%20role%3D%22img%22%3E%3Ctitle%3ENeuroSwarm%3C%2Ftitle%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2210%22%20fill%3D%22%23192823%22%2F%3E%3Cg%20transform%3D%22translate%288%2013%29%22%3E%3Cpolygon%20fill%3D%22%23BDF2C9%22%20points%3D%2216%2C2%2048%2C2%2040%2C10%208%2C10%22%2F%3E%3Cpolygon%20fill%3D%22%23BDF2C9%22%20points%3D%228%2C15%2040%2C15%2032%2C23%200%2C23%22%2F%3E%3Cpolygon%20fill%3D%22%23BDF2C9%22%20points%3D%228%2C28%2032%2C28%2024%2C36%200%2C36%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/activity-product.css">
   <link rel="stylesheet" href="/needs-attention.css">
@@ -16,33 +17,35 @@
   <main id="login-view" class="login-shell hidden">
     <header class="folio-nav">
       <a class="folio-brand" href="#intro"><span class="foil-mark" aria-hidden="true"></span>NeuroSwarm</a>
-      <nav aria-label="Product navigation"><a href="#trace-example">How it works</a><a class="folio-enter" href="#access">Open console <span aria-hidden="true">↗</span></a></nav>
+      <nav aria-label="Product navigation"><a href="#trace-example">Session walkthrough</a><a href="#self-host">Installation</a><a class="folio-enter" href="#access">Open console <span aria-hidden="true">↗</span></a></nav>
     </header>
     <section id="intro" class="folio-hero" aria-labelledby="folio-title">
       <div class="folio-copy">
-        <p class="folio-label"><i aria-hidden="true"></i> Coding agent observability</p>
-        <h1 id="folio-title">Follow<br>the <em>swarm.</em></h1>
-        <p class="folio-deck">See what your coding agents changed, which tests ran, and where a session needs you.</p>
-        <div class="folio-actions"><a class="folio-cta" href="#self-host">Install NeuroSwarm <span aria-hidden="true">↓</span></a><a class="folio-link" href="#trace-example">Explore a trace</a></div>
+        <p class="folio-label">Self-hosted agent observability</p>
+        <h1 id="folio-title">A field guide<br>to <em>agent work.</em></h1>
+        <p class="folio-deck">Follow a code change from the agent that made it to the test that verified it. Across sessions and machines, on your own server.</p>
+        <div class="folio-actions"><a class="folio-cta" href="#self-host">Install NeuroSwarm <span aria-hidden="true">↓</span></a><a class="folio-link" href="#trace-example">Explore a session</a></div>
       </div>
-      <figure class="folio-art"><img src="/swarm-fold.webp" alt="" fetchpriority="high"><figcaption>Fold study <span aria-hidden="true">/</span> NeuroSwarm</figcaption></figure>
+      <figure class="folio-art"><img src="/swarm-fold.webp" alt="" width="1024" height="1024" fetchpriority="high"></figure>
     </section>
     <section id="trace-example" class="trace-spread" aria-labelledby="trace-title">
-      <div><p class="folio-label">Example session</p><h2 id="trace-title">From edit<br>to evidence.</h2><p>Open a step to follow one change through a session.</p></div>
+      <div><p class="folio-label">Session walkthrough</p><h2 id="trace-title">What changed?<br>What passed?</h2><p class="section-deck">Inspect the three records behind a rounding fix in this example session.</p></div>
       <div class="trace-sheet">
-        <details open><summary><span>File edit</span><strong>src/rounding.py</strong></summary><p>The agent changed the rounding rule for half-cent amounts.</p></details>
-        <details><summary><span>Test run</span><strong>pytest tests/test_rounding.py</strong></summary><p>The test ran in the same session and on the same working revision as the edit.</p></details>
-        <details><summary><span>Result</span><strong>1 passed</strong></summary><p>The recorded command exited with code 0. An edit without matching evidence stays marked “No verification recorded.”</p></details>
+        <header class="record-header"><span>Session records</span><code>rounding-fix</code></header>
+        <details open><summary><span>File edit</span><strong>src/rounding.py</strong></summary>
+          <div class="record-body"><p>The agent changed how half-cent amounts round.</p><pre aria-label="Example code change"><del>− mode = ROUND_DOWN</del><ins>+ mode = ROUND_HALF_UP</ins></pre></div></details>
+        <details><summary><span>Test run</span><strong>test_half_cent</strong></summary><div class="record-body"><p>The test ran against the edited revision in the same session.</p><pre>pytest tests/test_rounding.py -k half_cent</pre></div></details>
+        <details><summary><span>Result</span><strong>1 passed</strong></summary><div class="record-body"><p>The command exited with code 0. Open the edit in Live Events to inspect its recorded output.</p></div></details>
       </div>
     </section>
     <section class="install-spread" id="self-host" aria-labelledby="install-title">
-      <div><p class="folio-label">Self-hosted console</p><h2 id="install-title">Run it on your machine.</h2></div>
-      <div><p>Download the source, extract it, and run this command from the project folder with Docker Compose installed.</p>
+      <div><p class="folio-label">Installation</p><h2 id="install-title">Your own<br>control room.</h2></div>
+      <div class="install-instructions"><p>Download and extract the source. From the project folder, start the console with Docker Compose.</p>
       <pre><code>docker compose up --build -d</code></pre>
       <div class="folio-actions"><a class="folio-cta" href="https://github.com/NeuroAssistants/NeuroSwarm/archive/refs/heads/main.zip">Download source ↓</a><a class="folio-link" href="https://github.com/NeuroAssistants/NeuroSwarm/blob/main/deploy/self-host.md">Installation guide ↗</a></div></div>
     </section>
     <div class="signin-panel" id="access">
-      <div class="access-heading"><p class="folio-label">Workspace access</p><h2>Control room.</h2></div>
+      <div class="access-heading"><p class="folio-label">Workspace access</p><h2>Open your workspace.</h2></div>
       <div class="login-card">
         <div class="auth-tabs" role="tablist" aria-label="Account access mode">
           <button type="button" class="auth-tab active" role="tab" id="tab-signin" aria-selected="true" aria-controls="panel-signin" data-auth-tab="signin">Sign in</button>

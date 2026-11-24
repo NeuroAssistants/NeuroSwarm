@@ -96,3 +96,80 @@
 @media (forced-colors:active){.foil-mark {background:ButtonText;}.folio-cta,.folio-enter {border:1px solid ButtonText;}}
 .desk-brand {text-decoration:none;}
 .login-shell #access[hidden] {display:none;}
+
+/* Public field guide */
+@font-face {
+  font-family: "Instrument Serif";
+  src: url("/instrument-serif.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+.login-shell {
+  --gutter: clamp(1.25rem, 5vw, 6rem);
+  --display: "Instrument Serif", Georgia, serif;
+}
+.folio-nav, .folio-hero, .trace-spread, .install-spread, .login-shell .signin-panel {
+  padding-inline: max(var(--gutter), calc((100vw - 1520px) / 2));
+}
+.folio-nav { min-height: 72px; background: var(--sc-ink); color: var(--sc-paper); border-bottom: 1px solid #46594c; }
+.folio-brand { letter-spacing: -.055em; gap: .65rem; }
+.folio-brand .foil-mark { background: repeating-linear-gradient(to bottom, var(--sc-mint) 0 4px, transparent 4px 8px); }
+.folio-enter { border-color: #889c8f; border-radius: 40px; }
+.folio-nav nav a:hover, .folio-nav a:focus-visible { color: var(--sc-mint); }
+.folio-hero {
+  background: var(--sc-ink);
+  color: var(--sc-paper);
+  grid-template-columns: minmax(0, 1.02fr) minmax(0, 1fr);
+  gap: var(--gutter);
+  padding-block: clamp(2.25rem, 4vw, 5rem);
+  min-height: auto;
+}
+.folio-copy { padding-block: 1rem; }
+.folio-label { font: 600 .72rem/1.4 var(--sc-mono); letter-spacing: .065em; }
+.folio-copy .folio-label { color: var(--sc-mint); margin-bottom: clamp(1.5rem, 3vw, 3rem); }
+.folio-hero h1, .trace-spread h2, .install-spread h2, .access-heading h2 {
+  font-family: var(--display); font-weight: 400; letter-spacing: -.036em;
+}
+.folio-hero h1 { font-size: clamp(4.5rem, 8.5vw, 9.5rem); line-height: .91; color: inherit; }
+.folio-hero h1 em { font-style: normal; color: var(--sc-mint); }
+.folio-deck { color: #deeadf; font-size: clamp(1rem, 1.23vw, 1.25rem); line-height: 1.55; max-width: 41ch; }
+.folio-art { overflow: hidden; aspect-ratio: 1.12; border-radius: 48% 48% 3px 3px / 45% 45% 3px 3px; }
+.folio-art img { width: 100%; height: 100%; max-height: none; object-fit: cover; }
+.folio-actions { gap: 1.5rem; }
+.folio-cta { border-radius: 2rem; padding: .85rem 1.25rem; font-size: .92rem; }
+.folio-copy .folio-cta { background: var(--sc-mint); color: var(--sc-ink); }
+.folio-copy .folio-link { color: var(--sc-paper); font-size: .92rem; }
+.folio-link { text-decoration-thickness: 1px; text-underline-offset: .28em; }
+.trace-spread { background: var(--stock); color: var(--carbon); }
+.trace-spread, .install-spread { padding-block: clamp(3.5rem, 7vw, 8rem); }
+.trace-spread .folio-label, .install-spread .folio-label { color: var(--sc-action); }
+.trace-spread h2, .install-spread h2, .access-heading h2 { font-size: clamp(3.4rem, 5.6vw, 6rem); line-height: .97; }
+.section-deck, .install-instructions > p { font-size: 1.06rem; line-height: 1.55; max-width: 39ch; }
+.trace-sheet { background: var(--sc-surface); border: 1px solid var(--rule); border-top: 3px solid var(--sc-action); }
+.record-header { display: flex; align-items: center; justify-content: space-between; background: var(--sc-inset); padding: .95rem 1.2rem; font-size: .84rem; }
+.record-header code { color: var(--sc-muted); }
+.trace-sheet details { border: 0; border-top: 1px solid var(--rule); }
+.trace-sheet summary { padding: 1rem 1.2rem; }
+.trace-sheet summary span { color: var(--sc-action); }
+.trace-sheet summary strong { font-family: var(--sc-mono); font-size: .93rem; }
+.record-body { padding: 0 1.2rem 1.2rem; }
+.trace-sheet .record-body p { color: var(--sc-muted); padding: 0; margin: 0 0 .75rem; }
+.record-body pre { margin: 0; background: var(--sc-inset); padding: .9rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.record-body ins, .record-body del { display: block; text-decoration: none; }
+.record-body del { color: var(--sc-critical-fg); }
+.record-body ins { color: var(--sc-ok-fg); }
+.trace-sheet :focus-visible { outline-color: var(--sc-action); outline-offset: -3px; }
+.install-spread { border-top: 1px solid var(--rule); }
+.install-spread pre { background: var(--carbon); color: var(--sc-mint); border: 0; padding: 1.3rem; }
+@media (max-width: 700px) {
+  .folio-nav { min-height: 60px; }
+  .folio-nav nav a:not(.folio-enter) { display: none; }
+  .folio-hero { grid-template-columns: 1fr; gap: 1.8rem; padding-block: 2rem; }
+  .folio-hero h1 { font-size: clamp(4.3rem, 14vw, 6rem); }
+  .folio-copy { padding: 0; }
+  .folio-art { aspect-ratio: 1.5; border-radius: 7rem 2px 2px 2px; }
+  .folio-art img { object-position: 50% 53%; }
+  .trace-spread, .install-spread { gap: 1.5rem; }
+  .trace-sheet summary { grid-template-columns: 4.5rem minmax(0,1fr) 1em; }
+}
