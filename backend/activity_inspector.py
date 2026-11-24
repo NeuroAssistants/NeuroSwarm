@@ -20,18 +20,23 @@ remote agent produce the same snapshot. Never writes, signals or blocks anything
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import threading
 import time
 from collections import Counter
+from contextlib import ExitStack
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -294,6 +299,8 @@ def _step(tool: str, label: Any, ts: Any = None) -> dict[str, Any]:
         else:
             text = FRIENDLY.get(key) or key.replace("__", " ").replace("_", " ").strip().capitalize() or "Use a tool"
     step = {"tool": redact(key, 48), "category": cat, "label": readable(text, 110), "time": str(ts or "")[:19]}
+    if _CAPTURE is not None and os.environ.get("SWARMCONTROL_SHARE_FILE_PREVIEWS") == "1" and isinstance(ts, str):
+        step["_evidence_time"] = ts
     global _POS_N
     if _POS is not None:  # exact origin: <log key>:<byte offset of the record>:<n-th step from that record>
         step["src"] = f"{_POS[0]}:{_POS[1]}:{_POS_N}"
@@ -368,6 +375,151 @@ def command_info(cmd: Any) -> dict[str, str]:
                        if ("/" in m.group(0) or "." in m.group(0)) and is_sensitive_path(m.group(0)) else m.group(0), shown)
         out["command"] = shown if len(shown) <= 160 else shown[:159].rstrip() + "…"
     return out
+
+
+_SECRET_ARGS = re.compile(r"""(?ix)(?<![\w.-])(-[upH]|--(?:password|passwd|pass|secret|token|user|api[-_]?key|header|auth))(?:=|\s+)(?:"[^"]*"|'[^']*'|[^\s]+)""")
+_SECRET_VALUE = re.compile(r"""(?ix)(\b(?:authorization|cookie|set-cookie|password|passwd|secret|access[_-]?token|api[_-]?key|token)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\r\n,;]+)""")
+_CONTROL_SEQ = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
+
+
+def evidence_text(value, limit):
+    """Bound an explicitly shared text excerpt and preserve line breaks after redaction."""
+    if not isinstance(value, str):
+        return None, False
+    if "PRIVATE KEY-----" in value or "\x00" in value:
+        return "[protected content]", False
+    scan_limit = limit * 2 + 1024
+    capped = len(value) > scan_limit
+    value = _CONTROL_SEQ.sub("", value[:scan_limit])
+    value = re.sub(r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie)\s*:\s*[^\r\n]+",
+                   r"\1: [redacted]", value)
+    value = re.sub(r"(?<![\w.-])(?:/[\w.@+~-]+){2,}(?:/[\w.@+~-]+)*",
+                   lambda m: "[protected file]" if is_sensitive_path(m[0]) else ".../" + m[0].rsplit("/", 1)[-1],
+                   value)
+    value = _SECRET_ARGS.sub(r"\1 [redacted]", value)
+    value = _SECRET_VALUE.sub(r"\1[redacted]", value)
+    for name, pattern in SECRET_PATTERNS:
+        value = pattern.sub(f"[redacted:{name}]", value)
+    value = INLINE_SECRET.sub(lambda m: f"{m[1]}{m[2]}[redacted]", value)
+    excerpt = "".join(c for c in value if c in "\n\t" or c.isprintable())
+    return excerpt[:limit], capped or len(excerpt) > limit
+
+
+def execution_detail(command, output, code):
+    info = command_info(command)
+    if _CAPTURE is None:
+        return info
+    if type(code) is int:
+        info["exit_code"] = code
+    if os.environ.get("SWARMCONTROL_SHARE_COMMANDS") == "1":
+        text, _ = evidence_text(command, 1024)
+        if text is not None:
+            info["command_input"] = text
+    if os.environ.get("SWARMCONTROL_SHARE_COMMAND_OUTPUT") == "1":
+        # A command that asks for credential files or the environment has no shareable output.
+        if re.search(r"(?i)(?:^|[;&|\s])(?:env|set|printenv|export)(?:$|[;&|\s])", str(command)) or any(
+            is_sensitive_path(token.strip(" =\"'")) for token in str(command).split()
+        ):
+            return info
+        text, cut = evidence_text(output, 4096)
+        if text is not None:
+            info.update(command_output=text, output_truncated=cut)
+    return info
+
+
+
+def _workspace_image(path, when, scope):
+    """Capture a small, unchanged raster at collection time. Never dereference a link."""
+    if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd or not isinstance(when, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(when.replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            return None
+        root = scope.root_of(path)
+        if root is None:
+            return None
+        parts = Path(path).relative_to(root).parts
+        if not parts or any(p.startswith(".") for p in parts):
+            return None
+        mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".webp": "image/webp", ".gif": "image/gif"}.get(Path(path).suffix.lower())
+        if not mime:
+            return None
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        with ExitStack() as stack:
+            directory = os.open(root, directory_flags)
+            stack.callback(os.close, directory)
+            for part in parts[:-1]:
+                directory = os.open(part, directory_flags, dir_fd=directory)
+                stack.callback(os.close, directory)
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            with os.fdopen(os.open(parts[-1], flags, dir_fd=directory), "rb") as handle:
+                before = os.fstat(handle.fileno())
+                if (not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= 160*1024
+                        or max(before.st_mtime, before.st_ctime) > stamp.timestamp()):
+                    return None
+                data = handle.read(160*1024+1)
+                after = os.fstat(handle.fileno())
+                if (len(data), after.st_mtime_ns, after.st_ctime_ns) != (before.st_size, before.st_mtime_ns, before.st_ctime_ns):
+                    return None
+        signatures = {"image/png": (b"\x89PNG\r\n\x1a\n",), "image/jpeg": (b"\xff\xd8\xff",),
+                      "image/gif": (b"GIF87a", b"GIF89a"), "image/webp": (b"RIFF",)}
+        if not data.startswith(signatures[mime]) or (mime == "image/webp" and data[8:12] != b"WEBP"):
+            return None
+        return {"path": path, "source": "workspace_snapshot", "mime_type": mime,
+                "data_base64": base64.b64encode(data).decode("ascii"), "captured_at": time.time()}
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
+
+def _tool_result_text(result, path):
+    """Keep text only when the runtime returned it for one explicit source file."""
+    if (_CAPTURE is None or os.environ.get("SWARMCONTROL_SHARE_FILE_PREVIEWS") != "1" or not path
+            or Path(path).suffix.lower() not in {".md", ".txt", ".py", ".js", ".ts", ".jsx", ".tsx", ".css",
+                                                 ".html", ".json", ".toml", ".yaml", ".yml", ".go", ".rs",
+                                                 ".c", ".h", ".cpp", ".sh", ".sql", ".java", ".rb"}):
+        return []
+    if isinstance(result, dict):
+        result = result.get("content")
+    if isinstance(result, list):
+        lines = [b["text"] for b in result if isinstance(b, dict) and b.get("type") in ("text", "input_text")
+                 and isinstance(b.get("text"), str)]
+        result = "\n".join(lines) if lines else None
+    text, cut = evidence_text(result, 4096)
+    if text is None:
+        return []
+    return [{"path": path, "source": "tool_result", "text": text, "truncated": cut}]
+
+
+def _tool_result_image(item, path):
+    """Retain only an explicit image result for this recorded image read."""
+    if _CAPTURE is None or os.environ.get("SWARMCONTROL_SHARE_FILE_PREVIEWS") != "1" or not path:
+        return []
+    result = item.get("result", item.get("content_items", item.get("output")))
+    if isinstance(result, dict):
+        result = result.get("content", [result])
+    if not isinstance(result, list):
+        return []
+    for block in result:
+        if not isinstance(block, dict):
+            continue
+        src = block.get("source") if isinstance(block.get("source"), dict) else {}
+        data = src.get("data", block.get("data"))
+        mime = src.get("media_type") or block.get("mimeType", block.get("mime_type"))
+        if block.get("type") in ("image_url", "input_image", "Image"):
+            url = block.get("image_url", block.get("url"))
+            if isinstance(url, dict):
+                url = url.get("url")
+            if isinstance(url, str) and url.startswith(("data:image/png;base64,", "data:image/jpeg;base64,", "data:image/gif;base64,", "data:image/webp;base64,")):
+                header, data = url.split(",", 1)
+                mime = header[5:].split(";")[0]
+        elif block.get("type") != "image":
+            continue
+        if mime in ("image/png", "image/jpeg", "image/gif", "image/webp") and isinstance(data, str) and 0 < len(data) <= 218456:
+            return [{"path": path, "source": "tool_result", "mime_type": mime, "data_base64": data}]
+    return []
 
 
 def _model(raw: Any) -> str:
@@ -605,6 +757,9 @@ def _session(harness: str, harness_name: str, sid: str, cwd: str, updated: float
             "updated_at": updated, "status": "active" if time.time() - updated < ACTIVE_WINDOW_SEC else "idle",
             "what_done": "", "plan": [], "how": {}, "steps": [], "files_edited": [], "files_read": [],
             "files_delivered": []}
+    current = clean_path(cwd)
+    if current and current != workspace:
+        card["current_folder"] = current
     _provider(card)
     return card
 
@@ -612,7 +767,6 @@ def _session(harness: str, harness_name: str, sid: str, cwd: str, updated: float
 def _finish(card: dict[str, Any], steps: list[dict[str, Any]], edited: list[str], read: list[str],
             delivered: list[str] | None = None) -> dict[str, Any]:
     card["how"] = dict(Counter(s["category"] for s in steps))
-    card["steps"] = steps[-10:]
     if _CAPTURE is not None:
         card["capture_steps"] = steps  # every step read in this scan, not only the last ten shown on the map
 
@@ -622,6 +776,15 @@ def _finish(card: dict[str, Any], steps: list[dict[str, Any]], edited: list[str]
             step["files"] = [p for p in step["files"] if scope.contains(p)]
             step.setdefault("file_basis", "confirmed" if step["files"] and step.get("status", "completed") == "completed"
                             and step["category"] in ("file_edit", "file_read") else "recorded")
+
+    if _CAPTURE is not None and os.environ.get("SWARMCONTROL_SHARE_FILE_PREVIEWS") == "1":
+        for step in steps:
+            recorded_at = step.pop("_evidence_time", None)
+            if (step.get("category") == "file_read" and step.get("file_basis") == "confirmed" and step.get("status") == "completed"
+                    and not step.get("image_previews") and len(step.get("files", [])) == 1):
+                preview = _workspace_image(step["files"][0], recorded_at, scope)
+                if preview:
+                    step["image_previews"] = [preview]
 
     def uniq(items: list[str], n: int) -> list[str]:
         out: list[str] = []
@@ -648,7 +811,9 @@ def _finish(card: dict[str, Any], steps: list[dict[str, Any]], edited: list[str]
     card["what_done"] = readable(card["what_done"])
     if not card["what_done"]:
         card["what_done"] = "No written summary in the latest part of this session."
-    shown = card["steps"]
+    private_fields = {"command_input", "command_output", "exit_code", "output_truncated", "image_previews", "text_previews"}
+    shown = [{k: v for k, v in s.items() if k not in private_fields} for s in steps[-10:]]
+    card["steps"] = shown
     card["latest_action"] = shown[-1] if shown else None
     # The step an operator usually wants: the last real piece of work, not a status message.
     card["latest_work"] = next((s for s in reversed(shown) if s["category"] in
@@ -668,7 +833,14 @@ def _file_label(name: str, fp: Any) -> str:
 def _recorded_file(raw: Any, card: dict[str, Any]) -> str:
     if not isinstance(raw, str) or not raw:
         return ""
-    path = Path(card["workspace"]) / raw.removeprefix("file://")
+    supplied = raw.strip()
+    if len(supplied) > 1 and supplied[0] == supplied[-1] and supplied[0] in ("'", '"'):
+        supplied = supplied[1:-1]
+    supplied = supplied.removeprefix("file://")
+    base = clean_path(card.get("current_folder") or card.get("workspace"))
+    if not Path(supplied).is_absolute() and (not base or re.match(r"^(?:[A-Za-z][\w+.-]*:|~|\\\\)", supplied)):
+        return ""
+    path = Path(base) / supplied
     safe = clean_path(path)
     if not safe or redact(safe, 401) != safe or ".." in path.parts or any(ord(c) < 32 for c in safe):
         return ""
@@ -790,8 +962,9 @@ def codex_sessions(limit: int = 8) -> list[dict[str, Any]]:
                         read_start = len(read)
                         for c in parsed:
                             if c.get("type") == "read" and c.get("path"):
-                                read.append(str(c["path"]) if str(c["path"]).startswith("/") else
-                                            str(Path(clean_path(it.get("cwd")) or "/") / str(c["path"])))
+                                directory = it.get("cwd") or card.get("current_folder") or card["workspace"]
+                                if path := _recorded_file(c["path"], {"workspace": directory}):
+                                    read.append(path)
                         linked_reads = [p for raw in read[read_start:] if (p := _recorded_file(raw, card))][:12]
                         label = ("Read " + (", ".join(Path(p).name for p in linked_reads)[:100] or "files")
                                  if kinds == {"read"} else "List or search files" if kinds <= {"list_files", "search"}
@@ -801,16 +974,40 @@ def codex_sessions(limit: int = 8) -> list[dict[str, Any]]:
                         raw_command = it.get("command")
                         command = raw_command[-1] if isinstance(raw_command, list) and raw_command else raw_command
                         command = str((parsed[0].get("cmd") if parsed else None) or command or "").strip()
-                        steps[-1].update(command_info(command))
+                        if isinstance(raw_command, list) and all(isinstance(arg, str) for arg in raw_command):
+                            if len(raw_command) > 2 and raw_command[1] in ("-c", "-lc", "-cl"):
+                                actual = raw_command[2]
+                            else:
+                                actual = shlex.join(raw_command)
+                        else:
+                            actual = raw_command or command
+                        steps[-1].update(execution_detail(actual or command, it.get("aggregated_output"), it.get("exit_code")))
                         steps[-1]["files"] = linked_reads
                         steps[-1]["category"] = "file_read" if kinds and kinds <= {"read", "list_files", "search"} else "shell"
                     elif t == "DynamicToolCall":
                         tool, args = str(it.get("tool") or "tool"), it.get("arguments") or {}
                         if tool == "tool_call" and isinstance(args, dict) and args.get("name"):
-                            tool = str(args["name"])
+                            tool, args = str(args["name"]), args.get("arguments") or {}
                         if tool.endswith("attach_files_to_response") and isinstance(args, dict):
                             delivered += [str(x) for x in args.get("paths") or []]
                         steps.append(_step(tool, tool.replace("_", " "), stamp))
+                        if _tool_key(tool) in {"view_image", "read_image", "read_file"} and isinstance(args, dict):
+                            path = _recorded_file(args.get("path") or args.get("file_path"), card)
+                            if path:
+                                read.append(path)
+                                steps[-1].update(category="file_read", files=[path], label="Read " + Path(path).name)
+                                if it.get("success") is True:
+                                    steps[-1]["status"] = "completed"
+                                if it.get("success") is False:
+                                    steps[-1]["status"] = "error"
+                                else:
+                                    previews = _tool_result_image(it, path)
+                                    if previews:
+                                        steps[-1]["image_previews"] = previews
+                                    elif _tool_key(tool) == "read_file":
+                                        snippets = _tool_result_text(it.get("result", it.get("content_items", it.get("output"))), path)
+                                        if snippets:
+                                            steps[-1]["text_previews"] = snippets
                     elif t == "Extension" and it.get("query"):
                         steps.append(_step("web_search", f"Search: {it['query']}", stamp))
                     elif t == "AgentMessage":
@@ -907,6 +1104,7 @@ def claude_sessions(limit: int = 6) -> list[dict[str, Any]]:
         except OSError:
             continue
         cwd, model = "", ""
+        recorded_calls = {}
         steps: list[dict[str, Any]] = []
         edited: list[str] = []
         read: list[str] = []
@@ -923,6 +1121,30 @@ def claude_sessions(limit: int = 6) -> list[dict[str, Any]]:
                 continue
             cwd = str(o.get("cwd") or cwd)  # latest working folder in the recent log
             msg = o.get("message")
+            if o.get("type") == "user" and isinstance(msg, dict) and _CAPTURE is not None:
+                for result in msg.get("content") or []:
+                    if not isinstance(result, dict) or result.get("type") != "tool_result":
+                        continue
+                    pair = recorded_calls.pop(result.get("tool_use_id"), None) if isinstance(result.get("tool_use_id"), str) else None
+                    if pair is None:
+                        continue
+                    step, command = pair
+                    step["status"] = "error" if result.get("is_error") else "completed"
+                    payload = result.get("content")
+                    if command is not None:
+                        if isinstance(payload, list):
+                            payload = "\n".join(block["text"] for block in payload if isinstance(block, dict)
+                                                and block.get("type") == "text" and isinstance(block.get("text"), str))
+                        step.update(execution_detail(command, payload, None))
+                    elif step.get("files") and step["status"] == "completed":
+                        previews = _tool_result_image({"result": payload}, step["files"][0])
+                        if previews:
+                            step["image_previews"] = previews
+                        else:
+                            snippets = _tool_result_text(payload, step["files"][0])
+                            if snippets:
+                                step["text_previews"] = snippets
+                continue
             if o.get("type") != "assistant" or not isinstance(msg, dict):
                 continue
             model = str(msg.get("model") or model)
@@ -935,7 +1157,8 @@ def claude_sessions(limit: int = 6) -> list[dict[str, Any]]:
                     name, inp = str(b.get("name") or "tool"), b.get("input") or {}
                     if not isinstance(inp, dict):
                         inp = {}
-                    fp = inp.get("file_path") or inp.get("notebook_path")
+                    raw_file = inp.get("file_path") or inp.get("notebook_path")
+                    fp = _recorded_file(raw_file, {"workspace": cwd})
                     if name in CLAUDE_EDIT and fp:
                         edited.append(fp)
                     elif name in CLAUDE_READ and fp:
@@ -947,18 +1170,23 @@ def claude_sessions(limit: int = 6) -> list[dict[str, Any]]:
                     if _tool_key(name) == "channel_result" and inp.get("text"):
                         summary = str(inp["text"])
                     label = (inp.get("description") or inp.get("subject") or
-                             (_file_label(name, fp) if fp else "") or
+                             (_file_label(name, fp or raw_file) if raw_file else "") or
                              inp.get("query") or inp.get("name") or _tool_key(name))
                     if _tool_key(name) == "tool_call" and isinstance(inp.get("name"), str) and not inp.get("description"):
                         steps.append(_step(inp["name"], "", o.get("timestamp")))  # wrapper call: show the wrapped tool's action
                     else:
                         steps.append(_step(name, label, o.get("timestamp")))
                     if name == "Bash" and inp.get("command"):
-                        steps[-1].update(command_info(inp["command"]))
+                        steps[-1].update(execution_detail(inp["command"], None, None))
                         if not inp.get("description"):
                             steps[-1]["label"] = command_kind(inp["command"])
-                    if (name in CLAUDE_EDIT or name in CLAUDE_READ) and clean_path(fp):
-                        steps[-1]["files"] = [clean_path(fp)]
+                    if (name in CLAUDE_EDIT or name in CLAUDE_READ) and fp:
+                        steps[-1]["files"] = [fp]
+                    if (_CAPTURE is not None and isinstance(b.get("id"), str) and
+                            (name in CLAUDE_READ or name == "Bash") and any(
+                                os.environ.get(key) == "1" for key in ("SWARMCONTROL_SHARE_COMMAND_OUTPUT", "SWARMCONTROL_SHARE_FILE_PREVIEWS")
+                            )):
+                        recorded_calls[b["id"]] = (steps[-1], inp.get("command") if name == "Bash" else None)
         tasks = HOME / ".claude/tasks" / jf.stem
         if tasks.is_dir():
             items = []
@@ -987,7 +1215,7 @@ def claude_sessions(limit: int = 6) -> list[dict[str, Any]]:
 
 # --- Gemini / Antigravity -------------------------------------------------------------
 AG_EDIT = {"write_file", "edit_file", "write_to_file", "replace_file_content", "multi_replace_file_content"}
-AG_READ = {"read_file", "view_file", "list_dir"}
+AG_READ = {"read_file", "view_file", "view_image", "read_image", "list_dir"}
 
 
 def _antigravity_workspace(conv_id: str) -> tuple[str, str]:
@@ -1071,7 +1299,8 @@ def antigravity_sessions(limit: int = 8) -> list[dict[str, Any]]:
                 name, args = str(c.get("name") or "tool"), c.get("args") or {}
                 if not isinstance(args, dict):
                     args = {}
-                fp = args.get("Path") or args.get("TargetFile") or args.get("AbsolutePath")
+                raw_file = args.get("Path") or args.get("TargetFile") or args.get("AbsolutePath")
+                fp = _recorded_file(raw_file, card)
                 if name in AG_EDIT and fp:
                     edited.append(fp)
                 elif name in AG_READ and fp:
@@ -1082,7 +1311,7 @@ def antigravity_sessions(limit: int = 8) -> list[dict[str, Any]]:
                     inner = args["arguments"]
                     if _tool_key(str(args.get("name"))) == "channel_result" and inner.get("text"):
                         card["what_done"] = redact(inner["text"], 260)
-                label = args.get("toolSummary") or (_file_label(name, fp) if fp else "") or \
+                label = args.get("toolSummary") or (_file_label(name, fp or raw_file) if raw_file else "") or \
                     args.get("query") or _tool_key(name).replace("_", " ")
                 steps.append(_step(name, str(label).strip('"'), o.get("created_at")))
                 if _tool_key(name) in ("run_command", "run_terminal_command", "execute_command") and args.get("CommandLine"):
@@ -1091,7 +1320,7 @@ def antigravity_sessions(limit: int = 8) -> list[dict[str, Any]]:
                         raw_cmd = json.loads(raw_cmd) if raw_cmd.startswith('"') else raw_cmd
                     except ValueError:
                         raw_cmd = raw_cmd.strip('"')
-                    steps[-1].update(command_info(raw_cmd))
+                    steps[-1].update(execution_detail(raw_cmd, c.get("output"), c.get("exit_code")))
                 if (name in AG_EDIT or name in AG_READ) and clean_path(fp):
                     steps[-1]["files"] = [clean_path(fp)]
         card["plan"] = plan[:12]
@@ -1124,13 +1353,18 @@ def _opencode_tools(conn: sqlite3.Connection, sid: str) -> list[sqlite3.Row]:
                    CASE WHEN json_extract(p.value, '$.name') = 'todowrite'
                         THEN json_extract(p.value, '$.state.input.todos') END AS todos,
                    CASE WHEN json_extract(p.value, '$.name') IN ('bash', 'shell')
-                        THEN json_extract(p.value, '$.state.input.command') END AS command
+                        THEN json_extract(p.value, '$.state.input.command') END AS command,
+                   CASE WHEN ? AND json_type(p.value, '$.state.output') = 'text'
+                        THEN json_extract(p.value, '$.state.output') END AS output,
+                   coalesce(json_extract(p.value, '$.state.metadata.exit'),
+                            json_extract(p.value, '$.state.metadata.exitCode')) AS exit_code
               FROM recent m, json_each(
                      CASE WHEN length(m.data) <= ? AND json_valid(m.data) THEN m.data ELSE '{}' END,
                      '$.content') p
              WHERE p.type = 'object' AND json_extract(p.value, '$.type') = 'tool'
              ORDER BY m.seq DESC, CAST(p.key AS INTEGER) DESC LIMIT ?
-        """, (sid, messages, max_message, parts)).fetchall()[::-1]
+        """, (sid, messages, _CAPTURE is not None and os.environ.get("SWARMCONTROL_SHARE_COMMAND_OUTPUT") == "1",
+              max_message, parts)).fetchall()[::-1]
     except sqlite3.Error:
         # Older OpenCode versions store session headers without message parts.
         return []
@@ -1160,7 +1394,7 @@ def _opencode_activity(card: dict[str, Any], rows: list[sqlite3.Row], source: st
             step["files"] = [safe]
             step["label"] = readable(f"{name.capitalize()} {Path(safe).name}", 110)
         if "command" in row.keys() and isinstance(row["command"], str):
-            step.update(command_info(row["command"]))  # program name (and opt-in redacted preview) only
+            step.update(execution_detail(row["command"], row["output"], row["exit_code"]))
         if status == "completed" and name == "todowrite" and isinstance(row["todos"], str):
             try:
                 items = json.loads(row["todos"])

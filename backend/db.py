@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import incidents
+import event_evidence
 
 
 SCHEMA_SQL = """
@@ -154,6 +155,8 @@ class Database:
                 if version < 2:
                     incidents.migrate(conn)
                     conn.execute("INSERT INTO resource_migrations VALUES(2,?)", (time.time(),))
+                event_evidence.ensure_tables(conn)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_events_time_severity ON events(created_at,severity)")
         except BaseException:
             self._conn.close()
             raise

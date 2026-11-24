@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import event_evidence
 from activity_inspector import (
     CMD_KIND,
     NONTERMINAL,
@@ -255,16 +256,39 @@ def _match_root(norm_path: str, root_index: list[tuple[str, str, str]]) -> tuple
     return None
 
 
-def journal_files(paths: list[Any], project: Path, extra_scope: Any) -> tuple[list[str], list[str], set[str]]:
+
+def recorded_path(raw, cwd):
+    """Anchor a relative file only to its recorded working directory."""
+    if not isinstance(raw, str) or len(raw) > 1024 or raw.startswith(("\\", "//")):
+        return ""
+    absolute = norm_abs_path(raw)
+    if absolute:
+        return absolute
+    if not cwd or not raw.strip() or re.match(r"^(?:[A-Za-z][\w+.-]*:|~)", raw):
+        return ""
+    parts = raw.replace("\\", "/").split("/")
+    if ".." in parts or any(ord(c) < 32 for c in raw):
+        return ""
+    return norm_abs_path(cwd.rstrip("/") + "/" + "/".join(p for p in parts if p and p != "."))
+
+
+def journal_files(paths: list[Any], project: Path, extra_scope: Any, cwd: str = "") -> tuple[list[str], list[str], set[str]]:
     """Resolve and privacy-filter local file paths against primary project and Scope roots."""
     primary: list[str] = []
     additional: list[str] = []
     labels: set[str] = set()
+    base = norm_abs_path(cwd)
+    try:
+        if base and not (Path(base).resolve().is_relative_to(project) or (extra_scope and extra_scope.contains(base))):
+            base = ""
+    except (OSError, ValueError, RuntimeError):
+        base = ""
     for raw in paths:
         try:
-            if not isinstance(raw, str) or not Path(raw).is_absolute():
+            path = recorded_path(raw, base)
+            if not path or not Path(path).is_absolute():
                 continue
-            absolute = Path(raw).resolve()
+            absolute = Path(path).resolve()
             root = project
             if not absolute.is_relative_to(project):
                 root = extra_scope.root_of(absolute) if extra_scope else None
@@ -311,7 +335,7 @@ def resolve_step_files(
     extra_roots: set[str] = set()
 
     for raw in paths:
-        norm_p = norm_abs_path(raw)
+        norm_p = recorded_path(raw, ws_norm if ws_match else "")
         if not norm_p or is_sensitive_path(norm_p):
             continue
         matched = _match_root(norm_p, root_index)
@@ -344,6 +368,7 @@ def resolve_step_files(
 
 def ensure_journal_tables(db: Any) -> None:
     """Create unified journal tables and migrate legacy remote dedup digests if present."""
+    event_evidence.ensure_tables(db)
     db.execute("CREATE TABLE IF NOT EXISTS observed_step_keys (digest TEXT PRIMARY KEY, ts REAL NOT NULL)")
     db.execute(
         """
@@ -412,6 +437,7 @@ def project_rows(
     allow_command: bool | None = None,
     skipped: collections.Counter[str] | None = None,
     clock_skew_sec: float = 0.0,
+    evidence_by_key: dict | None = None,
 ):
     """Yield (key, legacy_keys, timestamp, event_tuple) for either local or remote snapshots."""
     share_cmd = (os.getenv("SWARMCONTROL_SHARE_COMMANDS") == "1") if allow_command is None else bool(allow_command)
@@ -435,6 +461,14 @@ def project_rows(
                 session_roots = [workspace_str]
             root_index = build_root_index(session_roots)
 
+        if project is not None:
+            try:
+                scoped = bool(workspace_str and (Path(workspace_str).resolve().is_relative_to(project)
+                                                  or (extra_scope and extra_scope.contains(workspace_str))))
+            except (ValueError, OSError, RuntimeError):
+                scoped = False
+        else:
+            scoped = bool(activity_enabled and global_roots and _match_root(norm_abs_path(workspace_str), root_index))
         seen: collections.Counter[tuple[Any, ...]] = collections.Counter()
         legacy_seen: collections.Counter[tuple[Any, ...]] = collections.Counter()
         steps = session.get("capture_steps") if session.get("capture_steps") is not None else session.get("steps", [])
@@ -467,13 +501,14 @@ def project_rows(
             if adjusted and skipped is not None:
                 skipped["clock_adjusted"] += 1
 
+            step_cwd = step.get("cwd") or workspace_str
             if project is not None:
                 scope = Path(workspace_str) if workspace_str else Path("")
-                files, extra_files, extra_roots = journal_files(step.get("files") or [], project, extra_scope)
+                files, extra_files, extra_roots = journal_files(step.get("files") or [], project, extra_scope, step_cwd)
                 ws_base_label = project.name if files or (workspace_str and scope == project) else "Agent workspace"
             else:
                 files, extra_files, extra_roots, ws_base_label = resolve_step_files(
-                    step.get("files") or [], root_index, workspace_str
+                    step.get("files") or [], root_index, step_cwd
                 )
 
             all_files = (files + extra_files)[:12]
@@ -585,6 +620,25 @@ def project_rows(
             else:
                 legacy = [r_v1_key]
 
+            if (scoped and evidence_by_key is not None and
+                    any(k in step for k in ("command_input", "command_output", "exit_code", "image_previews", "text_previews"))):
+                shared_paths = []
+                previews = [(field, item) for field in ("image_previews", "text_previews")
+                            if isinstance(step.get(field), list) for item in step[field][:2]]
+                if (previews and category in ("file_edit", "file_read", "visual")
+                        and context["basis"] in ("confirmed", "recorded")
+                        and str(outcome).lower() in ("completed", "success", "recorded")):
+                    for field, item in previews:
+                        if not isinstance(item, dict) or item.get("path") not in (step.get("files") or []):
+                            continue
+                        if project is not None:
+                            primary, extra, _ = journal_files([item["path"]], project, extra_scope, step_cwd)
+                        else:
+                            primary, extra, _, _ = resolve_step_files([item["path"]], root_index, step_cwd)
+                        display = primary or extra
+                        if display and display[0] in all_files:
+                            shared_paths.append((field, item, display[0]))
+                evidence_by_key.setdefault(key, (step, shared_paths))
             severity = step_severity(outcome)
             yield key, legacy, timestamp, (
                 host_id,
@@ -701,6 +755,7 @@ def persist_steps(
     insert_step = ("INSERT INTO events(host_id,harness,agent_name,event_type,severity,message,metadata_json,created_at"
                    + (",journaled) VALUES(?,?,?,?,?,?,?,?,1)" if "journaled" in columns else ") VALUES(?,?,?,?,?,?,?,?)"))
     rows: list[tuple[Any, ...]] = []
+    evidence_by_key = {}
     for key, legacy, stamp, event in project_rows(
         snapshot,
         now=now,
@@ -714,6 +769,7 @@ def persist_steps(
         allow_command=allow_command,
         skipped=counts,
         clock_skew_sec=clock_skew_sec,
+        evidence_by_key=evidence_by_key,
     ):
         counts["seen"] += 1
         rows.append((key, legacy, stamp, event))
@@ -745,6 +801,9 @@ def persist_steps(
             cur = conn.execute(insert_step, event)
             if getattr(cur, "lastrowid", None):
                 claimed.add(int(cur.lastrowid))
+                if key in evidence_by_key:
+                    step, shared_paths = evidence_by_key[key]
+                    event_evidence.store(conn, cur.lastrowid, step, shared_paths, stamp)
             counts["inserted"] += 1
         else:
             counts["duplicates"] += 1

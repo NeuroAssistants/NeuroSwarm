@@ -2,6 +2,7 @@
 import json
 import math
 
+from event_evidence import work_summary
 from correlation import clean_task_id
 from validation import ValidationError
 from work_journal import command_form
@@ -18,7 +19,6 @@ SELECT * FROM (
                      'resolved_by',resolved_by,'resolved_at',resolved_at,'created_at',created_at)
     FROM incident_cases
 )"""
-FIELDS = ("session", "workspace", "tool", "action", "files", "basis", "outcome", "program", "task_id")
 
 
 def history(db, organization, query):
@@ -56,7 +56,7 @@ def history(db, organization, query):
         elif row["source"] == "observed_step" and raw:
             metadata = json.loads(raw)
             if isinstance(metadata, dict):
-                row["work"] = {k:metadata[k] for k in FIELDS if k in metadata}
+                row["work"] = work_summary(metadata)
                 operation = command_form(metadata.get("program"), metadata.get("command"))
                 if operation:
                     row["work"]["command"] = operation

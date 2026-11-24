@@ -1,0 +1,177 @@
+"""Tenant-local event evidence. Large values are read only after an event is opened."""
+from __future__ import annotations
+
+import base64
+import binascii
+import hashlib
+import json
+import math
+import zlib
+
+from activity_inspector import evidence_text, is_sensitive_path
+
+MAX_IMAGE_BYTES = 160 * 1024
+WORK_FIELDS = ("session", "parent_session", "workspace", "tool", "action", "basis", "outcome",
+               "program", "task_id", "agent", "runtime")
+
+
+def work_summary(raw):
+    """Project the public work record. An unrelated large field cannot hide its files."""
+    try:
+        metadata = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(metadata, dict):
+        return {}
+    work = {key: metadata[key][:256] for key in WORK_FIELDS if isinstance(metadata.get(key), str)}
+    files = metadata.get("files")
+    if isinstance(files, list):
+        work["files"] = []
+        for path in files[:12]:
+            if not isinstance(path, str) or not path or len(path) > 320:
+                continue
+            if path.startswith(("/", "\\")) or ":" in path or any(ord(c) < 32 for c in path):
+                continue
+            path = path.replace("\\", "/")
+            if any(not part or part.startswith(".") for part in path.split("/")) or is_sensitive_path(path):
+                continue
+            work["files"].append(path)
+    return work
+
+
+def ensure_tables(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS event_execution (
+        event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+        command_input TEXT, command_output TEXT, exit_code INTEGER, output_truncated INTEGER NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS event_images (
+        event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+        path TEXT NOT NULL, digest TEXT NOT NULL, mime_type TEXT NOT NULL, source TEXT NOT NULL,
+        captured_at REAL NOT NULL, content BLOB NOT NULL, PRIMARY KEY (event_id,path))""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS event_texts (
+        event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+        path TEXT NOT NULL, excerpt TEXT NOT NULL, truncated INTEGER NOT NULL, PRIMARY KEY(event_id,path))""")
+    # Some older standalone journal connections do not enable SQLite foreign keys.
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS delete_event_evidence AFTER DELETE ON events BEGIN
+        DELETE FROM event_execution WHERE event_id=OLD.id;
+        DELETE FROM event_images WHERE event_id=OLD.id;
+        DELETE FROM event_texts WHERE event_id=OLD.id;
+        END""")
+
+
+def _bounded_size(width, height):
+    return width > 0 and height > 0 and width * height <= 24_000_000
+
+
+def image_type(data):
+    # Only inert raster formats with plausible dimensions and a complete container.
+    if data.startswith(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR") and data.endswith(b"\x00\x00\x00\x00IEND\xaeB`\x82"):
+        width, height = int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+        if not _bounded_size(width, height):
+            return None
+        pos, has_pixels = 8, False
+        while pos + 12 <= len(data):
+            length = int.from_bytes(data[pos:pos+4], "big")
+            end = pos + 8 + length
+            if end + 4 > len(data) or zlib.crc32(data[pos+4:end]) != int.from_bytes(data[end:end+4], "big"):
+                return None
+            chunk = data[pos+4:pos+8]
+            if chunk == b"IEND":
+                return "image/png" if has_pixels and length == 0 and end+4 == len(data) else None
+            has_pixels |= chunk == b"IDAT"
+            pos = end + 4
+    if len(data) >= 14 and data.startswith((b"GIF87a", b"GIF89a")) and data.endswith(b";"):
+        if _bounded_size(int.from_bytes(data[6:8], "little"), int.from_bytes(data[8:10], "little")):
+            return "image/gif"
+    if len(data) >= 26 and data[:4] == b"RIFF" and data[8:12] == b"WEBP" and int.from_bytes(data[4:8], "little")+8 == len(data):
+        kind = data[12:16]
+        if kind == b"VP8X" and len(data) >= 30:
+            width = 1 + int.from_bytes(data[24:27], "little")
+            height = 1 + int.from_bytes(data[27:30], "little")
+        elif kind == b"VP8L" and data[20] == 0x2f:
+            bits = int.from_bytes(data[21:25], "little")
+            width, height = 1+(bits & 0x3fff), 1+((bits >> 14) & 0x3fff)
+        elif kind == b"VP8 " and len(data) >= 30 and data[23:26] == b"\x9d\x01\x2a":
+            width, height = int.from_bytes(data[26:28], "little") & 0x3fff, int.from_bytes(data[28:30], "little") & 0x3fff
+        else:
+            return None
+        if _bounded_size(width, height):
+            return "image/webp"
+    if data.startswith(b"\xff\xd8\xff") and data.endswith(b"\xff\xd9"):
+        pos = 2
+        while pos + 9 < len(data) and data[pos] == 255:
+            marker = data[pos + 1]
+            if marker == 255:
+                pos += 1
+                continue
+            length = int.from_bytes(data[pos+2:pos+4], "big")
+            if length < 2 or pos + 2 + length > len(data) or marker == 0xda:
+                break
+            if marker in (0xc0, 0xc1, 0xc2) and length >= 8:
+                height, width = int.from_bytes(data[pos+5:pos+7], "big"), int.from_bytes(data[pos+7:pos+9], "big")
+                return "image/jpeg" if _bounded_size(width, height) else None
+            pos += 2 + length
+    return None
+
+
+def store(conn, event_id, step, shared_paths, stamp):
+    if step.get("category") in ("shell", "file_read"):
+        inp, _ = evidence_text(step.get("command_input"), 1024)
+        out, cut = evidence_text(step.get("command_output"), 4096)
+        code = step.get("exit_code")
+        if type(code) is not int or not -(2**31) <= code < 2**31:
+            code = None
+        if inp is not None or out is not None or code is not None:
+            conn.execute("INSERT INTO event_execution VALUES(?,?,?,?,?)",
+                         (event_id, inp, out, code, cut or step.get("output_truncated") is True))
+    for field, preview, display in shared_paths:
+        if field == "text_previews":
+            if preview.get("source") == "tool_result":
+                excerpt, clipped = evidence_text(preview.get("text"), 4096)
+                if excerpt is not None:
+                    conn.execute("INSERT OR IGNORE INTO event_texts VALUES(?,?,?,?)",
+                                 (event_id, display, excerpt, clipped or preview.get("truncated") is True))
+            continue
+        encoded = preview.get("data_base64")
+        if not isinstance(encoded, str) or not 0 < len(encoded) <= 4 * ((MAX_IMAGE_BYTES+2)//3):
+            continue
+        if preview.get("source") not in ("tool_result", "workspace_snapshot"):
+            continue
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            continue
+        mime = image_type(data)
+        if len(data) > MAX_IMAGE_BYTES or not mime or mime != preview.get("mime_type"):
+            continue
+        captured = preview.get("captured_at", stamp)
+        if type(captured) not in (float, int) or not math.isfinite(captured):
+            continue
+        conn.execute("INSERT OR IGNORE INTO event_images VALUES(?,?,?,?,?,?,?)",
+                     (event_id, display, hashlib.sha256(data).hexdigest(), mime, preview["source"], captured, data))
+
+
+def detail(db, org, event_id):
+    event = db.query_one("SELECT metadata_json,event_type FROM events WHERE id=?", (event_id,))
+    if event is None:
+        return None
+    work = work_summary(event["metadata_json"]) if event["event_type"] == "observed_step" else {}
+    execution = db.query_one("SELECT command_input,command_output,exit_code,output_truncated "
+                             "FROM event_execution WHERE event_id=?", (event_id,)) or {}
+    images = db.query_all("SELECT path,digest AS sha256,mime_type,source,captured_at,length(content) AS size_bytes "
+                          "FROM event_images WHERE event_id=? ORDER BY path", (event_id,))
+    texts = db.query_all("SELECT path,excerpt AS text,truncated,'tool_result' AS source FROM event_texts "
+                         "WHERE event_id=? ORDER BY path", (event_id,))
+    for snippet in texts:
+        snippet["truncated"] = bool(snippet["truncated"])
+    for image in images:
+        image["url"] = f"/api/v1/events/{event_id}/images/{image['sha256']}?organization_id={org}"
+    return {"organization": org, "event_id": event_id, "files": work.get("files", []),
+            "workspace": work.get("workspace"), "session": work.get("session"), "program": work.get("program"),
+            "command_input": execution.get("command_input"), "command_output": execution.get("command_output"),
+            "exit_code": execution.get("exit_code"), "output_truncated": bool(execution.get("output_truncated")),
+            "images": images, "text_previews": texts}
+
+
+def image(db, event_id, digest):
+    return db.query_one("SELECT mime_type,content FROM event_images WHERE event_id=? AND digest=? LIMIT 1",
+                        (event_id, digest))

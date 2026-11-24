@@ -15,6 +15,9 @@ import re
 import time
 from typing import Any
 
+from event_evidence import work_summary
+from step_journal import command_form
+
 FEED_VERSION = "1"
 GRACE = 2.0
 DEFAULT_LIMIT = 500
@@ -42,11 +45,24 @@ def _sev(value: Any) -> str:
 
 
 def _event(r: dict[str, Any]) -> dict[str, Any]:
+    raw = r.get("metadata_json")
+    if r["event_type"] == "observed_step":
+        try:
+            metadata = json.loads(raw or "{}")
+        except (ValueError, TypeError):
+            metadata = {}
+        details = work_summary(metadata)
+        if isinstance(metadata, dict):
+            command = command_form(details.get("program"), metadata.get("command"))
+            if command:
+                details["command"] = command
+    else:
+        details = _json(raw)
     return {"key": f"event:{r['id']}", "kind": "event", "id": r["id"], "ts": r["created_at"],
             "created_at": r["created_at"], "updated_at": r["created_at"], "severity": _sev(r["severity"]),
             "state": "RECORDED", "host_id": r["host_id"], "harness": r["harness"], "agent": r["agent_name"],
             "source": r["event_type"], "title": r["message"], "summary": "", "acked_by": None, "acked_at": None,
-            "details": _json(r.get("metadata_json"))}
+            "details": details}
 
 
 def _alert(r: dict[str, Any]) -> dict[str, Any]:

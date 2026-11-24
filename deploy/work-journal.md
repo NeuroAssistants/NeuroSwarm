@@ -60,3 +60,17 @@ FROM capture_metrics ORDER BY ts DESC LIMIT 20;
 Limits: OpenCode reads the latest 400 assistant messages / 2 000 tool parts of a changed session per scan; up to
 200 sessions per runtime are considered per scan. Unchanged logs are not re-read. An OpenCode message over 32 MB is
 read as empty, without a gap event.
+
+### Command output and image previews
+
+Set the choices below in the environment of the **collector on the machine running the coding agent**, then restart that collector. Settings take effect on newly observed steps.
+
+| Setting | Captured when set to `1` |
+| --- | --- |
+| `SWARMCONTROL_SHARE_COMMANDS` | Redacted command input, up to 1,024 characters in event detail. The list keeps its short operation name. |
+| `SWARMCONTROL_SHARE_COMMAND_OUTPUT` | Up to 4,096 characters of redacted output when the tool records a result. The detail shows when a longer excerpt was clipped. |
+| `SWARMCONTROL_SHARE_FILE_PREVIEWS` | A PNG, JPEG, GIF or WebP up to 160 KiB, or a redacted text excerpt up to 4,096 characters from a recorded file read in a shared folder. |
+
+All three settings default to off. File names and recorded exit codes can still appear. Enable detailed capture only in folders whose contents may be shared with the members and read tokens of that organization. Redaction covers common secret formats. Ordinary text and image content can contain private information.
+
+An image marked **Tool result** is the recorded image. A **Workspace snapshot** comes from a file read on the source machine during collection and carries its own timestamp. If neither is available, the event has a path and no image. Source snapshots require a system with directory-relative, no-follow file opens. Command output depends on the format of the source log. For example, a Codex completed command can include both its output and exit code. A Claude result is linked only when its tool ID can be matched to the call in the scan.

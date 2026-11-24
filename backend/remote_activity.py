@@ -185,7 +185,7 @@ def _clean_path_list(items: Any, limit: int = MAX_ACTIVITY_FILES) -> list[str]:
     return out
 
 
-def _clean_step(raw: Any) -> dict[str, Any]:
+def _clean_step(raw: Any, *, capture=False) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
     step: dict[str, Any] = {
@@ -197,6 +197,12 @@ def _clean_step(raw: Any) -> dict[str, Any]:
         step["time"] = _redact_str(raw.get("time"), 40)
     if raw.get("status"):
         step["status"] = _redact_str(raw.get("status"), 24)
+    if capture and isinstance(raw.get("cwd"), str):
+        step["cwd"] = _redact_str(raw["cwd"], 320)
+    if capture:
+        for field in ("command_input", "command_output", "exit_code", "output_truncated", "image_previews", "text_previews"):
+            if field in raw:
+                step[field] = raw[field]
     files = _clean_path_list(raw.get("files"), 12)
     if files:
         step["files"] = files
@@ -264,7 +270,7 @@ def _clean_session(raw: Any, host_id: str) -> dict[str, Any]:
     cap_raw = raw.get("capture_steps")
     capture_steps = None
     if isinstance(cap_raw, list):
-        capture_steps = [s for s in (_clean_step(x) for x in cap_raw[:MAX_CAPTURE_STEPS_PER_SESSION]) if s]
+        capture_steps = [s for s in (_clean_step(x, capture=True) for x in cap_raw[:MAX_CAPTURE_STEPS_PER_SESSION]) if s]
 
     plan_raw = raw.get("plan") if isinstance(raw.get("plan"), list) else (raw.get("plan_items") or [])
     plan = [p for p in (_clean_plan_item(x) for x in plan_raw[:MAX_ACTIVITY_PLAN_ITEMS]) if p and p.get("text")]
