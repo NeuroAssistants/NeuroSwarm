@@ -205,6 +205,10 @@
    Index tabs and a ruler instead of pills; drawn step glyphs instead of coloured dots; frames registered by a top rule
    and a copper corner instead of a coloured left edge; orthogonal runs in the graph. Motion only on transform/opacity. */
 #activity-map { --ap-ease: cubic-bezier(.22, 1, .36, 1); --ap-cap: 600 .68rem/1.3 var(--sc-mono); }
+/* Category colours: the product's existing step palette (the stroke weights already used for timeline bursts).
+   Brand colours stay for brand roles; copper only marks selection and registration. */
+:root { --cat-edit: var(--sc-action); --cat-shell: var(--sc-ink); --cat-read: #5E9C7E; --cat-think: #A8955F; --cat-plan: #C9871C;
+  --cat-web: #4C7FA8; --cat-coord: #8A6FB0; --cat-visual: #C2667A; --cat-other: var(--sc-control); }
 
 /* index tabs with a sliding copper rule */
 #activity-map .ap-tabs { padding: 0; gap: 0; border: 0; border-bottom: 1px solid var(--rule, var(--sc-line)); border-radius: 0; background: none; }
@@ -247,19 +251,17 @@
 /* step glyphs */
 .ap-glyph { display: inline-block; flex: none; width: 12px; height: 12px; margin-right: 6px; vertical-align: -1px; fill: none; stroke: currentColor;
   stroke-width: 1.5; stroke-linecap: square; stroke-linejoin: miter; background: none !important; }
-.ap-glyph.c-file_edit { color: var(--sc-action); } .ap-glyph.c-shell { color: var(--carbon, var(--sc-ink)); } .ap-glyph.c-file_read { color: #4F8A6B; }
-.ap-glyph.c-plan { color: var(--copper, #a84423); } .ap-glyph.c-think { color: #6E8175; } .ap-glyph.c-web { color: #2F6A8A; }
-.ap-glyph.c-coordination { color: #7A5C2E; } .ap-glyph.c-visual { color: #8A4E6B; } .ap-glyph.c-other { color: var(--sc-control); }
+.c-file_edit { --cat: var(--cat-edit); } .c-shell { --cat: var(--cat-shell); } .c-file_read { --cat: var(--cat-read); } .c-think { --cat: var(--cat-think); }
+.c-plan { --cat: var(--cat-plan); } .c-web { --cat: var(--cat-web); } .c-coordination { --cat: var(--cat-coord); } .c-visual { --cat: var(--cat-visual); }
+.c-other { --cat: var(--cat-other); }
+.ap-glyph { color: var(--cat, var(--cat-other)); }
 .am-legend .ap-glyph { margin-right: 5px; }
 
 /* timeline: glyph tiles on hairline lanes */
 #activity-map .ap-dot { cursor: pointer; transform-box: fill-box; }
 #activity-map .ap-dot .ap-plate { fill: var(--stock, var(--sc-paper)); stroke: currentColor; stroke-width: 1.2; transition: fill 160ms var(--ap-ease); }
 #activity-map .ap-dot .ap-mark { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: square; pointer-events: none; }
-#activity-map .ap-dot.c-file_edit { color: var(--sc-action); } #activity-map .ap-dot.c-shell { color: var(--carbon, var(--sc-ink)); }
-#activity-map .ap-dot.c-file_read { color: #4F8A6B; } #activity-map .ap-dot.c-plan { color: var(--copper, #a84423); }
-#activity-map .ap-dot.c-web { color: #2F6A8A; } #activity-map .ap-dot.c-coordination { color: #7A5C2E; } #activity-map .ap-dot.c-visual { color: #8A4E6B; }
-#activity-map .ap-dot.c-think, #activity-map .ap-dot.c-other { color: #6E8175; }
+#activity-map .ap-dot { color: var(--cat, var(--cat-other)); }
 #activity-map .ap-dot:hover .ap-plate, #activity-map .ap-dot:focus-visible .ap-plate { fill: currentColor; }
 #activity-map .ap-dot:hover .ap-mark, #activity-map .ap-dot:focus-visible .ap-mark { stroke: var(--stock, var(--sc-paper)); }
 #activity-map .ap-dot.is-error .ap-plate { fill: var(--sc-critical-bg); stroke: var(--sc-critical-fg); }
