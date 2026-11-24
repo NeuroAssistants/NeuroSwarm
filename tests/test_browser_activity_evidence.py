@@ -1,8 +1,8 @@
 """Activity map step detail in a real headless Chromium: the command, its output and the image the agent saw.
 
-An observer sends one session (synthetic data, loopback only) with three steps: a command with its output and exit
-code, an image read with the recorded bytes, and an edit with no shared detail. Opening each step from the map must
-show exactly that evidence, with no browser error, and a second organization must not see it.
+An observer sends synthetic file actions and two commands at the same time. Each step
+must show its own result. A legacy step without a source position can open the session
+history, and a second organization must not see any of the recorded evidence.
 
 Needs a Chromium binary (see tests/BROWSER-TESTS.md); SWARMCONTROL_BROWSER_TESTS=skip opts out explicitly.
 """
@@ -77,11 +77,16 @@ class ActivityEvidenceBrowserTests(unittest.TestCase):
             {"tool": "apply_patch", "category": "file_edit", "label": "Edit totals.py", "status": "completed",
              "time": _iso(now - 30), "files": ["src/totals.py"]},
         ]
+        steps.append({**steps[1], "label": "Run parallel suite", "command_output": "Parallel suite passed", "exit_code": 0})
+        for n, step in enumerate(steps):
+            step["src"] = f"record:240:{n}"
+        legacy = {k: v for k, v in steps[1].items() if k not in ("src", "command_input", "command_output", "exit_code")}
+        legacy["label"] = "Older command"
         payload = {"host_id": "evidence-box", "hostname": "evidence-box", "activity_enabled": True, "activity_roots": ["/work/demo"],
                    "collected_at": now,
                    "sessions": [{"session_id": SESSION, "harness": "codex", "harness_name": "Codex CLI", "agent_name": "demo-agent",
                                  "workspace": "/work/demo", "status": "active", "updated_at": now, "what_done": "Fixed the totals",
-                                 "steps": steps, "capture_steps": steps}]}
+                                 "steps": [*steps, legacy], "capture_steps": steps}]}
         st, _, body = admin.json("POST", "/api/v1/ingest/activity", payload, headers={"Authorization": f"Bearer {tok['token']}"})
         assert st in (200, 201), (st, body)
         other = HttpClient(cls.srv.base_url)
@@ -139,6 +144,21 @@ class ActivityEvidenceBrowserTests(unittest.TestCase):
                 href = pg.eval("document.querySelector('dialog.am-detail[open] [data-evidence] a.link-hop-btn').getAttribute('href')")
                 self.assertTrue(href.startswith("/live?") and "event=event%3A" in href, href)
                 self.shot(pg, f"{view}-step-command")
+                self.close_dialog(pg)
+
+                text = self.open_step(pg, "Run parallel suite")
+                self.assertIn("Parallel suite passed", text)
+                self.assertIn("exit 0", text)
+                self.assertNotIn("FAILED tests/test_totals.py", text)
+                self.close_dialog(pg)
+
+                text = self.open_step(pg, "Older command")
+                self.assertIn("no exact journal link", text)
+                self.assertNotIn("Parallel suite passed", text)
+                self.assertNotIn("FAILED tests/test_totals.py", text)
+                href = pg.eval("document.querySelector('dialog.am-detail[open] [data-evidence] a').getAttribute('href')")
+                self.assertIn("session=", href)
+                self.assertNotIn("event=", href)
                 self.close_dialog(pg)
 
                 text = self.open_step(pg, "Look at the chart")

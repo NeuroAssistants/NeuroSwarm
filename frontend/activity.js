@@ -68,7 +68,7 @@
     </div>`;
   }
   const reduceMotion = () => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-  const stepKey = (s, st) => `${s.session_id}|${st.time}|${st.label}`;
+  const stepKey = (s, st) => JSON.stringify([s.host_id, s.session_id, st.src || [st.time, st.label]]);
 
   const ago = ts => {
     const s = Math.max(0, Date.now() / 1000 - Number(ts || 0));
@@ -221,7 +221,9 @@
     const plan = s.plan.length ? `<ul class="am-plan">${s.plan.map((p, i) => `<li class="${H(p.status)}"><span aria-hidden="true">${icon[p.status] || "○"}</span>${btn(s, d, "plan", i, p.text)}<span class="sr-only"> (${H(String(p.status).replace("_", " "))})</span></li>`).join("")}</ul>`
       : '<p class="muted small">No checklist recorded in this session.</p>';
     const steps = s.steps.length ? `<ol class="am-steps">${s.steps.map((st, i) => `<li><i class="c-${H(st.category)}" aria-hidden="true"></i><span class="sr-only">${H(CAT_LABEL[st.category])}: </span><time>${H(clock(st.time))}</time>${btn(s, d, "step", i, st.label)}${st.status === "error" ? ' <span class="ap-evidence bad">Failed</span>' : ""}</li>`).join("")}</ol>` : "";
-    const wi = s.latest_work ? s.steps.findIndex(st => st.label === s.latest_work.label && st.time === s.latest_work.time) : -1;
+    const latestKey = s.latest_work && stepKey(s, s.latest_work);
+    const matches = latestKey ? s.steps.filter(st => stepKey(s, st) === latestKey) : [];
+    const wi = matches.length === 1 ? s.steps.indexOf(matches[0]) : -1;
     const quick = s.latest_work ? (wi >= 0 ? btn(s, d, "step", wi, s.latest_work.label) : `<span>${H(s.latest_work.label)}</span>`) : "";
     const id = s.session_id;
     const isHl = Boolean(state.highlightSession && state.highlightSession === id);
@@ -258,12 +260,9 @@
   });
   dialog.addEventListener("close", () => { state.opener?.focus?.(); state.opener = null; });
 
-  /* ---------- recorded detail of one step: command, output, files and images ----------
-     The map lists the latest steps of a session. The journal keeps every step as an event, with the detail the collector
-     was allowed to share. When a step is opened, it is matched to its event (same session, same action, ±2 s; a shared
-     file name breaks ties) and its evidence is fetched. Nothing heavy is downloaded until an operator opens a step. */
+  // The map carries the exact journal event ID and organization for each recorded step.
+  // Fetch its larger payload only when the operator opens the step.
   let evidenceSeq = 0;
-  const MATCH_SEC = 2;
   const SOURCE_LABEL = { tool_result: "What the tool returned to the agent", workspace_snapshot: "Copy of the file read on the agent's machine" };
   const SETTINGS_HELP = `Command text, output and file previews appear only when the observer on that machine enables them
     (<code>SWARMCONTROL_SHARE_COMMANDS</code>, <code>SWARMCONTROL_SHARE_COMMAND_OUTPUT</code>, <code>SWARMCONTROL_SHARE_FILE_PREVIEWS</code>). All are off by default.`;
@@ -271,27 +270,6 @@
     const r = await fetch(url, { credentials: "same-origin", headers: { Accept: "application/json" } });
     if (!r.ok) throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status });
     return r.json();
-  }
-  async function findStepEvent(s, st) {
-    const t = Date.parse(st.time) / 1000;
-    if (!s.session_id || !s.host_id || !s.agent_name || !s.harness || !Number.isFinite(t)) return null;
-    const qs = new URLSearchParams({ session: s.session_id, host: s.host_id, agent: s.agent_name, runtime: s.harness,
-      before: `${t + MATCH_SEC}|Event|9223372036854775807` });
-    const page = await getJSON(`/api/v1/live-records?${qs}`);
-    const base = f => String(f || "").split(/[\\/]/).pop();
-    const names = new Set((st.files || []).map(base).filter(Boolean));
-    let best = null, bestScore = Infinity;
-    for (const r of page.records || []) {
-      const ts = Number(r.ts);
-      if (ts < t - MATCH_SEC) break;                       // newest first: everything after this is older
-      if (r.kind !== "Event" || r.source !== "observed_step") continue;
-      const w = r.work || {};
-      if (cat(w.action) !== st.category) continue;
-      const fileHit = names.size > 0 && (w.files || []).some(f => names.has(base(f)));
-      const score = Math.abs(ts - t) - (fileHit ? MATCH_SEC : 0);
-      if (score < bestScore) { best = r; bestScore = score; }
-    }
-    return best ? { id: Number(best.id), organization: page.organization } : null;
   }
   const kb = n => n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`;
   function evidenceHtml(ev, liveHref, hadStepFiles, d) {
@@ -310,7 +288,8 @@
     }
     const images = (ev.images || []).filter(im => typeof im.url === "string" && im.url.startsWith("/api/v1/events/"));
     if (images.length) {
-      out.push(`<section class="am-shots"><h4>Images the agent saw <span class="muted">${images.length}</span></h4><div class="am-shot-grid">${images.map(im => {
+      const title = images.every(im => im.source === "tool_result") ? "Images the agent saw" : "Images recorded for this step";
+      out.push(`<section class="am-shots"><h4>${title} <span class="muted">${images.length}</span></h4><div class="am-shot-grid">${images.map(im => {
         const when = im.captured_at ? new Date(im.captured_at * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC" : "";
         return `<figure class="am-shot"><a href="${H(im.url)}" target="_blank" rel="noopener" title="Open full size">
           <img src="${H(im.url)}" alt="${H(im.path)}" loading="lazy" decoding="async"></a>
@@ -335,15 +314,19 @@
     // A newer request or a re-rendered dialog (the slot left the page) makes this answer stale.
     const settle = html => { if (seq === evidenceSeq && slot.isConnected) { slot.innerHTML = html; slot.removeAttribute("aria-busy"); } };
     try {
-      const hit = await findStepEvent(s, st);
-      if (seq !== evidenceSeq) return;
-      if (!hit) {
-        settle(`<p class="muted small">No journal entry matches this step yet. The journal stores the agents and folders the operator selected; a step from the last few seconds can take one scan to appear.</p>`);
+      const id = st.event_id, org = st.event_org;
+      if (!Number.isSafeInteger(id) || id <= 0 || !Number.isSafeInteger(org) || org <= 0) {
+        settle(`<p class="muted small">This step has no exact journal link yet. You can still browse the recorded events for this session.</p>
+          <a class="link-hop-btn" href="${H(liveHrefForSession(s))}">View session history ↗</a>`);
         return;
       }
-      const qs = hit.organization != null ? `?${new URLSearchParams({ organization_id: hit.organization })}` : "";
-      const ev = await getJSON(`/api/v1/events/${hit.id}/evidence${qs}`);
-      const liveHref = `${liveHrefForSession(s, firstFile)}&event=${encodeURIComponent(`event:${hit.id}`)}`;
+      const ev = await getJSON(`/api/v1/events/${id}/evidence?organization_id=${org}`);
+      if (seq !== evidenceSeq || !slot.isConnected) return;
+      if (ev.organization !== org || ev.event_id !== id || ev.session !== s.session_id) {
+        settle('<p class="muted small">The event no longer matches this step. Reopen the step to refresh it.</p>');
+        return;
+      }
+      const liveHref = `${liveHrefForSession(s, firstFile)}&event=${encodeURIComponent(`event:${id}`)}&organization=${org}`;
       settle(evidenceHtml(ev, liveHref, hadStepFiles, d));
     } catch (err) {
       settle(err.status === 409 ? '<p class="muted small">The organization changed. Close this window and open the step again.</p>'
