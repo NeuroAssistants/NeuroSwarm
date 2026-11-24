@@ -172,6 +172,23 @@ class LiveUxAndEvidenceBrowserTests(unittest.TestCase):
                 ".find(r => r.dataset.key.startsWith('event:') && r.textContent.includes('pytest')) || {}).dataset?.key || ''"
             )
             self.assertTrue(cmd_key, "Expected persisted shell command event row in /live table")
+            p.click(f"#rows tr[data-key={json.dumps(cmd_key)}]")
+            p.click("[data-dtab='files']")
+            p.wait("document.querySelector('#detail').textContent.includes('No file path was recorded for this event.')", 10)
+            self.assertEqual(p.eval("document.querySelector('#files-count').textContent"), "0")
+            related = "#detail [data-jump]"
+            image_button = p.eval(f"[...document.querySelectorAll('{related}')].find(b => b.textContent.includes('ui/tile.png')).dataset.jump")
+            p.click(f'#detail [data-jump="{image_button}"]')
+            p.wait("document.querySelector('#detail img.ev-image-thumb')?.naturalWidth > 0", 10)
+            self.assertEqual(p.eval("document.querySelector('#files-count').textContent"), "1")
+            self.assertIn("ui/tile.png", p.eval("document.querySelector('#detail-evidence-slot').textContent"))
+
+            edit_button = p.eval(f"[...document.querySelectorAll('{related}')].find(b => b.textContent.includes('src/demo.py')).dataset.jump")
+            p.click(f'#detail [data-jump="{edit_button}"]')
+            p.wait("document.querySelector('#detail-evidence-slot [data-scope-file]')?.textContent.includes('src/demo.py')", 10)
+            self.assertEqual(p.eval("document.querySelector('#files-count').textContent"), "1")
+            self.assertIn("src/demo.py", p.eval("document.querySelector('#detail-evidence-slot').textContent"))
+
             self._dblclick_row(p, f"#rows tr[data-key={json.dumps(cmd_key)}]")
             p.wait("Boolean(document.querySelector('#event-dialog[open]'))", 10)
             p.wait("document.querySelector('#event-dialog-body').textContent.includes('FAILED test_demo.py')", 10)

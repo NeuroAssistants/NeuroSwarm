@@ -1268,6 +1268,12 @@
     return req;
   }
 
+  function eventFilePaths(item, ev) {
+    return [...new Set([...(item.files || []), ...(ev?.files || []),
+      ...(ev?.text_previews || []).map(p => p.path), ...(ev?.images || []).map(p => p.path)]
+      .filter(path => typeof path === "string" && path.trim()))];
+  }
+
   function renderEvidenceHtml(ev, item, opts = {}) {
     const sections = [];
     const cmdIn = (ev && ev.command_input) || item.command || "";
@@ -1275,7 +1281,7 @@
     const hasExit = ev && ev.exit_code !== null && ev.exit_code !== undefined;
     const truncated = Boolean(ev && ev.output_truncated);
 
-    if (cmdIn || cmdOut || hasExit) {
+    if (!opts.filesTab && (cmdIn || cmdOut || hasExit)) {
       const exitBadge = hasExit
         ? `<span class="exit-pill ${Number(ev.exit_code) === 0 ? "ok" : "fail"}">Exit ${esc(ev.exit_code)}</span>`
         : "";
@@ -1351,9 +1357,9 @@
         </section>`);
     }
 
-    const mergedFiles = [...new Set([...(Array.isArray(ev?.files) ? ev.files : []), ...(item.files || [])].map((f) => String(f || "").trim()).filter(Boolean))];
+    const mergedFiles = eventFilePaths(item, ev);
     if (opts.includeFiles && mergedFiles.length) {
-      sections.push(`
+      sections.unshift(`
         <section class="ev-section" aria-label="Files touched or viewed">
           <h3><span>Files Touched &amp; Viewed (${mergedFiles.length})</span><span class="muted">Click to filter stream</span></h3>
           <div class="chips">
@@ -1362,6 +1368,10 @@
         </section>`);
     }
 
+    if (opts.filesTab) {
+      el("files-count").textContent = String(mergedFiles.length);
+      if (!mergedFiles.length) sections.unshift('<p class="muted">No file path was recorded for this event.</p>');
+    }
     if (!sections.length && !opts.compact) {
       return '<p class="muted" style="margin:0;">No captured command output, images, or file previews recorded for this event.</p>';
     }
@@ -1390,7 +1400,7 @@
     } catch (err) {
       if (gen !== state.generation || !slotEl.isConnected || slotEl.dataset.evKey !== expectedKey) return;
       if (!opts.compact) {
-        slotEl.innerHTML = `<p class="ev-error">Could not load detailed evidence (${esc(err.message || "request failed")}).</p>`;
+        slotEl.innerHTML = (opts.filesTab ? renderEvidenceHtml(null, item, opts) : "") + `<p class="ev-error">Could not load detailed evidence (${esc(err.message || "request failed")}).</p>`;
       }
     }
   }
@@ -1524,7 +1534,7 @@
     }
 
     const corrs = findCorrelations(item, pool);
-    const allFilesCount = (item.files || []).length + (item.sessionFiles?.edited?.length || 0) + (item.sessionFiles?.delivered?.length || 0);
+    const allFilesCount = eventFilePaths(item, state.evidenceCache.get(`${state.org?.id}:${getEvidenceEventId(item)}`)).length;
     el("corr-count").textContent = String(corrs.length);
     el("files-count").textContent = String(allFilesCount);
 
@@ -1572,17 +1582,28 @@
         arr && arr.length
           ? `<div class="file-group"><h4>${esc(title)} (${arr.length})</h4><div class="chips">${arr.map((f) => `<button type="button" class="chip-btn ${cls}" data-scope-file="${esc(f)}" title="Filter by ${esc(f)}">${esc(shortPath(f))}</button>`).join("")}</div></div>`
           : "";
-      const body =
-        (item.workspace ? `<p style="margin:0 0 8px;"><strong>Workspace:</strong> <code>${esc(item.workspace)}</code>${item.fileBasis ? ` <span class="muted">(${esc(item.fileBasis)})</span>` : ""}</p>` : "") +
-        grp("Directly linked to this step / event", item.files, "edited") +
-        grp("Session edited files", item.sessionFiles?.edited, "edited") +
-        grp("Session delivered files", item.sessionFiles?.delivered, "") +
-        grp("Session read files", item.sessionFiles?.read, "") +
-        (isNumericEventId(item) ? `<div id="detail-evidence-slot" class="detail-evidence-slot" data-ev-key="${esc(item.key)}"></div>` : "");
-      detailEl.innerHTML = body || '<p class="muted">No file paths or workspace folder recorded for this item.</p>';
-      if (isNumericEventId(item)) {
-        hydrateEvidenceSlot(item, el("detail-evidence-slot"), { compact: true, includeFiles: false });
+      const otherFiles = new Map();
+      if (item.sessionId) {
+        for (const record of pool) {
+          if (record.key === item.key || record.sessionId !== item.sessionId ||
+              record.host_id !== item.host_id || record.agent !== item.agent) continue;
+          for (const path of record.files || []) {
+            if (!otherFiles.has(path)) otherFiles.set(path, record);
+          }
+        }
       }
+      const related = [...otherFiles].map(([path, record]) =>
+        `<button type="button" class="chip-btn" data-file-event data-jump="${esc(record.key)}">${esc(path)} · ${esc(record.categoryLabel)}</button>`).join("");
+      detailEl.innerHTML =
+        (item.workspace ? `<p><strong>Workspace:</strong> <code>${esc(item.workspace)}</code></p>` : "") +
+        `<div id="detail-evidence-slot" data-ev-key="${esc(item.key)}"></div>` +
+        (related ? `<div class="file-group"><h4>Files from other events in this session</h4><p>Choose a file to inspect its event.</p><div class="chips">${related}</div></div>` : "") +
+        (item.key.startsWith("event:") ? "" : grp("Session edited files", item.sessionFiles?.edited, "edited") +
+          grp("Session delivered files", item.sessionFiles?.delivered, "") + grp("Session read files", item.sessionFiles?.read, ""));
+      const slot = el("detail-evidence-slot");
+      const opts = { filesTab: true, includeFiles: true };
+      slot.innerHTML = renderEvidenceHtml(null, item, opts);
+      if (isNumericEventId(item)) hydrateEvidenceSlot(item, slot, opts);
       return;
     }
 
@@ -2438,7 +2459,7 @@
     }
     const jump = e.target.closest("[data-jump]");
     if (jump) {
-      state.detailTab = "general";
+      state.detailTab = jump.hasAttribute("data-file-event") ? "files" : "general";
       if (tbody.querySelector(`tr[data-key="${CSS.escape(jump.dataset.jump)}"]`)) {
         selectRowKey(jump.dataset.jump, { scrollIntoView: true });
       } else {
