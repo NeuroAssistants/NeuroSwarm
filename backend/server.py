@@ -34,6 +34,7 @@ from db import Database  # noqa: E402
 import incidents
 import event_evidence
 import edit_verification
+import needs_attention
 from event_feed import MAX_LIMIT as FEED_MAX_LIMIT, FeedError, feed as event_feed
 from identity import Directory, IdentityError, role
 from live_history import history
@@ -73,7 +74,8 @@ def _trusted_proxy_networks() -> list[ipaddress._BaseNetwork]:
 
 
 MONITORING_ROUTES = {"/api/v1/" + path for path in
-                     ("live-records", "event-feed", "activity", "work-board", "links", "digest", "hosts", "alerts", "events", "overview")}
+                     ("live-records", "event-feed", "activity", "work-board", "links", "needs-attention",
+                      "digest", "hosts", "alerts", "events", "overview")}
 EVENT_DETAIL = re.compile(r"/api/v1/events/([0-9]{1,19})/(?:evidence|images/([a-f0-9]{64}))")
 ALERT_DETAIL = re.compile(r"/api/v1/alerts/([0-9]{1,19})")
 ALERT_ACTION = re.compile(r"/api/v1/alerts/([0-9]{1,19})/(ack|owner|resolve)")
@@ -548,6 +550,18 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/v1/digest":
                 self._send_json(self.resources.guardrails.build_executive_digest())
+                return
+            if path == "/api/v1/needs-attention":
+                org = self.resources.org_id
+                if "organization_id" in qs and qs["organization_id"] != [str(org)]:
+                    raise IdentityError(409, "Active organization changed")
+                with self.resources.db.transaction(write=False):
+                    payload = needs_attention.build_needs_attention(
+                        self.resources.db,
+                        org,
+                        stale_host_sec=self.resources.guardrails.stale_host_sec,
+                    )
+                self._send_inventory(payload)
                 return
 
             if path == "/api/v1/hosts":

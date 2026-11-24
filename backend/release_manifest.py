@@ -13,9 +13,11 @@ PAGES = {"/": "index.html", "/live": "live.html"}
 ASSETS = {
     "/app.js": "application/javascript",
     "/activity.js": "application/javascript",
+    "/needs-attention.js": "application/javascript",
     "/live.js": "application/javascript",
     "/styles.css": "text/css",
     "/activity-product.css": "text/css",
+    "/needs-attention.css": "text/css",
     "/live.css": "text/css",
 }
 ASSET_REF = re.compile(
