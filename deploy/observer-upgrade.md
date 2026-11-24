@@ -39,7 +39,7 @@ Verify permissions and existing config are readable before upgrading (do not mod
 ## 3. Reversible Upgrade (`v0.1.0` / `v0.2.0` → `v0.3.0`)
 
 Both `install.sh --upgrade` and `install.ps1` with `$env:SWARMCONTROL_UPGRADE="1"` perform the same safe sequence:
-1. Read `SWARMCONTROL_SERVER`, `SWARMCONTROL_TOKEN`, `SWARMCONTROL_INTERVAL`, `SWARMCONTROL_HOST_ID`, `SWARMCONTROL_ACTIVITY_ROOTS`, `SWARMCONTROL_AGENT_LABELS`, `SWARMCONTROL_SHARE_COMMANDS`, and `SWARMCONTROL_STATE_DIR` directly from existing `$INSTALL_DIR/agent.env` (preserving secrets and custom settings unless explicit CLI/env overrides are passed).
+1. Read `SWARMCONTROL_SERVER`, `SWARMCONTROL_TOKEN`, `SWARMCONTROL_INTERVAL`, `SWARMCONTROL_HOST_ID`, `SWARMCONTROL_ACTIVITY_ROOTS`, `SWARMCONTROL_AGENT_LABELS`, `SWARMCONTROL_SHARE_COMMANDS`, `SWARMCONTROL_SHARE_COMMAND_OUTPUT`, `SWARMCONTROL_SHARE_FILE_PREVIEWS`, and `SWARMCONTROL_STATE_DIR` directly from existing `$INSTALL_DIR/agent.env` (preserving secrets and custom settings unless explicit CLI/env overrides are passed, e.g. `--share-command-output` or `--share-file-previews`).
 2. Download or copy all 4 required components (`detector.py`, `activity_shipper.py`, `activity_core.py`, `swarmcontrol_agent.py`) into a temporary staging directory first. Missing any component exits with status `4` without altering `$INSTALL_DIR`.
 3. Create a unique timestamped backup directory `${INSTALL_DIR}.bak.<UTC_TS>.<rand>` (mode `0700`) containing prior `.py` files and `agent.env`.
 4. Atomically swap the 4 staged `.py` files into `$INSTALL_DIR` while leaving `agent.env` (`0600`) and `$SWARMCONTROL_STATE_DIR/capture_offsets.json` intact.
@@ -97,6 +97,7 @@ bash ./install.sh --upgrade --from-repo "$PWD" --install-dir "$INSTALL_DIR" --no
    - `"agent_version": "0.3.0"`
    - `"activity_core_loaded": true`
    - `"capture_reader": "core"`
+   - `"share_commands"`, `"share_command_output"`, `"share_file_previews"` booleans match `agent.env`
    - `"dry_scan_error"` is absent
    - `"offsets_count"` preserves prior tracked logs when upgrading from `v0.2.0`
 2. **Console checks:**
