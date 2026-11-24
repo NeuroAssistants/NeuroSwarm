@@ -102,7 +102,7 @@ class ReleaseManifestHTTPS(unittest.TestCase):
         cmd = self.verify()
         self.assertEqual(cmd.returncode, 0, cmd.stderr + cmd.stdout)
         self.assertIn("PASS Published manifest", cmd.stdout)
-        self.assertEqual(cmd.stdout.count("PASS Published bytes "), 10)
+        self.assertEqual(cmd.stdout.count("PASS Published bytes "), 12)
         self.assertIn("PASS Anonymous monitoring API denied", cmd.stdout)
 
     def test_matching_manifest_and_stale_cached_asset_fails(self):
@@ -145,7 +145,7 @@ class ReleaseManifestHTTPS(unittest.TestCase):
             cmd = self.verify(other)
         self.assertEqual(cmd.returncode, 1, cmd.stderr + cmd.stdout)
         self.assertIn("FAIL Published manifest", cmd.stdout)
-        self.assertEqual(cmd.stdout.count("PASS Published bytes "), 10)
+        self.assertEqual(cmd.stdout.count("PASS Published bytes "), 12)
 
 
 if __name__ == "__main__":

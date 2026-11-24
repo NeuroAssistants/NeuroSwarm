@@ -311,8 +311,10 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
             token = self._bearer()
             if token["scope"] == "ingest":
                 raise IdentityError(401, "A reader credential is required")
-            if token["scope"] == "read" and self.command in {"GET", "HEAD"} and (path in MONITORING_ROUTES or ALERT_DETAIL.fullmatch(path) or EVENT_DETAIL.fullmatch(path)
-                                                                         or LINE_SURVIVAL.fullmatch(path)):
+            if token["scope"] == "read" and self.command in {"GET", "HEAD"} and (
+                path in MONITORING_ROUTES or ALERT_DETAIL.fullmatch(path) or EVENT_DETAIL.fullmatch(path)
+                or LINE_SURVIVAL.fullmatch(path) or REPRO_CASE_DETAIL.fullmatch(path) or REPRO_CASE_EXPORT.fullmatch(path)
+            ):
                 return {"org_id": self.resources.org_id, "role": "viewer", "username": "read token"}
             raise IdentityError(403, "Token does not grant access to this route")
         user = self._get_session_user()
