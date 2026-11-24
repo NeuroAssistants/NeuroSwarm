@@ -790,6 +790,17 @@ class NeedsAttentionBrowserTests(unittest.TestCase):
             p.wait("document.getElementById('na-resolved-fold').open === true", 5)
             self.assertIn("Permission granted", p.eval("document.getElementById('na-resolved-list').textContent"))
 
+            # Verify Expand all / Compact view toggle works without overflow
+            compact_h = p.eval("Math.round(document.getElementById('needs-attention-body').getBoundingClientRect().height)")
+            self.assertLessEqual(compact_h, 210)
+            p.click("[data-na-toggle='expand']")
+            p.wait("document.getElementById('needs-attention-body').classList.contains('is-expanded')", 5)
+            expanded_h = p.eval("Math.round(document.getElementById('needs-attention-body').getBoundingClientRect().height)")
+            self.assertGreater(expanded_h, compact_h)
+            self.assertLessEqual(p.eval("document.documentElement.scrollWidth"), 1441)
+            p.click("[data-na-toggle='expand']")
+            p.wait("!document.getElementById('needs-attention-body').classList.contains('is-expanded')", 5)
+
             # Verify category filter works
             p.click("[data-na-filter='failed_test']")
             p.wait("document.querySelectorAll('#na-items-list .na-item').length === 1", 5)
@@ -878,6 +889,84 @@ class NeedsAttentionBrowserTests(unittest.TestCase):
             self.assertEqual([e for e in pb.errors if "/api/v1/auth/me" not in e], [])
         finally:
             b.close()
+
+    def test_needs_attention_layout_shift_stays_under_50px_with_4_and_20_items(self):
+        """Needs attention must reserve its height before data loads so #activity does not jump."""
+        for count in (4, 20):
+            with self.subTest(items=count), tempfile.TemporaryDirectory(prefix=f"ns-na-cls-{count}-") as tmp:
+                srv = SpawnedConsole(Path(tmp))
+                b = bc.Browser(self.chrome)
+                try:
+                    adm = HttpClient(srv.base_url)
+                    st, _, _ = adm.json("POST", "/api/v1/auth/login", {"username": ORG_A[0], "password": ORG_A[1]})
+                    self.assertEqual(st, 200)
+                    st, _, tok = adm.json("POST", "/api/v1/tokens", {"name": "cls-host", "scope": "ingest"})
+                    self.assertEqual(st, 201)
+                    hdr = {"Authorization": f"Bearer {tok['token']}"}
+                    st, _, _ = adm.json("POST", "/api/v1/ingest/heartbeat", _heartbeat("cls-host"), headers=hdr)
+                    self.assertEqual(st, 200)
+                    for idx in range(count):
+                        st, _, _ = adm.json(
+                            "POST",
+                            "/api/v1/ingest/event",
+                            {
+                                "host_id": "cls-host",
+                                "harness": "claude",
+                                "agent_name": "cls-agent",
+                                "event_type": "permission_request",
+                                "severity": "WARNING",
+                                "message": f"Allow migration step {idx}?",
+                                "metadata": {"session": f"claude:cls-{idx}", "waiting_for": "permission"},
+                            },
+                            headers=hdr,
+                        )
+                        self.assertEqual(st, 200)
+
+                    for vw, vh, mob in ((1440, 900, False), (390, 844, True)):
+                        pg = b.new_page(vw, vh, mob)
+                        pg.goto(srv.base_url + "/")
+                        pg.settled("#login-form button[type=submit]", 15)
+                        pg.type("#username", ORG_A[0])
+                        pg.type("#password", ORG_A[1])
+                        pg.click("#login-form button[type=submit]")
+                        # Measure section height and exact #needs-attention -> #activity offset across load.
+                        samples = []
+                        t0 = time.monotonic()
+                        while time.monotonic() - t0 < 3.0:
+                            s = pg.eval(
+                                """(() => {
+                                    const app = document.querySelector('#app-view');
+                                    if (!app || app.classList.contains('hidden')) return null;
+                                    const na = document.querySelector('#needs-attention');
+                                    const nb = document.querySelector('#needs-attention-body');
+                                    const act = document.querySelector('#activity');
+                                    const nr = na.getBoundingClientRect();
+                                    const ar = act.getBoundingClientRect();
+                                    return {
+                                        naH: Math.round(nr.height),
+                                        offset: Math.round(ar.top - nr.top),
+                                        loaded: !nb.innerText.includes('Loading'),
+                                        rendered: document.querySelectorAll('#na-items-list .na-item').length,
+                                    };
+                                })()"""
+                            )
+                            if s:
+                                samples.append(s)
+                                if s["loaded"] and s["rendered"] == count and len(samples) >= 3:
+                                    break
+                            time.sleep(0.05)
+                        self.assertTrue(samples and samples[-1]["loaded"], f"Did not finish loading ({count}, {vw}x{vh})")
+                        self.assertEqual(samples[-1]["rendered"], count)
+                        na_shift = max(s["naH"] for s in samples) - min(s["naH"] for s in samples)
+                        offset_shift = max(s["offset"] for s in samples) - min(s["offset"] for s in samples)
+                        self.assertLess(na_shift, 50, f"naH shifted {na_shift}px for {count} items at {vw}x{vh}")
+                        self.assertLess(offset_shift, 50, f"#activity offset shifted {offset_shift}px for {count} items at {vw}x{vh}")
+                        self.assertLessEqual(pg.eval("document.documentElement.scrollWidth"), vw + 1)
+                        self.assertEqual([e for e in pg.errors if "/api/v1/auth/me" not in e], [])
+                        pg.close()
+                finally:
+                    b.close()
+                    srv.stop()
 
 
 if __name__ == "__main__":

@@ -104,6 +104,7 @@ class ActivityEvidenceBrowserTests(unittest.TestCase):
                 what="console after sign-in")
 
     def open_step(self, pg, label):
+        pg.settled("#activity-map .ap-tab[data-view='sessions']", 10)
         pg.click("#activity-map .ap-tab[data-view='sessions']")
         sel = f"[...document.querySelectorAll('#activity-map .am-inspect[data-kind=step]')].find(b => b.textContent.includes({label!r}))"
         pg.wait(f"!!{sel}", what=f"step '{label}' in the session card")

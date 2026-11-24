@@ -1,17 +1,47 @@
 /* Needs attention dashboard section — strictly separated from heartbeat No signal hosts. */
+#needs-attention .card-head {
+  align-items: flex-start;
+}
 .na-head-right {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
+#na-status-pill {
+  white-space: nowrap;
+}
+#needs-attention-body {
+  height: 204px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+#needs-attention-body.is-expanded {
+  height: auto;
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
+}
 .na-summary-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px 14px;
+  gap: 8px 12px;
   flex-wrap: wrap;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
+}
+.na-summary-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.na-expand-btn {
+  padding: 4px 10px;
+  font-size: .76rem;
+  font-weight: 700;
 }
 .na-filters {
   display: flex;
@@ -59,22 +89,31 @@
 
 .na-grid {
   display: grid;
-  gap: 14px;
+  gap: 10px;
+}
+@media (min-width: 980px) {
+  .na-grid {
+    grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
+    align-items: start;
+  }
+  .na-resolved-fold {
+    grid-column: 1 / -1;
+  }
 }
 .na-block {
   border: 1px solid var(--sc-line);
   border-radius: var(--sc-radius);
   background: var(--sc-paper);
-  padding: 12px 14px;
+  padding: 10px 12px;
   min-width: 0;
 }
 .na-block-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 8px 12px;
+  gap: 6px 10px;
   flex-wrap: wrap;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 .na-block-head h3 {
   margin: 0;
