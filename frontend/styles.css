@@ -966,3 +966,87 @@ input:focus, .select:focus { border-color: var(--sc-action); box-shadow: 0 0 0 3
   border-color: var(--sc-action) !important;
   box-shadow: 0 0 0 3px rgba(22, 101, 72, .18) !important;
 }
+
+/* ---------- Dashboard Clarity: Plain-English Leads & Collapsible Secondary Sections ---------- */
+.section-lead {
+  margin: 4px 0 0;
+  font-size: .84rem;
+  line-height: 1.4;
+  color: var(--sc-muted);
+  font-weight: 400;
+}
+.section-fold {
+  display: block;
+}
+.section-fold-summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px 14px;
+  flex-wrap: wrap;
+}
+.section-fold-summary::-webkit-details-marker {
+  display: none;
+}
+.section-fold-summary:focus-visible {
+  outline: 3px solid var(--sc-action);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+.section-fold-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 200px;
+}
+.section-fold-title h2 {
+  margin: 0;
+}
+.section-fold-caret {
+  color: var(--sc-action);
+  font-size: .95rem;
+  line-height: 1.35;
+  flex: 0 0 auto;
+  display: inline-block;
+  transition: transform var(--sc-tr);
+}
+.section-fold[open] > .section-fold-summary .section-fold-caret {
+  transform: rotate(90deg);
+}
+.section-fold-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+}
+.section-fold-cue {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--sc-line);
+  background: var(--sc-paper);
+  color: var(--sc-ink);
+  font-size: .74rem;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+.section-fold[open] > .section-fold-summary .section-fold-cue {
+  background: var(--sc-ok-bg);
+  border-color: var(--sc-action);
+  color: var(--sc-action);
+}
+.section-fold-body {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--sc-line);
+}
+.section-fold-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}

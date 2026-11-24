@@ -79,6 +79,10 @@
             <div class="tree-heading">Workspaces &amp; Folders</div>
             <ul id="workspace-tree" class="tree-list" aria-label="Workspaces"></ul>
           </div>
+          <div class="tree-group">
+            <div class="tree-heading">Files Touched &amp; Viewed</div>
+            <ul id="file-tree" class="tree-list" aria-label="Files touched or viewed"></ul>
+          </div>
         </div>
       </aside>
 
@@ -197,6 +201,7 @@
             </div>
             <div class="status-right">
               <span id="rate-badge" class="rate-chip" title="Events observed in the last 5 minutes">0 / 5m</span>
+              <button type="button" id="show-more-rows" class="btn hidden" title="Show more loaded rows in the table">Show more</button>
               <button type="button" id="load-older" class="btn hidden" title="Load older persisted history">Load older history</button>
               <span id="sync">Connecting…</span>
             </div>
@@ -248,6 +253,20 @@
     </header>
     <p id="incident-feedback" role="status"></p>
     <div id="incident-content"></div>
+  </dialog>
+
+  <dialog id="event-dialog" class="event-dialog" aria-labelledby="event-dialog-title">
+    <header class="event-dialog-head">
+      <div class="event-dialog-title-wrap">
+        <h2 id="event-dialog-title">Event details</h2>
+        <span id="event-dialog-sub" class="muted"></span>
+      </div>
+      <div class="event-dialog-actions">
+        <button type="button" class="btn" id="event-dialog-copy">Copy JSON</button>
+        <button type="button" class="btn" id="event-dialog-close" autofocus>Close</button>
+      </div>
+    </header>
+    <div id="event-dialog-body" class="event-dialog-body"></div>
   </dialog>
 
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
