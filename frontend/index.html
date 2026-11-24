@@ -3,31 +3,46 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#192823">
+  <meta name="theme-color" content="#22231f">
   <title>NeuroSwarm · Coding agent monitor</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%20role%3D%22img%22%3E%3Ctitle%3ENeuroSwarm%3C%2Ftitle%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2210%22%20fill%3D%22%23192823%22%2F%3E%3Cg%20transform%3D%22translate%288%2013%29%22%3E%3Cpolygon%20fill%3D%22%23BDF2C9%22%20points%3D%2216%2C2%2048%2C2%2040%2C10%208%2C10%22%2F%3E%3Cpolygon%20fill%3D%22%23BDF2C9%22%20points%3D%228%2C15%2040%2C15%2032%2C23%200%2C23%22%2F%3E%3Cpolygon%20fill%3D%22%23BDF2C9%22%20points%3D%228%2C28%2032%2C28%2024%2C36%200%2C36%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E" type="image/svg+xml">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%20role%3D%22img%22%3E%3Ctitle%3ENeuroSwarm%3C%2Ftitle%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2210%22%20fill%3D%22%2322231f%22%2F%3E%3Cg%20transform%3D%22translate%288%2013%29%22%3E%3Cpolygon%20fill%3D%22%23f2b79a%22%20points%3D%2216%2C2%2048%2C2%2040%2C10%208%2C10%22%2F%3E%3Cpolygon%20fill%3D%22%23f2b79a%22%20points%3D%228%2C15%2040%2C15%2032%2C23%200%2C23%22%2F%3E%3Cpolygon%20fill%3D%22%23f2b79a%22%20points%3D%228%2C28%2032%2C28%2024%2C36%200%2C36%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/activity-product.css">
   <link rel="stylesheet" href="/needs-attention.css">
   <link rel="stylesheet" href="/repro-cases.css">
+  <link rel="stylesheet" href="/identity.css">
 </head>
 <body>
   <main id="login-view" class="login-shell hidden">
-    <div class="login-story">
-      <div class="story-brand"><svg class="lockup" xmlns="http://www.w3.org/2000/svg" viewBox="-12 -6 295 64" role="img"><rect x="-12" y="-6" width="295" height="64" rx="8" fill="#152925"/><title>NeuroSwarm</title><g transform="translate(2 7)"><polygon fill="#BDF2C9" points="16,2 48,2 40,10 8,10"/><polygon fill="#BDF2C9" points="8,15 40,15 32,23 0,23"/><polygon fill="#BDF2C9" points="8,28 32,28 24,36 0,36"/></g><text x="61" y="38" font-family="Arial,Helvetica,sans-serif" font-size="36" font-weight="bold" letter-spacing="-1.4" fill="#BDF2C9">NeuroSwarm</text></svg></div>
-      <div class="login-photo" aria-hidden="true"></div>
-      <div class="story-copy">
-        <p>See what your coding agents are working on</p>
-        <span>Follow an agent from its task to its latest file edit. See commands, machine health and alerts in the same place.</span>
-        <ul class="story-highlights">
-          <li>Each team controls who can see its work.</li>
-          <li>Choose which folders to share.</li>
-          <li>Follow sessions from Codex, Claude Code, OpenCode and Antigravity.</li>
-        </ul>
+    <header class="folio-nav">
+      <a class="folio-brand" href="#intro"><span class="foil-mark" aria-hidden="true"></span>NeuroSwarm</a>
+      <nav aria-label="Product navigation"><a href="#trace-example">How it works</a><a class="folio-enter" href="#access">Open console <span aria-hidden="true">↗</span></a></nav>
+    </header>
+    <section id="intro" class="folio-hero" aria-labelledby="folio-title">
+      <div class="folio-copy">
+        <p class="folio-label"><i aria-hidden="true"></i> Coding agent observability</p>
+        <h1 id="folio-title">Follow<br>the <em>swarm.</em></h1>
+        <p class="folio-deck">See what your coding agents changed, which tests ran, and where a session needs you.</p>
+        <div class="folio-actions"><a class="folio-cta" href="#self-host">Install NeuroSwarm <span aria-hidden="true">↓</span></a><a class="folio-link" href="#trace-example">Explore a trace</a></div>
       </div>
-    </div>
-
-    <div class="signin-panel">
+      <figure class="folio-art"><img src="/swarm-fold.webp" alt="" fetchpriority="high"><figcaption>Fold study <span aria-hidden="true">/</span> NeuroSwarm</figcaption></figure>
+    </section>
+    <section id="trace-example" class="trace-spread" aria-labelledby="trace-title">
+      <div><p class="folio-label">Example session</p><h2 id="trace-title">From edit<br>to evidence.</h2><p>Open a step to follow one change through a session.</p></div>
+      <div class="trace-sheet">
+        <details open><summary><span>File edit</span><strong>src/rounding.py</strong></summary><p>The agent changed the rounding rule for half-cent amounts.</p></details>
+        <details><summary><span>Test run</span><strong>pytest tests/test_rounding.py</strong></summary><p>The test ran in the same session and on the same working revision as the edit.</p></details>
+        <details><summary><span>Result</span><strong>1 passed</strong></summary><p>The recorded command exited with code 0. An edit without matching evidence stays marked “No verification recorded.”</p></details>
+      </div>
+    </section>
+    <section class="install-spread" id="self-host" aria-labelledby="install-title">
+      <div><p class="folio-label">Self-hosted console</p><h2 id="install-title">Run it on your machine.</h2></div>
+      <div><p>Download the source, extract it, and run this command from the project folder with Docker Compose installed.</p>
+      <pre><code>docker compose up --build -d</code></pre>
+      <div class="folio-actions"><a class="folio-cta" href="https://github.com/NeuroAssistants/NeuroSwarm/archive/refs/heads/main.zip">Download source ↓</a><a class="folio-link" href="https://github.com/NeuroAssistants/NeuroSwarm/blob/main/deploy/self-host.md">Installation guide ↗</a></div></div>
+    </section>
+    <div class="signin-panel" id="access">
+      <div class="access-heading"><p class="folio-label">Workspace access</p><h2>Control room.</h2></div>
       <div class="login-card">
         <div class="auth-tabs" role="tablist" aria-label="Account access mode">
           <button type="button" class="auth-tab active" role="tab" id="tab-signin" aria-selected="true" aria-controls="panel-signin" data-auth-tab="signin">Sign in</button>
@@ -100,7 +115,7 @@
     <header class="topbar">
       <div class="topbar-inner">
         <div class="topbar-left">
-          <svg class="lockup" xmlns="http://www.w3.org/2000/svg" viewBox="-12 -6 295 64" role="img"><rect x="-12" y="-6" width="295" height="64" rx="8" fill="#152925"/><title>NeuroSwarm</title><g transform="translate(2 7)"><polygon fill="#BDF2C9" points="16,2 48,2 40,10 8,10"/><polygon fill="#BDF2C9" points="8,15 40,15 32,23 0,23"/><polygon fill="#BDF2C9" points="8,28 32,28 24,36 0,36"/></g><text x="61" y="38" font-family="Arial,Helvetica,sans-serif" font-size="36" font-weight="bold" letter-spacing="-1.4" fill="#BDF2C9">NeuroSwarm</text></svg>
+          <a class="desk-brand" href="/?view=home" aria-label="NeuroSwarm product home"><span class="foil-mark" aria-hidden="true"></span>NeuroSwarm</a>
           <div class="org-bar-wrap">
             <label for="org-switcher" class="sr-only">Active organization</label>
             <select id="org-switcher" class="org-select hidden" aria-label="Switch active organization"></select>

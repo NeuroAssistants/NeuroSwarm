@@ -75,7 +75,7 @@ class TestFrontendProduct(unittest.TestCase):
         # No external CDN URLs (ignore XML/SVG namespace declarations in inline SVG)
         html_no_xmlns = self.html.replace("http://www.w3.org/2000/svg", "").replace("http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg", "")
         self.assertNotIn("http://", html_no_xmlns)
-        self.assertNotIn("https://", html_no_xmlns)
+        self.assertNotIn("https://", re.sub(r'<a\s+[^>]*href="https://github\.com/NeuroAssistants/NeuroSwarm/[^"]+"', "", html_no_xmlns))
         self.assertNotIn("http://", self.js)
         self.assertNotIn("https://", self.js)
 

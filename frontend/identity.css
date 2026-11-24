@@ -1,0 +1,98 @@
+/* Fold study: folded copper on warm stock, with a registration edge on working panels. */
+:root {
+  --stock: var(--sc-paper);
+  --carbon: var(--sc-ink);
+  --rule: var(--sc-line);
+  --copper: #a84423;
+  --sc-radius: 3px;
+}
+.login-shell { display: block; background: var(--stock); }
+.folio-nav,.folio-hero,.trace-spread,.install-spread,.login-shell .signin-panel { padding-inline: clamp(20px,6vw,116px); }
+.folio-nav { display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--rule); min-height:76px; }
+.folio-brand,.folio-nav nav,.folio-actions,.folio-label { display:flex; gap:18px; align-items:center; }
+.folio-brand,.folio-enter,.folio-nav nav a,.folio-cta,.folio-link { text-decoration:none; color:inherit; font-weight:650; }
+.folio-brand { gap:9px; font-size:1.48rem; letter-spacing:-.065em; }
+.foil-mark { width:27px; height:23px; display:inline-block; background:repeating-linear-gradient(to bottom,var(--sc-action) 0 5px,transparent 5px 9px); transform:skew(-28deg); }
+.folio-nav nav { gap:clamp(12px,3vw,48px); font-size:.88rem; }
+.folio-enter { border:1px solid var(--carbon); padding:8px 14px; }
+.folio-hero { position:relative; isolation:isolate; display:grid; grid-template-columns:1fr 1fr; align-items:center; min-height:clamp(550px,74vh,860px); padding-block:44px; overflow:hidden; }
+.folio-copy { z-index:1; }
+.folio-label,.folio-art figcaption { font:600 .72rem/1.4 var(--sc-mono); letter-spacing:.095em; text-transform:uppercase; }
+.folio-label { margin:0 0 21px; gap:10px; }
+.folio-label i { width:17px;height:2px;background:var(--copper); }
+.folio-hero h1 { margin:0; font-family:Georgia,'Times New Roman',serif; font-size:clamp(76px,8.7vw,164px); font-weight:400; line-height:.86; letter-spacing:-.083em; }
+.folio-hero h1 em {color:var(--sc-action);font-weight:400;}
+.folio-deck { max-width:36ch; margin:26px 0; font-size:clamp(1rem,1.4vw,1.35rem); line-height:1.5; }
+.folio-cta { display:inline-flex; align-items:center; gap:25px; padding:13px 18px; background:var(--carbon); color:var(--stock); border-radius:2px; }
+.folio-actions { flex-wrap:wrap; gap:18px; }
+.folio-link { text-decoration:underline; text-underline-offset:4px; }
+.folio-art { margin:0; text-align:right; }
+.folio-art img { display:block; width:100%; max-height:65vh; object-fit:contain; }
+.folio-art figcaption { margin-top:10px; color:#605f54; font-size:.62rem; }
+.folio-art figcaption span { color:var(--copper); margin:0 5px; }
+.trace-spread,.install-spread,.login-shell .signin-panel { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.1fr); gap:clamp(24px,7vw,120px); align-items:start; padding-block:clamp(40px,6vw,90px); }
+.trace-spread {background:var(--carbon);color:#f6f1e7; }
+.trace-spread h2,.install-spread h2,.access-heading h2 { font:400 clamp(38px,4.2vw,82px)/.96 Georgia,serif;letter-spacing:-.06em; margin:0 0 20px; }
+.trace-spread .folio-label {color:var(--sc-mint);}
+.trace-sheet {border-top:1px solid #85867a;}
+.trace-sheet details {border-bottom:1px solid #76786c;}
+.trace-sheet summary {padding:16px 0; display:grid;grid-template-columns:5.5em minmax(0,1fr) 1em;align-items:center;gap:12px;cursor:pointer;}
+.trace-sheet summary span {font: .75rem var(--sc-mono);color:#d8c7ad;}
+.trace-sheet summary strong {overflow-wrap:anywhere;}
+.trace-sheet summary::after {content:"+";font-size:1.2rem;}
+.trace-sheet [open]>summary::after {content:"−";}
+.trace-sheet details p {color:#dad9d0;padding-left:5.3em;max-width:48ch;}
+.install-spread pre { padding:16px;border-left:3px solid var(--copper);background:var(--sc-inset);white-space:pre-wrap; }
+.login-shell .signin-panel {border-top:1px solid var(--rule);background:var(--sc-inset);}
+.login-shell .login-card {width:min(100%,480px); margin:0;}
+.topbar {background:var(--carbon);border-bottom:3px solid var(--sc-action);}
+.app-shell .card,.shell .detail-panel,.gate-card,.login-card {border-radius:2px;box-shadow:none;}
+.app-shell .card,.gate-card {border-top:2px solid var(--carbon);background-image:linear-gradient(135deg,var(--copper) 0 6px,transparent 6.5px);background-repeat:no-repeat;background-size:12px 12px;}
+.app-shell h1,.app-shell .card-head h2,.gate-card h1 {font-family:Georgia,serif;font-weight:normal;letter-spacing:-.045em;}
+.section-nav a.is-active {box-shadow:inset 3px 0 var(--copper);}
+.app-shell .kpi {border-radius:0;box-shadow:none;border-top:2px solid var(--rule);}
+.app-shell .kpi strong {font-family:Georgia,serif;font-weight:400;}
+.shell .pane-head,.shell thead th {font-family:var(--sc-mono);letter-spacing:.055em;}
+.shell tbody tr[aria-selected=true] {box-shadow:inset 4px 0 #ffab82;}
+#event-dialog,.rc-case-item,.na-item,.section-fold,.am-agent-card {border-radius:2px;}
+.trace-sheet :focus-visible {outline-color:#ffb992;}
+@media (prefers-reduced-motion:no-preference) {
+  .folio-art img {animation:fold-settle .85s cubic-bezier(.2,.65,.3,1) both;}
+  .folio-cta,.folio-enter {transition:background .18s,color .18s,transform .18s;}
+  .folio-cta:hover,.folio-enter:hover {background:var(--sc-action-hover);color:white;transform:translateY(-2px);}
+  @keyframes fold-settle {from {opacity:.35;transform:translateY(13px) rotate(-3deg);}to {opacity:1;transform:none;}}
+}
+@media (prefers-reduced-motion:reduce) { html {scroll-behavior:auto;} }
+@media(max-width:700px) {
+ .folio-nav {min-height:62px;} .folio-brand {font-size:1.15rem;} .folio-nav nav {font-size:.78rem;}
+ .folio-hero {grid-template-columns:1fr;min-height:0;padding-block:36px 20px;gap:12px;}
+ .folio-hero h1 {font-size:clamp(70px,17vw,106px);} .folio-deck {margin:17px 0;}
+ .folio-art img {height:clamp(170px,55vw,290px);}
+ .trace-spread,.install-spread,.login-shell .signin-panel {grid-template-columns:minmax(0,1fr);gap:14px;}
+ .trace-sheet details p {padding-left:0;} .folio-actions {gap:14px;font-size:.93rem;}
+}
+@media(max-width:410px){.folio-nav nav a:first-child {display:none;}}
+
+/* The same spine connects navigation, graph nodes and the selected record. */
+.desk-brand,.topbar .brand {display:inline-flex;align-items:center;gap:9px;color:#fff5e8;font-size:1.2rem;font-weight:700;letter-spacing:-.055em;}
+.topbar .foil-mark {width:21px;height:20px;background:repeating-linear-gradient(to bottom,var(--sc-mint) 0 4px,transparent 4px 8px);}
+.app-shell .overview-head {border-top-color:var(--copper);}
+.app-shell .kpi-grid {border:0;gap:0;background:var(--sc-line);}
+.app-shell .kpi {border-top:2px solid #383932;border-right:1px solid var(--rule);padding-inline:14px;}
+.app-shell .kpi-label,.app-shell .kicker,.shell .tree-heading {font-family:var(--sc-mono);}
+.app-shell .section-nav a.is-active {background:var(--sc-inset);color:var(--sc-action);}
+.app-shell .section-fold-summary {border-bottom:1px solid transparent;}
+.app-shell .section-fold[open] .section-fold-summary {border-bottom-color:var(--rule);}
+.app-shell .section-fold-title h2 {font-family:Georgia,serif;font-weight:400;}
+.ap-hosts li,.am-session,.rc-item {border-radius:2px;box-shadow:none;}
+.am-session[open],.rc-item.is-selected {border-inline-start:3px solid var(--copper);}
+.ap-hovering .am-link.ap-hl {stroke:var(--copper);}
+.shell .sidebar {background:var(--sc-inset);border-inline-end:1px solid #a5a194;}
+.shell .tree-heading {padding-top:6px;border-top:1px solid var(--rule);}
+.shell .pane-head,.shell .detail-head {background:var(--sc-inset);}
+.shell .tree-btn.active {background:var(--carbon);color:#fff3e9;box-shadow:inset 3px 0 #d88662;}
+.event-dialog {border:1px solid #55574c;border-top:4px solid var(--copper);}
+.event-dialog-title-wrap h2,.detail-title {font-family:Georgia,serif;font-size:1.3rem;}
+@media (forced-colors:active){.foil-mark {background:ButtonText;}.folio-cta,.folio-enter {border:1px solid ButtonText;}}
+.desk-brand {text-decoration:none;}
+.login-shell #access[hidden] {display:none;}

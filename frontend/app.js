@@ -299,6 +299,13 @@ function clearOrgViews() {
 }
 
 /* ---------- View transitions ---------- */
+const publicSections = ["#intro", "#self-host", "#trace-example"];
+function scrollToPublicSection() {
+  if (publicSections.includes(window.location.hash)) {
+    document.getElementById(window.location.hash.slice(1))?.scrollIntoView?.({behavior: "instant"});
+  }
+}
+
 function showLogin(preferredTab) {
   viewGeneration++;
   if (refreshTimer) clearInterval(refreshTimer);
@@ -311,6 +318,10 @@ function showLogin(preferredTab) {
   loginView.classList.remove("hidden");
 
   const urlInvite = readInviteFromUrl();
+  if (urlInvite || window.location.hash === "#access" || (window.location.hash && !publicSections.includes(window.location.hash))) {
+    document.getElementById("access")?.scrollIntoView?.({behavior: "instant"});
+  }
+  scrollToPublicSection();
   if (preferredTab) {
     switchAuthTab(preferredTab);
   } else if (urlInvite) {
@@ -399,9 +410,16 @@ function applyRoleVisibility() {
 function showApp(sessionPayload, notifyOrgSwitch = false) {
   viewGeneration++;
   if (notifyOrgSwitch) clearOrgViews();
+  const entering = !loginView.classList.contains("hidden");
   loginView.classList.add("hidden");
   appView.classList.remove("hidden");
   applySession(sessionPayload);
+  if (entering && (!location.hash || location.hash === "#access" || publicSections.includes(location.hash))) {
+    const destination = new URL(window.location.href);
+    destination.hash = "";
+    window.history.replaceState({}, document.title, destination);
+    window.scrollTo({top: 0, behavior: "instant"});
+  }
 
   if (readInviteFromUrl()) {
     try {
@@ -426,6 +444,13 @@ function showApp(sessionPayload, notifyOrgSwitch = false) {
 }
 
 async function checkAuth() {
+  if (new URLSearchParams(window.location.search).get("view") === "home" && !readInviteFromUrl()) {
+    loginView.classList.remove("hidden");
+    document.getElementById("access").hidden = true;
+    document.querySelector(".folio-enter").href = "/#access";
+    scrollToPublicSection();
+    return;
+  }
   try {
     const data = await api("/api/v1/auth/me");
     if (data.authenticated) {

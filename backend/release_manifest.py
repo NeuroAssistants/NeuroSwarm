@@ -11,6 +11,8 @@ VERSION_PATH = "/api/v1/version"
 PAGES = {"/": "index.html", "/live": "live.html"}
 # This is also the server's allowlist of public scripts and styles.
 ASSETS = {
+    "/identity.css": "text/css",
+    "/swarm-fold.webp": "image/webp",
     "/app.js": "application/javascript",
     "/activity.js": "application/javascript",
     "/needs-attention.js": "application/javascript",
