@@ -463,8 +463,12 @@ class InstallerEndToEndTests(unittest.TestCase):
         self.assertIn("org.swarmcontrol.agent.plist", sh_script)
         self.assertIn("swarmcontrol-agent.service", sh_script)
         self.assertIn("SWARMCONTROL_ACTIVITY_ROOTS", sh_script)
+        self.assertIn("SWARMCONTROL_SHARE_COMMAND_OUTPUT", sh_script)
+        self.assertIn("SWARMCONTROL_SHARE_FILE_PREVIEWS", sh_script)
         self.assertIn("Register-ScheduledTask", ps1_script)
         self.assertIn("SWARMCONTROL_ACTIVITY_ROOTS", ps1_script)
+        self.assertIn("SWARMCONTROL_SHARE_COMMAND_OUTPUT", ps1_script)
+        self.assertIn("SWARMCONTROL_SHARE_FILE_PREVIEWS", ps1_script)
         self.assertIn('$ErrorActionPreference = "Continue"', ps1_script)
         self.assertIn('if ($ActivityRoots)', ps1_script)
         self.assertNotIn('--activity-roots $ActivityRoots', ps1_script)
@@ -548,24 +552,43 @@ class InstallerEndToEndTests(unittest.TestCase):
                 self.assertEqual(len(received_activities), 1)
                 self.assertEqual(received_activities[0]["host_id"], "clean-linux-node")
                 self.assertEqual(received_activities[0]["workspaces"][0]["label"], "equipo-demo")
+                default_env = (install_dir / "agent.env").read_text(encoding="utf-8")
+                self.assertIn("SWARMCONTROL_SHARE_COMMANDS=0", default_env)
+                self.assertIn("SWARMCONTROL_SHARE_COMMAND_OUTPUT=0", default_env)
+                self.assertIn("SWARMCONTROL_SHARE_FILE_PREVIEWS=0", default_env)
 
                 # Verify repo install.sh & install.ps1 match rendered installers and persist optional flags
                 self.assertEqual((ROOT / "install.sh").read_text(encoding="utf-8"), installer.render_install_script())
                 self.assertEqual((ROOT / "install.ps1").read_text(encoding="utf-8"), installer.render_powershell_install_script())
 
-                bad_proc = subprocess.run(
-                    ["bash", "-s", "--", "--no-service"],
-                    input=script_body,
-                    text=True,
-                    env={**env, "SWARMCONTROL_SHARE_COMMANDS": "yes"},
-                    capture_output=True,
-                    timeout=10,
-                )
-                self.assertEqual(bad_proc.returncode, 2)
+                for bad_var in (
+                    {"SWARMCONTROL_SHARE_COMMANDS": "yes"},
+                    {"SWARMCONTROL_SHARE_COMMAND_OUTPUT": "yes"},
+                    {"SWARMCONTROL_SHARE_FILE_PREVIEWS": "2"},
+                ):
+                    bad_proc = subprocess.run(
+                        ["bash", "-s", "--", "--no-service"],
+                        input=script_body,
+                        text=True,
+                        env={**env, **bad_var},
+                        capture_output=True,
+                        timeout=10,
+                    )
+                    self.assertEqual(bad_proc.returncode, 2, bad_var)
 
                 opt_dir = tmp_path / "installed-agent-opts"
                 opt_proc = subprocess.run(
-                    ["bash", "-s", "--", "--no-service", "--share-commands", "--agent-labels", "equipo-demo=Demo Team"],
+                    [
+                        "bash",
+                        "-s",
+                        "--",
+                        "--no-service",
+                        "--share-commands",
+                        "--share-command-output",
+                        "--share-file-previews",
+                        "--agent-labels",
+                        "equipo-demo=Demo Team",
+                    ],
                     input=script_body,
                     text=True,
                     env={**env, "SWARMCONTROL_INSTALL_DIR": str(opt_dir)},
@@ -575,7 +598,46 @@ class InstallerEndToEndTests(unittest.TestCase):
                 self.assertEqual(opt_proc.returncode, 0, opt_proc.stderr)
                 agent_env = (opt_dir / "agent.env").read_text(encoding="utf-8")
                 self.assertIn("SWARMCONTROL_SHARE_COMMANDS=1", agent_env)
+                self.assertIn("SWARMCONTROL_SHARE_COMMAND_OUTPUT=1", agent_env)
+                self.assertIn("SWARMCONTROL_SHARE_FILE_PREVIEWS=1", agent_env)
                 self.assertIn("SWARMCONTROL_AGENT_LABELS=equipo-demo=Demo Team", agent_env)
+
+                # --diagnose surfaces opt-in sharing booleans without leaking tokens
+                diag_env = {
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                    "HOME": str(tmp_path),
+                    "SWARMCONTROL_SHARE_COMMANDS": "1",
+                    "SWARMCONTROL_SHARE_COMMAND_OUTPUT": "1",
+                    "SWARMCONTROL_SHARE_FILE_PREVIEWS": "1",
+                }
+                diag_proc = subprocess.run(
+                    [sys.executable, str(opt_dir / "swarmcontrol_agent.py"), "--diagnose", "--activity-roots", str(work_dir)],
+                    env=diag_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(diag_proc.returncode, 0, diag_proc.stderr)
+                diag_data = json.loads(diag_proc.stdout)
+                self.assertTrue(diag_data["share_commands"])
+                self.assertTrue(diag_data["share_command_output"])
+                self.assertTrue(diag_data["share_file_previews"])
+
+                # Upgrading with an unrelated override preserves saved evidence flags
+                up_keep = subprocess.run(
+                    ["bash", "-s", "--", "--upgrade", "--install-dir", str(opt_dir), "--no-service", "--interval", "25"],
+                    input=script_body,
+                    text=True,
+                    env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path)},
+                    capture_output=True,
+                    timeout=15,
+                )
+                self.assertEqual(up_keep.returncode, 0, up_keep.stderr)
+                kept_env = (opt_dir / "agent.env").read_text(encoding="utf-8")
+                self.assertIn("SWARMCONTROL_INTERVAL=25", kept_env)
+                self.assertIn("SWARMCONTROL_SHARE_COMMANDS=1", kept_env)
+                self.assertIn("SWARMCONTROL_SHARE_COMMAND_OUTPUT=1", kept_env)
+                self.assertIn("SWARMCONTROL_SHARE_FILE_PREVIEWS=1", kept_env)
         finally:
             httpd.shutdown()
             httpd.server_close()

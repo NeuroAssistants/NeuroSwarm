@@ -613,6 +613,9 @@ def build_diagnose_report(
         "last_warnings": state.get("last_warnings") or [],
         "last_error": state.get("last_error") or "",
         "last_ship_ok_at": state.get("last_ship_ok_at") or 0.0,
+        "share_commands": os.environ.get("SWARMCONTROL_SHARE_COMMANDS") == "1",
+        "share_command_output": os.environ.get("SWARMCONTROL_SHARE_COMMAND_OUTPUT") == "1",
+        "share_file_previews": os.environ.get("SWARMCONTROL_SHARE_FILE_PREVIEWS") == "1",
         "dry_scan": dry_scan,
     }
     if dry_scan_error:
@@ -641,6 +644,18 @@ def main() -> int:
         action="store_true",
         default=os.environ.get("SWARMCONTROL_SHARE_COMMANDS") == "1",
         help="Opt-in to include locally-redacted command lines (<=160 chars) in activity snapshots",
+    )
+    parser.add_argument(
+        "--share-command-output",
+        action="store_true",
+        default=os.environ.get("SWARMCONTROL_SHARE_COMMAND_OUTPUT") == "1",
+        help="Opt-in to include bounded, locally-redacted command outputs (<=4096 chars) in incremental capture",
+    )
+    parser.add_argument(
+        "--share-file-previews",
+        action="store_true",
+        default=os.environ.get("SWARMCONTROL_SHARE_FILE_PREVIEWS") == "1",
+        help="Opt-in to include inert raster image previews (PNG/JPEG/GIF/WebP <=160 KiB) and redacted text excerpts for confirmed file reads",
     )
     default_state_dir = (
         Path(os.environ["LOCALAPPDATA"]) / "SwarmControl" / "state"
@@ -681,6 +696,10 @@ def main() -> int:
         os.environ["SWARMCONTROL_AGENT_LABELS"] = args.agent_labels
     if args.share_commands:
         os.environ["SWARMCONTROL_SHARE_COMMANDS"] = "1"
+    if args.share_command_output:
+        os.environ["SWARMCONTROL_SHARE_COMMAND_OUTPUT"] = "1"
+    if args.share_file_previews:
+        os.environ["SWARMCONTROL_SHARE_FILE_PREVIEWS"] = "1"
 
     state_dir_path = Path(args.state_dir or str(default_state_dir))
 

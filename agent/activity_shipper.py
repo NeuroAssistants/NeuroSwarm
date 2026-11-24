@@ -17,6 +17,7 @@ Key privacy & portability guarantees:
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -24,9 +25,12 @@ import platform
 import re
 import socket
 import sqlite3
+import stat
 import sys
 import time
 from collections import Counter
+from contextlib import ExitStack
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -299,6 +303,227 @@ def command_info(cmd: Any) -> dict[str, str]:
         )
         out["command"] = shown if len(shown) <= 160 else shown[:159].rstrip() + "…"
     return out
+
+
+PRIVATE_STEP_FIELDS = (
+    "command_input",
+    "command_output",
+    "exit_code",
+    "output_truncated",
+    "image_previews",
+    "text_previews",
+)
+_PREVIEW_TEXT_EXTS = {
+    ".md", ".txt", ".py", ".js", ".ts", ".jsx", ".tsx", ".css", ".html", ".json",
+    ".toml", ".yaml", ".yml", ".go", ".rs", ".c", ".h", ".cpp", ".sh", ".sql", ".java", ".rb",
+}
+MAX_IMAGE_PREVIEW_BYTES = 160 * 1024
+MAX_IMAGE_PREVIEW_B64 = 4 * ((MAX_IMAGE_PREVIEW_BYTES + 2) // 3)
+_EVIDENCE_SECRET_ARGS = re.compile(
+    r"""(?ix)(?<![\w.-])(-[upH]|--(?:password|passwd|pass|secret|token|user|api[-_]?key|header|auth))(?:=|\s+)(?:"[^"]*"|'[^']*'|[^\s]+)"""
+)
+_EVIDENCE_SECRET_VALUE = re.compile(
+    r"""(?ix)(\b(?:authorization|cookie|set-cookie|password|passwd|secret|access[_-]?token|api[_-]?key|token)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\r\n,;]+)"""
+)
+_CONTROL_SEQ = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
+
+
+def _strip_private_step(step: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in step.items() if k not in PRIVATE_STEP_FIELDS}
+
+
+def _redact_secrets_preserve_ws(text: str) -> str:
+    clean = NOISE_TAGS_RE.sub(" ", text)
+    for name, pat in LOCAL_SECRET_PATTERNS:
+        clean = pat.sub(f"[redacted:{name}]", clean)
+    return INLINE_SECRET_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", clean)
+
+
+def evidence_text(value: Any, limit: int) -> tuple[str | None, bool]:
+    """Bound an explicitly shared text excerpt and preserve line breaks after redaction."""
+    if not isinstance(value, str):
+        return None, False
+    if "PRIVATE KEY-----" in value or "\x00" in value:
+        return "[protected content]", False
+    value = _CONTROL_SEQ.sub("", value)
+    value = _EVIDENCE_SECRET_ARGS.sub(r"\1 [redacted]", value)
+    value = _EVIDENCE_SECRET_VALUE.sub(r"\1[redacted]", value)
+    cleaned = []
+    for line in value.split("\n"):
+        safe = "".join(c for c in line if c == "\t" or (c.isprintable() and ord(c) != 127))
+        cleaned.append(_redact_secrets_preserve_ws(safe))
+    excerpt = "\n".join(cleaned)
+    return excerpt[:limit], len(excerpt) > limit
+
+
+def execution_detail(command: Any, output: Any, code: Any, *, capture_mode: bool = False) -> dict[str, Any]:
+    """Build opt-in redacted command input/output and exit_code aligned with activity_inspector."""
+    info: dict[str, Any] = command_info(command)
+    if not capture_mode:
+        return info
+    if type(code) is int:
+        info["exit_code"] = code
+    if os.environ.get("SWARMCONTROL_SHARE_COMMANDS") == "1":
+        text, _ = evidence_text(command, 1024)
+        if text is not None:
+            info["command_input"] = text
+    if os.environ.get("SWARMCONTROL_SHARE_COMMAND_OUTPUT") == "1":
+        if re.search(r"(?i)(?:^|[;&|\s])(?:env|set|printenv|export)(?:$|[;&|\s])", str(command)) or any(
+            not part.startswith("-") and is_sensitive_path(part)
+            for raw_tok in str(command).split()
+            for part in (raw_tok.strip(" \"'").split("=", 1) if "=" in raw_tok else [raw_tok.strip(" \"'")])
+            if part
+        ):
+            return info
+        text, cut = evidence_text(output, 4096)
+        if text is not None:
+            info.update(command_output=text, output_truncated=cut)
+    return info
+
+
+def _workspace_image(path: str, when: Any, roots: list[Path]) -> dict[str, Any] | None:
+    """Capture a small, unchanged raster at collection time inside approved roots. Never follow symlinks."""
+    if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd or not isinstance(when, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(when.replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            return None
+        resolved = Path(path)
+        matched = [r for r in roots if resolved == r or r in resolved.parents]
+        if not matched or is_sensitive_path(path):
+            return None
+        root = max(matched, key=lambda r: len(r.parts))
+        parts = resolved.relative_to(root).parts
+        if not parts or any(p.startswith(".") for p in parts):
+            return None
+        mime = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+        }.get(resolved.suffix.lower())
+        if not mime:
+            return None
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        with ExitStack() as stack:
+            directory = os.open(root, directory_flags)
+            stack.callback(os.close, directory)
+            for part in parts[:-1]:
+                directory = os.open(part, directory_flags, dir_fd=directory)
+                stack.callback(os.close, directory)
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            with os.fdopen(os.open(parts[-1], flags, dir_fd=directory), "rb") as handle:
+                before = os.fstat(handle.fileno())
+                if (
+                    not stat.S_ISREG(before.st_mode)
+                    or not 0 < before.st_size <= MAX_IMAGE_PREVIEW_BYTES
+                    or max(before.st_mtime, before.st_ctime) > stamp.timestamp()
+                ):
+                    return None
+                data = handle.read(MAX_IMAGE_PREVIEW_BYTES + 1)
+                after = os.fstat(handle.fileno())
+                if (len(data), after.st_mtime_ns, after.st_ctime_ns) != (
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                ):
+                    return None
+        signatures = {
+            "image/png": (b"\x89PNG\r\n\x1a\n",),
+            "image/jpeg": (b"\xff\xd8\xff",),
+            "image/gif": (b"GIF87a", b"GIF89a"),
+            "image/webp": (b"RIFF",),
+        }
+        if not data.startswith(signatures[mime]) or (mime == "image/webp" and data[8:12] != b"WEBP"):
+            return None
+        return {
+            "path": path,
+            "source": "workspace_snapshot",
+            "mime_type": mime,
+            "data_base64": base64.b64encode(data).decode("ascii"),
+            "captured_at": time.time(),
+        }
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
+def _tool_result_image(item: dict[str, Any], path: str, *, capture_mode: bool = False) -> list[dict[str, Any]]:
+    """Retain only an explicit inert raster image result for this recorded image read."""
+    if not capture_mode or os.environ.get("SWARMCONTROL_SHARE_FILE_PREVIEWS") != "1" or not path:
+        return []
+    result = item.get("result", item.get("content_items", item.get("output")))
+    if isinstance(result, dict):
+        result = result.get("content", [result])
+    if not isinstance(result, list):
+        return []
+    for block in result:
+        if not isinstance(block, dict):
+            continue
+        src = block.get("source") if isinstance(block.get("source"), dict) else {}
+        data = src.get("data", block.get("data"))
+        mime = src.get("media_type") or block.get("mimeType", block.get("mime_type"))
+        if block.get("type") in ("image_url", "input_image", "Image"):
+            url = block.get("image_url", block.get("url"))
+            if isinstance(url, dict):
+                url = url.get("url")
+            if isinstance(url, str) and url.startswith(
+                ("data:image/png;base64,", "data:image/jpeg;base64,", "data:image/gif;base64,", "data:image/webp;base64,")
+            ):
+                header, data = url.split(",", 1)
+                mime = header[5:].split(";")[0]
+        elif block.get("type") != "image":
+            continue
+        if (
+            mime in ("image/png", "image/jpeg", "image/gif", "image/webp")
+            and isinstance(data, str)
+            and 0 < len(data) <= MAX_IMAGE_PREVIEW_B64
+        ):
+            return [{"path": path, "source": "tool_result", "mime_type": mime, "data_base64": data}]
+    return []
+
+
+def _tool_result_text(result: Any, path: str, *, capture_mode: bool = False) -> list[dict[str, Any]]:
+    """Keep redacted text only when the runtime returned it for one explicit source file."""
+    if (
+        not capture_mode
+        or os.environ.get("SWARMCONTROL_SHARE_FILE_PREVIEWS") != "1"
+        or not path
+        or Path(path).suffix.lower() not in _PREVIEW_TEXT_EXTS
+    ):
+        return []
+    if isinstance(result, dict):
+        result = result.get("content")
+    if isinstance(result, list):
+        lines = [
+            block["text"]
+            for block in result
+            if isinstance(block, dict)
+            and block.get("type") in ("text", "input_text")
+            and isinstance(block.get("text"), str)
+        ]
+        result = "\n".join(lines) if lines else None
+    text, cut = evidence_text(result, 4096)
+    if text is None:
+        return []
+    return [{"path": path, "source": "tool_result", "text": text, "truncated": cut}]
+
+
+def _attach_workspace_images(steps: list[dict[str, Any]], roots: list[Path], capture_mode: bool) -> None:
+    if not (capture_mode and os.environ.get("SWARMCONTROL_SHARE_FILE_PREVIEWS") == "1"):
+        return
+    for step in steps:
+        if (
+            step.get("category") == "file_read"
+            and step.get("file_basis") == "confirmed"
+            and step.get("status", "completed") == "completed"
+            and not step.get("image_previews")
+            and len(step.get("files") or []) == 1
+        ):
+            preview = _workspace_image(step["files"][0], step.get("time"), roots)
+            if preview:
+                step["image_previews"] = [preview]
 
 
 DEFAULT_TAIL_CEILING = 4_000_000   # same per-scan budget as activity_core.TAIL_CEILING
@@ -672,9 +897,8 @@ def _collect_codex_sessions(
                                 if safe_r not in read_files:
                                     read_files.append(safe_r)
                     raw_cmd = it.get("command")
-                    if isinstance(raw_cmd, list):
-                        raw_cmd = raw_cmd[-1] if raw_cmd else ""
-                    cmd_str = str((parsed_cmds[0].get("cmd") if parsed_cmds else None) or raw_cmd or "").strip()
+                    actual_cmd = raw_cmd[-1] if isinstance(raw_cmd, list) and raw_cmd else raw_cmd
+                    cmd_str = str((parsed_cmds[0].get("cmd") if parsed_cmds else None) or actual_cmd or "").strip()
                     if kinds == {"read"}:
                         lbl = (
                             "Read " + ", ".join(Path(p).name for p in linked_reads)[:100]
@@ -695,25 +919,69 @@ def _collect_codex_sessions(
                         "files": linked_reads[:12],
                         "file_basis": "confirmed" if cat == "file_read" and linked_reads else "recorded",
                     }
-                    step_obj.update(command_info(cmd_str))
+                    if cmd_cwd:
+                        step_obj["cwd"] = cmd_cwd
+                    step_obj.update(
+                        execution_detail(
+                            actual_cmd or cmd_str,
+                            it.get("aggregated_output"),
+                            it.get("exit_code"),
+                            capture_mode=capture is not None,
+                        )
+                    )
                     structured_steps.append(step_obj)
                 elif itype == "DynamicToolCall":
                     d_tool = str(it.get("tool") or "tool")
                     d_args = it.get("arguments") or {}
                     if d_tool == "tool_call" and isinstance(d_args, dict) and d_args.get("name"):
                         d_tool = str(d_args["name"])
+                        inner_args = d_args.get("arguments")
+                        if isinstance(inner_args, str) and inner_args.lstrip().startswith("{"):
+                            try:
+                                inner_args = json.loads(inner_args)
+                            except Exception:
+                                inner_args = {}
+                        d_args = inner_args if isinstance(inner_args, dict) else {}
                     cat, lbl = _categorize_tool(d_tool)
-                    structured_steps.append(
-                        {
-                            "tool": d_tool,
-                            "category": cat,
-                            "label": redact_local_text(lbl, 120),
-                            "time": ev_ts,
-                            "status": str(it.get("status") or "completed").lower(),
-                            "files": [],
-                            "file_basis": "recorded",
-                        }
-                    )
+                    d_files: list[str] = []
+                    d_basis = "recorded"
+                    d_status = str(it.get("status") or ("error" if it.get("success") is False else "completed")).lower()
+                    d_previews: list[dict[str, Any]] = []
+                    d_texts: list[dict[str, Any]] = []
+                    if _tool_key(d_tool) in {"view_image", "read_image", "read_file"} and isinstance(d_args, dict):
+                        raw_fp = d_args.get("path") or d_args.get("file_path") or d_args.get("Path")
+                        safe_r = _filter_allowed_file(raw_fp, cwd, roots)
+                        if safe_r:
+                            cat = "file_read"
+                            d_files = [safe_r]
+                            d_basis = "confirmed"
+                            lbl = f"Read {Path(safe_r).name}"
+                            if safe_r not in read_files:
+                                read_files.append(safe_r)
+                            if it.get("success") is False:
+                                d_status = "error"
+                            else:
+                                d_previews = _tool_result_image(it, safe_r, capture_mode=capture is not None)
+                                if not d_previews and _tool_key(d_tool) == "read_file":
+                                    d_texts = _tool_result_text(
+                                        it.get("result", it.get("content_items", it.get("output"))),
+                                        safe_r,
+                                        capture_mode=capture is not None,
+                                    )
+                    step_obj = {
+                        "tool": d_tool,
+                        "category": cat,
+                        "label": redact_local_text(lbl, 120),
+                        "time": ev_ts,
+                        "status": d_status,
+                        "files": d_files,
+                        "file_basis": d_basis,
+                    }
+                    if d_previews:
+                        step_obj["image_previews"] = d_previews
+                    if d_texts:
+                        step_obj["text_previews"] = d_texts
+                    structured_steps.append(step_obj)
             elif ptype == "file_change" or (o.get("type") == "event_msg" and ptype == "patch_apply_end"):
                 changes = pl.get("changes") or {}
                 c_files = []
@@ -759,11 +1027,13 @@ def _collect_codex_sessions(
                     st_item["src"] = f"{src_prefix}:{step_pos}"
 
         steps = structured_steps or legacy_steps
+        _attach_workspace_images(steps, roots, capture is not None)
+        shown = [_strip_private_step(s) for s in steps[-10:]]
         agent_id, agent_name = _derive_agent_identity(cwd, labels, roots)
         prov, prov_label, prov_basis = _infer_provider(model, "codex")
         how = dict(Counter(s["category"] for s in steps))
-        substantive = [s for s in steps if s["category"] in {"file_edit", "shell", "shell_exec", "file_read", "web", "web_research", "visual", "visual_asset"}]
-        latest_action = steps[-1] if steps else None
+        substantive = [s for s in shown if s["category"] in {"file_edit", "shell", "shell_exec", "file_read", "web", "web_research", "visual", "visual_asset"}]
+        latest_action = shown[-1] if shown else None
         latest_work = substantive[-1] if substantive else latest_action
         full_sid = sid or rp.stem.removeprefix("rollout-")
 
@@ -786,7 +1056,7 @@ def _collect_codex_sessions(
             "what_done": what_done or "Active Codex session in configured workspace.",
             "plan": plan[:10],
             "how": how,
-            "steps": steps[-10:],
+            "steps": shown,
             "latest_action": latest_action,
             "latest_work": latest_work,
             "files_edited": edited[-12:],
@@ -839,6 +1109,7 @@ def _collect_claude_sessions(
         lines = list(_iter_source_lines(jf, capture))
         cwd = ""
         model = "claude"
+        recorded_calls: dict[str, tuple[dict[str, Any], str | None]] = {}
         steps: list[dict[str, Any]] = []
         edited: list[str] = []
         read_files: list[str] = []
@@ -854,6 +1125,36 @@ def _collect_claude_sessions(
             if o.get("cwd"):
                 cwd = str(o["cwd"])
             msg = o.get("message")
+            if o.get("type") == "user" and isinstance(msg, dict) and capture is not None:
+                for result in msg.get("content") or []:
+                    if not isinstance(result, dict) or result.get("type") != "tool_result":
+                        continue
+                    uid = result.get("tool_use_id")
+                    pair = recorded_calls.pop(uid, None) if isinstance(uid, str) else None
+                    if pair is None:
+                        continue
+                    paired_step, paired_cmd = pair
+                    paired_step["status"] = "error" if result.get("is_error") else "completed"
+                    payload = result.get("content")
+                    if paired_cmd is not None:
+                        if isinstance(payload, list):
+                            payload = "\n".join(
+                                block["text"]
+                                for block in payload
+                                if isinstance(block, dict)
+                                and block.get("type") == "text"
+                                and isinstance(block.get("text"), str)
+                            )
+                        paired_step.update(execution_detail(paired_cmd, payload, None, capture_mode=True))
+                    elif paired_step.get("files") and paired_step["status"] == "completed":
+                        previews = _tool_result_image({"result": payload}, paired_step["files"][0], capture_mode=True)
+                        if previews:
+                            paired_step["image_previews"] = previews
+                        else:
+                            snippets = _tool_result_text(payload, paired_step["files"][0], capture_mode=True)
+                            if snippets:
+                                paired_step["text_previews"] = snippets
+                continue
             if o.get("type") != "assistant" or not isinstance(msg, dict):
                 continue
             if msg.get("model"):
@@ -863,12 +1164,20 @@ def _collect_claude_sessions(
                 for blk in content:
                     if not isinstance(blk, dict):
                         continue
+                    if blk.get("type") == "text":
+                        txt = str(blk.get("text") or "").strip()
+                        if txt:
+                            chk = _extract_checklist(txt)
+                            if chk and not plan:
+                                plan = chk
+                            what_done = redact_local_text(txt, 220)
+                        continue
                     if blk.get("type") == "tool_use":
                         tname = str(blk.get("name") or "tool")
                         cat, lbl = _categorize_tool(tname)
                         inp = blk.get("input") if isinstance(blk.get("input"), dict) else {}
                         step_files: list[str] = []
-                        cmd_meta: dict[str, str] = {}
+                        cmd_meta: dict[str, Any] = {}
                         raw_fp = ""
                         for k in ("file_path", "notebook_path", "path", "Path"):
                             if isinstance(inp.get(k), str) and inp.get(k):
@@ -889,9 +1198,10 @@ def _collect_claude_sessions(
                                 for t in inp["todos"][:10]
                                 if isinstance(t, dict) and t.get("content")
                             ]
+                        raw_cmd = ""
                         if cat == "shell" and inp.get("command"):
                             raw_cmd = str(inp["command"])
-                            cmd_meta = command_info(raw_cmd)
+                            cmd_meta = execution_detail(raw_cmd, None, None, capture_mode=capture is not None)
                             lbl = str(inp["description"]) if inp.get("description") else command_kind(raw_cmd)
                         if step_files:
                             lbl = f"{lbl} ({Path(step_files[0]).name})"
@@ -909,13 +1219,16 @@ def _collect_claude_sessions(
                         }
                         step_obj.update(cmd_meta)
                         steps.append(step_obj)
-                    elif blk.get("type") == "text":
-                        txt = str(blk.get("text") or "").strip()
-                        if txt:
-                            chk = _extract_checklist(txt)
-                            if chk and not plan:
-                                plan = chk
-                            what_done = redact_local_text(txt, 220)
+                        if (
+                            capture is not None
+                            and isinstance(blk.get("id"), str)
+                            and ((cat == "shell" and raw_cmd) or cat == "file_read")
+                            and (
+                                os.environ.get("SWARMCONTROL_SHARE_COMMAND_OUTPUT") == "1"
+                                or os.environ.get("SWARMCONTROL_SHARE_FILE_PREVIEWS") == "1"
+                            )
+                        ):
+                            recorded_calls[blk["id"]] = (step_obj, raw_cmd if cat == "shell" else None)
             if src_prefix:
                 for step_pos, st_item in enumerate(steps[start_idx:]):
                     st_item["src"] = f"{src_prefix}:{step_pos}"
@@ -931,9 +1244,11 @@ def _collect_claude_sessions(
             effective_ws = str(Path(edited[0]).parent)
         agent_id, agent_name = _derive_agent_identity(effective_ws, labels, roots)
         prov, prov_label, prov_basis = _infer_provider(model, "claude-code")
+        _attach_workspace_images(steps, roots, capture is not None)
+        shown = [_strip_private_step(s) for s in steps[-10:]]
         how = dict(Counter(s["category"] for s in steps))
-        substantive = [s for s in steps if s["category"] in {"file_edit", "shell", "shell_exec", "file_read", "web", "web_research", "visual", "visual_asset"}]
-        latest_action = steps[-1] if steps else None
+        substantive = [s for s in shown if s["category"] in {"file_edit", "shell", "shell_exec", "file_read", "web", "web_research", "visual", "visual_asset"}]
+        latest_action = shown[-1] if shown else None
         latest_work = substantive[-1] if substantive else latest_action
         mtime = jf.stat().st_mtime
 
@@ -956,7 +1271,7 @@ def _collect_claude_sessions(
             "what_done": what_done or "Active Claude Code session in configured workspace.",
             "plan": plan[:10],
             "how": how,
-            "steps": steps[-10:],
+            "steps": shown,
             "latest_action": latest_action,
             "latest_work": latest_work,
             "files_edited": edited[-12:],
@@ -1030,14 +1345,18 @@ def _collect_opencode_sessions(
                                CASE WHEN json_extract(p.value, '$.name') = 'todowrite'
                                     THEN json_extract(p.value, '$.state.input.todos') END AS todos,
                                CASE WHEN json_extract(p.value, '$.name') IN ('bash', 'shell')
-                                    THEN json_extract(p.value, '$.state.input.command') END AS command
+                                    THEN json_extract(p.value, '$.state.input.command') END AS command,
+                               CASE WHEN ? AND json_type(p.value, '$.state.output') = 'text'
+                                    THEN json_extract(p.value, '$.state.output') END AS output,
+                               coalesce(json_extract(p.value, '$.state.metadata.exit'),
+                                        json_extract(p.value, '$.state.metadata.exitCode')) AS exit_code
                           FROM recent m, json_each(
                                  CASE WHEN length(m.data) <= 33554432 AND json_valid(m.data) THEN m.data ELSE '{}' END,
                                  '$.content') p
                          WHERE p.type = 'object' AND json_extract(p.value, '$.type') = 'tool'
                          ORDER BY m.seq DESC, CAST(p.key AS INTEGER) DESC LIMIT ?
                         """,
-                        (sid, msg_lim, part_lim),
+                        (sid, msg_lim, capture is not None and os.environ.get("SWARMCONTROL_SHARE_COMMAND_OUTPUT") == "1", part_lim),
                     ).fetchall()[::-1]
                 except sqlite3.Error:
                     tools = []
@@ -1100,7 +1419,9 @@ def _collect_opencode_sessions(
                     cmd_str = row["command"]
                     if cat == "shell":
                         step_obj["label"] = command_kind(cmd_str)
-                    step_obj.update(command_info(cmd_str))
+                    step_obj.update(
+                        execution_detail(cmd_str, row["output"], row["exit_code"], capture_mode=capture is not None)
+                    )
                 if status == "completed" and name == "todowrite" and isinstance(row["todos"], str):
                     try:
                         todos = json.loads(row["todos"])
@@ -1131,9 +1452,11 @@ def _collect_opencode_sessions(
                 int(r["tokens_output"] or 0) if "tokens_output" in keys else 0
             )
             title = redact_local_text((r["title"] if "title" in keys else None) or (r["slug"] if "slug" in keys else None) or "OpenCode session", 160)
+            _attach_workspace_images(steps, roots, capture is not None)
+            shown = [_strip_private_step(s) for s in steps[-10:]]
             how = dict(Counter(s["category"] for s in steps))
-            substantive = [s for s in steps if s["category"] in {"file_edit", "shell", "file_read", "web", "visual"}]
-            latest_action = steps[-1] if steps else None
+            substantive = [s for s in shown if s["category"] in {"file_edit", "shell", "file_read", "web", "visual"}]
+            latest_action = shown[-1] if shown else None
             latest_work = substantive[-1] if substantive else latest_action
             card: dict[str, Any] = {
                 "session_id": f"opencode:{sid}"[:96],
@@ -1154,7 +1477,7 @@ def _collect_opencode_sessions(
                 "what_done": title,
                 "plan": plan,
                 "how": how,
-                "steps": steps[-10:],
+                "steps": shown,
                 "latest_action": latest_action,
                 "latest_work": latest_work,
                 "files_edited": edited[-12:],
@@ -1327,7 +1650,9 @@ def _collect_antigravity_sessions(
                     raw_cmd = _unquote_json_scalar(args["CommandLine"])
                     if not summary_arg:
                         step_obj["label"] = command_kind(raw_cmd)
-                    step_obj.update(command_info(raw_cmd))
+                    step_obj.update(
+                        execution_detail(raw_cmd, c.get("output"), c.get("exit_code"), capture_mode=capture is not None)
+                    )
                 steps.append(step_obj)
             if src_prefix:
                 for step_pos, st_item in enumerate(steps[start_idx:]):
@@ -1336,9 +1661,11 @@ def _collect_antigravity_sessions(
         agent_id, agent_name = _derive_agent_identity(workspace, labels, roots)
         prov, prov_label, prov_basis = _infer_provider(model, "antigravity")
         mtime = tr.stat().st_mtime
+        _attach_workspace_images(steps, roots, capture is not None)
+        shown = [_strip_private_step(s) for s in steps[-10:]]
         how = dict(Counter(s["category"] for s in steps))
-        substantive = [s for s in steps if s["category"] in {"file_edit", "shell", "file_read", "web", "visual"}]
-        latest_action = steps[-1] if steps else None
+        substantive = [s for s in shown if s["category"] in {"file_edit", "shell", "file_read", "web", "visual"}]
+        latest_action = shown[-1] if shown else None
         latest_work = substantive[-1] if substantive else latest_action
         card: dict[str, Any] = {
             "session_id": f"antigravity:{d.name}"[:96],
@@ -1359,7 +1686,7 @@ def _collect_antigravity_sessions(
             "what_done": what_done or "Active Antigravity session in configured workspace.",
             "plan": plan[:10],
             "how": how,
-            "steps": steps[-10:],
+            "steps": shown,
             "latest_action": latest_action,
             "latest_work": latest_work,
             "files_edited": edited[-12:],
@@ -1374,6 +1701,8 @@ def _collect_antigravity_sessions(
 
 def _categorize_file(path: Path) -> str:
     ext = path.suffix.lower()
+    if ext in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+        return "image"
     if ext in {".py", ".js", ".ts", ".tsx", ".go", ".rs", ".sh", ".ps1", ".sql"}:
         return "code"
     if ext in {".html", ".css", ".svg"}:
@@ -1710,10 +2039,16 @@ def chunk_activity_payload(payload: dict[str, Any], max_bytes: int = 320_000) ->
     chunks: list[dict[str, Any]] = []
 
     if payload.get("map_update", True):
-        map_sessions = [
-            {**{k: v for k, v in s.items() if k != "capture_steps"}, "capture_steps": []}
-            for s in sessions[:24]
-        ]
+        map_sessions = []
+        for s in sessions[:24]:
+            ms = {k: v for k, v in s.items() if k != "capture_steps"}
+            ms["capture_steps"] = []
+            if isinstance(ms.get("steps"), list):
+                ms["steps"] = [_strip_private_step(st) if isinstance(st, dict) else st for st in ms["steps"]]
+            for lk in ("latest_action", "latest_work"):
+                if isinstance(ms.get(lk), dict):
+                    ms[lk] = _strip_private_step(ms[lk])
+            map_sessions.append(ms)
         map_chunk: dict[str, Any] = {
             "schema_version": payload.get("schema_version", "1.0"),
             "host_id": payload["host_id"],
@@ -1786,6 +2121,48 @@ def chunk_activity_payload(payload: dict[str, Any], max_bytes: int = 320_000) ->
         cur = _base_delta()
         cur_steps = 0
 
+    def _fit_single_step(step: dict[str, Any], cur: dict[str, Any], entry: dict[str, Any], budget: int) -> dict[str, Any] | None:
+        cand = dict(step)
+        previews = cand.get("image_previews")
+        if isinstance(previews, list) and len(previews) > 1:
+            for keep in range(len(previews) - 1, 0, -1):
+                cand["image_previews"] = previews[:keep]
+                entry["capture_steps"] = [cand]
+                if _json_bytes(cur) <= budget:
+                    return cand
+        if "image_previews" in cand:
+            cand.pop("image_previews", None)
+            entry["capture_steps"] = [cand]
+            if _json_bytes(cur) <= budget:
+                return cand
+        if "text_previews" in cand:
+            cand.pop("text_previews", None)
+            entry["capture_steps"] = [cand]
+            if _json_bytes(cur) <= budget:
+                return cand
+        out_val = cand.get("command_output")
+        if isinstance(out_val, str) and out_val:
+            lo_len, hi_len, best_len = 0, len(out_val), -1
+            cand["output_truncated"] = True
+            while lo_len <= hi_len:
+                mid_len = (lo_len + hi_len) // 2
+                cand["command_output"] = out_val[:mid_len]
+                entry["capture_steps"] = [cand]
+                if _json_bytes(cur) <= budget:
+                    best_len = mid_len
+                    lo_len = mid_len + 1
+                else:
+                    hi_len = mid_len - 1
+            if best_len >= 0:
+                cand["command_output"] = out_val[:best_len]
+                entry["capture_steps"] = [cand]
+                return cand
+            cand.pop("command_output", None)
+            entry["capture_steps"] = [cand]
+            if _json_bytes(cur) <= budget:
+                return cand
+        return None
+
     for s in sessions:
         cap_steps = list(s.get("capture_steps") if s.get("capture_steps") is not None else s.get("steps") or [])
         if not cap_steps:
@@ -1819,11 +2196,18 @@ def chunk_activity_payload(payload: dict[str, Any], max_bytes: int = 320_000) ->
                     hi = mid - 1
 
             if best == 0:
-                cur["sessions"].pop()
-                if cur["sessions"]:
+                if len(cur["sessions"]) > 1:
+                    cur["sessions"].pop()
                     _flush_cur()
                     continue
-                # Single oversized step safeguard: skip rather than loop forever
+                fitted = _fit_single_step(rem[0], cur, entry, budget)
+                if fitted is not None:
+                    entry["capture_steps"] = [fitted]
+                    cur_steps += 1
+                    idx += 1
+                    _flush_cur()
+                    continue
+                cur["sessions"].pop()
                 idx += 1
                 continue
 

@@ -1302,6 +1302,364 @@ class UnifiedCaptureTests(unittest.TestCase):
             self.assertEqual(diag_report["capture_reader"], "fallback")
             self.assertIn("activity_core.py", diag_report.get("dry_scan_error", ""))
 
+    def test_13_chunking_handles_image_previews_and_command_output_safely(self):
+        import base64
+
+        png_big = base64.b64encode(b"\x89PNG\r\n\x1a\n" + os.urandom(150_000)).decode("ascii")
+        steps = [
+            {
+                "tool": "view_image",
+                "category": "file_read",
+                "label": f"Read tile{i}.png",
+                "time": _ts(i),
+                "status": "completed",
+                "files": [f"/work/tile{i}.png"],
+                "file_basis": "confirmed",
+                "src": f"imgfile:{i}:0",
+                "image_previews": [
+                    {
+                        "path": f"/work/tile{i}.png",
+                        "source": "tool_result",
+                        "mime_type": "image/png",
+                        "data_base64": png_big,
+                    }
+                ],
+            }
+            for i in range(2)
+        ]
+        # Pollute map summary steps intentionally to verify map_chunk strips private evidence fields.
+        shown = [dict(st) for st in steps]
+        payload = {
+            "schema_version": "1.0",
+            "host_id": "img-chunk-host",
+            "hostname": "img-chunk-host",
+            "os_name": "linux",
+            "arch": "x86_64",
+            "collected_at": time.time(),
+            "activity_enabled": True,
+            "activity_roots": ["/work"],
+            "capture_reader": "core",
+            "map_update": True,
+            "harnesses": [],
+            "workspaces": [],
+            "sessions": [
+                {
+                    "session_id": "codex:img-chunk",
+                    "host_id": "img-chunk-host",
+                    "harness": "codex",
+                    "agent_id": "work",
+                    "agent_name": "work",
+                    "workspace": "/work",
+                    "updated_at": time.time(),
+                    "status": "active",
+                    "steps": shown,
+                    "latest_action": shown[-1],
+                    "latest_work": shown[-1],
+                    "capture_steps": steps,
+                }
+            ],
+        }
+        chunks = activity_shipper.chunk_activity_payload(payload, max_bytes=320_000)
+        self.assertGreaterEqual(len(chunks), 3)
+        for ch in chunks:
+            self.assertLessEqual(len(json.dumps(ch).encode("utf-8")), 320_000)
+        map_blob = json.dumps(chunks[0]["sessions"])
+        self.assertNotIn("image_previews", map_blob)
+        delivered_steps = [
+            st
+            for ch in chunks[1:]
+            for sess in ch.get("sessions") or []
+            for st in sess.get("capture_steps") or []
+        ]
+        self.assertEqual(len(delivered_steps), 2)
+        self.assertEqual(sum(len(st.get("image_previews") or []) for st in delivered_steps), 2)
+
+        # Two previews inside a single step exceeding 320 KiB trims down to one preview rather than dropping the step.
+        multi_prev_step = {
+            **steps[0],
+            "image_previews": [steps[0]["image_previews"][0], steps[1]["image_previews"][0]],
+        }
+        single_payload = {
+            **payload,
+            "map_update": False,
+            "sessions": [{**payload["sessions"][0], "steps": [], "capture_steps": [multi_prev_step]}],
+        }
+        single_chunks = activity_shipper.chunk_activity_payload(single_payload, max_bytes=320_000)
+        kept = single_chunks[0]["sessions"][0]["capture_steps"]
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(len(kept[0]["image_previews"]), 1)
+        self.assertLessEqual(len(json.dumps(single_chunks[0]).encode("utf-8")), 320_000)
+
+        # Very tight chunk budget trims oversized preview & truncates output without dropping the step.
+        tight_step = {
+            "tool": "exec_command",
+            "category": "shell",
+            "label": "Run tests",
+            "time": _ts(5),
+            "status": "completed",
+            "files": [],
+            "command_input": "pytest -q",
+            "command_output": "line\n" * 3000,
+            "output_truncated": False,
+            "image_previews": [steps[0]["image_previews"][0]],
+        }
+        tight_payload = {
+            **payload,
+            "map_update": False,
+            "sessions": [{**payload["sessions"][0], "steps": [], "capture_steps": [tight_step]}],
+        }
+        tight_chunks = activity_shipper.chunk_activity_payload(tight_payload, max_bytes=8192)
+        tight_kept = tight_chunks[0]["sessions"][0]["capture_steps"]
+        self.assertEqual(len(tight_kept), 1)
+        self.assertNotIn("image_previews", tight_kept[0])
+        self.assertTrue(tight_kept[0]["output_truncated"])
+        self.assertLessEqual(len(json.dumps(tight_chunks[0]).encode("utf-8")), 8192)
+
+    def test_14_fallback_capture_opt_in_evidence_and_redaction(self):
+        import base64
+        import struct
+        import zlib
+
+        def _make_png() -> bytes:
+            def chunk(kind: bytes, data: bytes) -> bytes:
+                return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+            ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+            idat = zlib.compress(b"\x00\xff\x00\x00\xff")
+            return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+
+        png_bytes = _make_png()
+        png_b64 = base64.b64encode(png_bytes).decode("ascii")
+        webp_bytes = b"RIFF\x18\x00\x00\x00WEBPVP8 \x0c\x00\x00\x000\x00\x00\x9d\x01\x2a\x01\x00\x01\x00\x00\x00"
+        webp_b64 = base64.b64encode(webp_bytes).decode("ascii")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fx = _RuntimeFixtureBuilder(root)
+            snap_png = fx.work / "src" / "screen.png"
+            snap_png.write_bytes(png_bytes)
+            disk_png = fx.work / "src" / "disk.png"
+            disk_png.write_bytes(png_bytes)
+            notes_py = fx.work / "src" / "notes.py"
+            notes_py.write_text("print('hi')\n", encoding="utf-8")
+            old_ts = time.time() - 7200
+            os.utime(snap_png, (old_ts, old_ts))
+            os.utime(disk_png, (old_ts, old_ts))
+            after_disk_ts = datetime.datetime.fromtimestamp(
+                time.time() + 5, datetime.timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            svg_file = fx.work / "src" / "diagram.svg"
+            svg_file.write_text("<svg onload=alert(1)></svg>", encoding="utf-8")
+            sym_png = fx.work / "src" / "link.png"
+            sym_png.symlink_to(snap_png)
+            outside_png = fx.outside / "secret.png"
+            outside_png.write_bytes(png_bytes)
+            sym_outside_png = fx.work / "src" / "outside-link.png"
+            sym_outside_png.symlink_to(outside_png)
+
+            rollout = fx.codex(0)
+            _append(
+                rollout,
+                [
+                    {
+                        "timestamp": _ts(1),
+                        "payload": {
+                            "type": "item_completed",
+                            "item": {
+                                "type": "DynamicToolCall",
+                                "tool": "tool_call",
+                                "arguments": {"name": "openbot.view_image", "arguments": {"path": "src/screen.png"}},
+                                "success": True,
+                                "content_items": [{"type": "image", "mimeType": "image/png", "data": png_b64}],
+                            },
+                        },
+                    },
+                    {
+                        "timestamp": _ts(2),
+                        "payload": {
+                            "type": "item_completed",
+                            "item": {
+                                "type": "CommandExecution",
+                                "cwd": str(fx.work),
+                                "command": ["bash", "-lc", "pytest -q --password DEMO_VALUE"],
+                                "parsed_cmd": [{"type": "unknown", "cmd": "pytest"}],
+                                "aggregated_output": "line1\nghp_1234567890abcdefghijklmnop\nAKIAIOSFODNN7EXAMPLE\nline4",
+                                "exit_code": 2,
+                            },
+                        },
+                    },
+                ],
+            )
+
+            claude_log = fx.home / ".claude/projects/work/ev-claude.jsonl"
+            _append(
+                claude_log,
+                [
+                    {"type": "user", "cwd": str(fx.work), "timestamp": _ts(0), "message": {"role": "user", "content": "check"}},
+                    {
+                        "type": "assistant",
+                        "cwd": str(fx.work),
+                        "timestamp": after_disk_ts,
+                        "message": {
+                            "model": "claude-sonnet-4-20250514",
+                            "content": [
+                                {"type": "tool_use", "id": "tu_bash_ok", "name": "Bash", "input": {"command": "echo hello"}},
+                                {"type": "tool_use", "id": "tu_bash_env", "name": "Bash", "input": {"command": "cat .env"}},
+                                {"type": "tool_use", "id": "tu_read_webp", "name": "Read", "input": {"file_path": str(snap_png)}},
+                                {"type": "tool_use", "id": "tu_read_disk", "name": "Read", "input": {"file_path": str(disk_png)}},
+                                {"type": "tool_use", "id": "tu_read_text", "name": "Read", "input": {"file_path": str(notes_py)}},
+                                {"type": "tool_use", "id": "tu_read_sym", "name": "Read", "input": {"file_path": str(sym_outside_png)}},
+                                {"type": "tool_use", "id": "tu_read_svg", "name": "Read", "input": {"file_path": str(svg_file)}},
+                            ],
+                        },
+                    },
+                    {
+                        "type": "user",
+                        "cwd": str(fx.work),
+                        "timestamp": _ts(2),
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "tu_bash_ok",
+                                    "content": [{"type": "text", "text": f"out-a\npassword=verysecretpass\n{SYNTH_SECRET}\nout-b"}],
+                                },
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "tu_bash_env",
+                                    "content": "TOP_SECRET_ENV_VALUE=leaked_value_999",
+                                },
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "tu_read_webp",
+                                    "content": [{"type": "image", "source": {"media_type": "image/webp", "data": webp_b64}}],
+                                },
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "tu_read_text",
+                                    "content": [{"type": "text", "text": f"line-one\ntoken={SYNTH_SECRET}"}],
+                                },
+                            ],
+                        },
+                    },
+                ],
+            )
+
+            oc_db = fx.home / ".local/share/opencode/opencode.db"
+            oc_db.parent.mkdir(parents=True, exist_ok=True)
+            now_ms = int(time.time() * 1000)
+            with sqlite3.connect(oc_db) as conn:
+                conn.execute("CREATE TABLE IF NOT EXISTS session_v2(id TEXT PRIMARY KEY, directory TEXT, time_updated INTEGER, model TEXT, title TEXT)")
+                conn.execute("CREATE TABLE IF NOT EXISTS session_message(session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT)")
+                conn.execute("INSERT INTO session_v2 VALUES ('oc_ev', ?, ?, 'glm-x', 'Evidence')", (str(fx.work), now_ms))
+                conn.execute(
+                    "INSERT INTO session_message VALUES ('oc_ev', 'assistant', 1, ?, ?)",
+                    (
+                        now_ms - 10_000,
+                        json.dumps(
+                            {
+                                "content": [
+                                    {
+                                        "type": "tool",
+                                        "name": "bash",
+                                        "state": {
+                                            "status": "completed",
+                                            "input": {"command": "ls -la"},
+                                            "output": "-----BEGIN RSA PRIVATE KEY-----\nSECRET\n",
+                                            "metadata": {"exit": 0},
+                                        },
+                                    }
+                                ]
+                            }
+                        ),
+                    ),
+                )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SWARMCONTROL_SHARE_COMMANDS": "0",
+                    "SWARMCONTROL_SHARE_COMMAND_OUTPUT": "0",
+                    "SWARMCONTROL_SHARE_FILE_PREVIEWS": "0",
+                },
+                clear=False,
+            ):
+                off_payload, _, _ = activity_shipper.collect_incremental_activity(
+                    raw_roots=[str(fx.work)],
+                    host_id="fb-ev-host",
+                    home_dir=fx.home,
+                    use_core=False,
+                )
+            assert off_payload is not None
+            off_blob = json.dumps(off_payload)
+            for absent in ("command_input", "command_output", "image_previews", "text_previews", png_b64, webp_b64):
+                self.assertNotIn(absent, off_blob)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SWARMCONTROL_SHARE_COMMANDS": "1",
+                    "SWARMCONTROL_SHARE_COMMAND_OUTPUT": "1",
+                    "SWARMCONTROL_SHARE_FILE_PREVIEWS": "1",
+                },
+                clear=False,
+            ):
+                on_payload, _, _ = activity_shipper.collect_incremental_activity(
+                    raw_roots=[str(fx.work)],
+                    host_id="fb-ev-host",
+                    home_dir=fx.home,
+                    use_core=False,
+                )
+            assert on_payload is not None
+            on_blob = json.dumps(on_payload)
+            for forbidden in (
+                "DEMO_VALUE",
+                "ghp_1234567890abcdefghijklmnop",
+                "AKIAIOSFODNN7EXAMPLE",
+                "verysecretpass",
+                SYNTH_SECRET,
+                "leaked_value_999",
+                "PRIVATE KEY-----",
+                "<svg",
+            ):
+                self.assertNotIn(forbidden, on_blob)
+
+            by_harness = {s["harness"]: s for s in on_payload["sessions"]}
+            for sess in by_harness.values():
+                for public_st in (sess.get("steps") or []) + [
+                    x for x in (sess.get("latest_action"), sess.get("latest_work")) if isinstance(x, dict)
+                ]:
+                    for priv in activity_shipper.PRIVATE_STEP_FIELDS:
+                        self.assertNotIn(priv, public_st)
+
+            codex_steps = by_harness["codex"]["capture_steps"]
+            codex_cmd = next(st for st in codex_steps if st.get("command_input"))
+            self.assertEqual(codex_cmd["exit_code"], 2)
+            self.assertIn("line1\n", codex_cmd["command_output"])
+            codex_img = next(st for st in codex_steps if st.get("image_previews"))
+            self.assertEqual(codex_img["image_previews"][0]["mime_type"], "image/png")
+
+            claude_steps = by_harness["claude-code"]["capture_steps"]
+            cl_cmd = next(st for st in claude_steps if st.get("command_input") == "echo hello")
+            self.assertIn("out-a\n", cl_cmd["command_output"])
+            self.assertIn("out-b", cl_cmd["command_output"])
+            cl_imgs = [st for st in claude_steps if st.get("image_previews")]
+            self.assertEqual(len(cl_imgs), 2)
+            by_src = {st["image_previews"][0]["source"]: st["image_previews"][0]["mime_type"] for st in cl_imgs}
+            self.assertEqual(by_src, {"tool_result": "image/webp", "workspace_snapshot": "image/png"})
+            self.assertIsNone(activity_shipper._workspace_image(str(sym_png), after_disk_ts, [fx.work]))
+            cl_texts = [st for st in claude_steps if st.get("text_previews")]
+            self.assertEqual(len(cl_texts), 1)
+            self.assertIn("line-one\n", cl_texts[0]["text_previews"][0]["text"])
+            self.assertNotIn(SYNTH_SECRET, cl_texts[0]["text_previews"][0]["text"])
+            ws_cats = {rf["rel_path"]: rf["category"] for ws in on_payload["workspaces"] for rf in ws.get("recent_files") or []}
+            self.assertEqual(ws_cats.get("src/screen.png"), "image")
+
+            oc_steps = by_harness["opencode"]["capture_steps"]
+            self.assertEqual(oc_steps[0]["exit_code"], 0)
+            self.assertEqual(oc_steps[0]["command_output"], "[protected content]")
+
 
 if __name__ == "__main__":
     unittest.main()
