@@ -85,7 +85,7 @@ class ReleaseManifestHTTPS(unittest.TestCase):
         self.assertEqual(int(head["Content-Length"]), len(raw))
         self.assertEqual(json.loads(self.request("GET", "/health")[1])["version_url"], VERSION_PATH)
 
-        expected_paths = {"/": {"/app.js", "/activity.js", "/activity-product.css", "/styles.css"},
+        expected_paths = {"/": {"/app.js", "/activity.js", "/activity-product.css", "/repro-cases.js", "/repro-cases.css", "/styles.css"},
                           "/live": {"/live.js", "/live.css"}}
         self.assertEqual(set(manifest["pages"]), set(expected_paths))
         self.assertEqual(set(manifest["assets"]), expected_paths["/"] | expected_paths["/live"])
@@ -102,7 +102,7 @@ class ReleaseManifestHTTPS(unittest.TestCase):
         cmd = self.verify()
         self.assertEqual(cmd.returncode, 0, cmd.stderr + cmd.stdout)
         self.assertIn("PASS Published manifest", cmd.stdout)
-        self.assertEqual(cmd.stdout.count("PASS Published bytes "), 8)
+        self.assertEqual(cmd.stdout.count("PASS Published bytes "), 10)
         self.assertIn("PASS Anonymous monitoring API denied", cmd.stdout)
 
     def test_matching_manifest_and_stale_cached_asset_fails(self):
@@ -145,7 +145,7 @@ class ReleaseManifestHTTPS(unittest.TestCase):
             cmd = self.verify(other)
         self.assertEqual(cmd.returncode, 1, cmd.stderr + cmd.stdout)
         self.assertIn("FAIL Published manifest", cmd.stdout)
-        self.assertEqual(cmd.stdout.count("PASS Published bytes "), 8)
+        self.assertEqual(cmd.stdout.count("PASS Published bytes "), 10)
 
 
 if __name__ == "__main__":

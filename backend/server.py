@@ -33,6 +33,7 @@ from auth import LoginRateLimiter, SESSION_TTL_SECONDS, token_organization  # no
 from db import Database  # noqa: E402
 import incidents
 import event_evidence
+import repro_cases
 from event_feed import MAX_LIMIT as FEED_MAX_LIMIT, FeedError, feed as event_feed
 from identity import Directory, IdentityError, role
 from live_history import history
@@ -72,10 +73,13 @@ def _trusted_proxy_networks() -> list[ipaddress._BaseNetwork]:
 
 
 MONITORING_ROUTES = {"/api/v1/" + path for path in
-                     ("live-records", "event-feed", "activity", "work-board", "links", "digest", "hosts", "alerts", "events", "overview")}
+                     ("live-records", "event-feed", "activity", "work-board", "links", "digest", "hosts", "alerts", "events", "overview", "repro-cases")}
 EVENT_DETAIL = re.compile(r"/api/v1/events/([0-9]{1,19})/(?:evidence|images/([a-f0-9]{64}))")
 ALERT_DETAIL = re.compile(r"/api/v1/alerts/([0-9]{1,19})")
 ALERT_ACTION = re.compile(r"/api/v1/alerts/([0-9]{1,19})/(ack|owner|resolve)")
+REPRO_CASE_DETAIL = re.compile(r"/api/v1/repro-cases/([0-9]{1,19})")
+REPRO_CASE_EXPORT = re.compile(r"/api/v1/repro-cases/([0-9]{1,19})/export")
+REPRO_CASE_RUNS = re.compile(r"/api/v1/repro-cases/([0-9]{1,19})/runs")
 ADMIN_READS = {"/api/v1/" + path for path in ("members", "invitations", "tokens", "audit", "audit/verify")}
 
 
@@ -302,7 +306,10 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
             token = self._bearer()
             if token["scope"] == "ingest":
                 raise IdentityError(401, "A reader credential is required")
-            if token["scope"] == "read" and self.command in {"GET", "HEAD"} and (path in MONITORING_ROUTES or ALERT_DETAIL.fullmatch(path) or EVENT_DETAIL.fullmatch(path)):
+            if token["scope"] == "read" and self.command in {"GET", "HEAD"} and (
+                path in MONITORING_ROUTES or ALERT_DETAIL.fullmatch(path) or EVENT_DETAIL.fullmatch(path)
+                or REPRO_CASE_DETAIL.fullmatch(path) or REPRO_CASE_EXPORT.fullmatch(path)
+            ):
                 return {"org_id": self.resources.org_id, "role": "viewer", "username": "read token"}
             raise IdentityError(403, "Token does not grant access to this route")
         user = self._get_session_user()
@@ -618,6 +625,58 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
             if alert_detail:
                 self._get_incident(user, self._id(alert_detail[1]), qs)
                 return
+            if path == "/api/v1/repro-cases":
+                org = self.resources.org_id
+                if "organization_id" in qs and qs["organization_id"] != [str(org)]:
+                    raise IdentityError(409, "Active organization changed")
+                self._send_json(
+                    repro_cases.list_overview(
+                        self.resources.db,
+                        org,
+                        can_write=user["role"] in ("operator", "admin"),
+                        role=user["role"],
+                    )
+                )
+                return
+            repro_export = REPRO_CASE_EXPORT.fullmatch(path)
+            if repro_export:
+                org = self.resources.org_id
+                if "organization_id" in qs and qs["organization_id"] != [str(org)]:
+                    raise IdentityError(409, "Active organization changed")
+                fmt = (qs.get("format", ["json"])[0] or "json")
+                exported = repro_cases.export_case(
+                    self.resources.db,
+                    org,
+                    self._id(repro_export[1]),
+                    fmt,
+                    can_write=user["role"] in ("operator", "admin"),
+                    role=user["role"],
+                )
+                if exported is None:
+                    raise IdentityError(404, "Repro case not found")
+                payload, ctype, filename = exported
+                self._send_bytes(
+                    payload,
+                    content_type=ctype,
+                    extra_headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+                )
+                return
+            repro_detail = REPRO_CASE_DETAIL.fullmatch(path)
+            if repro_detail:
+                org = self.resources.org_id
+                if "organization_id" in qs and qs["organization_id"] != [str(org)]:
+                    raise IdentityError(409, "Active organization changed")
+                detail = repro_cases.get_case(
+                    self.resources.db,
+                    org,
+                    self._id(repro_detail[1]),
+                    can_write=user["role"] in ("operator", "admin"),
+                    role=user["role"],
+                )
+                if detail is None:
+                    raise IdentityError(404, "Repro case not found")
+                self._send_json(detail)
+                return
             if path == "/api/v1/alerts":
                 status_filter = (qs.get("status", ["OPEN"])[0] or "OPEN").upper()
                 where = {"ALL": "", "ACTIVE": " WHERE " + incidents.ACTIVE}.get(status_filter, " WHERE status=?")
@@ -829,6 +888,32 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
         match = ALERT_ACTION.fullmatch(path)
         if match:
             self._update_incident(user, self._id(match[1]), match[2], body)
+            return
+        if path == "/api/v1/repro-cases":
+            with self._resource_mutation(user, "admin", "operator") as db:
+                if "organization_id" in body and body["organization_id"] is not None:
+                    raw_oid = body["organization_id"]
+                    if isinstance(raw_oid, (bool, dict, list)):
+                        raise ValidationError("Invalid organization_id")
+                    if str(raw_oid) != str(user["org_id"]):
+                        raise IdentityError(409, "Active organization changed")
+                created = repro_cases.create_case(db, self.resources.org_id, user["username"], body, role=user["role"])
+            self._send_json(created, 201)
+            return
+        repro_run = REPRO_CASE_RUNS.fullmatch(path)
+        if repro_run:
+            case_id = self._id(repro_run[1])
+            with self._resource_mutation(user, "admin", "operator") as db:
+                if "organization_id" in body and body["organization_id"] is not None:
+                    raw_oid = body["organization_id"]
+                    if isinstance(raw_oid, (bool, dict, list)):
+                        raise ValidationError("Invalid organization_id")
+                    if str(raw_oid) != str(user["org_id"]):
+                        raise IdentityError(409, "Active organization changed")
+                recorded = repro_cases.record_run(db, self.resources.org_id, case_id, user["username"], body, role=user["role"])
+                if recorded is None:
+                    raise IdentityError(404, "Repro case not found")
+            self._send_json(recorded, 201)
             return
         raise IdentityError(404, "Not found")
 
