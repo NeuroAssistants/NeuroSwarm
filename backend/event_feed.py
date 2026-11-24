@@ -100,8 +100,10 @@ def feed(db: Any, cursor: str | None = None, limit: int | str | None = None) -> 
         # First read: the newest window of each kind, plus a cursor at the current end of both.
         events = db.query_all("SELECT * FROM events ORDER BY id DESC LIMIT ?", (INITIAL_WINDOW,))
         alerts = db.query_all("SELECT * FROM incident_cases ORDER BY updated_at DESC, id DESC LIMIT ?", (INITIAL_WINDOW,))
-        top = db.query_all("SELECT COALESCE(MAX(id), 0) AS e FROM events")[0]["e"]
-        a_top = float(db.query_all("SELECT COALESCE(MAX(updated_at), 0) AS a FROM incident_cases")[0]["a"])
+        # Advance only over rows returned here. A concurrent insert after the
+        # window query must still be delivered on the next poll.
+        top = events[0]["id"] if events else 0
+        a_top = float(alerts[0]["updated_at"]) if alerts else 0.0
         records = [_event(r) for r in events] + [_alert(r) for r in alerts]
         records.sort(key=lambda x: (x["ts"], x["key"]))
         return {"version": FEED_VERSION, "reset": True, "cursor": make_cursor(top, a_top, 0, "c"), "more": False,
