@@ -97,6 +97,56 @@ class EvidenceHTTPTests(ServerHarness):
             for table in ("event_images", "event_execution", "event_texts"):
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM "+table).fetchone()[0], 0)
 
+    def test_simultaneous_commands_link_by_record_position_even_after_clock_correction(self):
+        self.login()
+        sender = self.bearer(self.token("paired"))
+        collected = time.time() + 180
+        ts = datetime.fromtimestamp(collected, timezone.utc).isoformat()
+        steps = [
+            {"tool": "exec_command", "category": "shell", "label": "Run tests", "time": ts,
+             "program": "pytest", "src": f"logfile:40:{i}", "command_output": name}
+            for i, name in enumerate(("first output", "second output"))
+        ]
+        # The legacy map entry looks identical, but never provided a source position.
+        unlinked = {k: v for k, v in steps[0].items() if k not in ("src", "command_output")}
+        session = {"session_id": "same-second", "harness": "codex", "agent_name": "builder",
+                   "workspace": "/work", "steps": [steps[1], unlinked, steps[0]], "capture_steps": steps}
+        payload = {"host_id": "same-host", "activity_enabled": True, "activity_roots": ["/work"],
+                   "collected_at": collected, "sessions": [session]}
+        for _ in range(2):
+            status, result, _ = self.req("POST", "/api/v1/ingest/activity", payload, headers=sender, cookie=False)
+            self.assertEqual(status, 200, result)
+
+        def activity():
+            status, view, _ = self.req("GET", "/api/v1/activity")
+            self.assertEqual(status, 200)
+            return view["sessions"][0]["steps"]
+
+        # A retransmission cannot replace an already recorded command result.
+        payload["sessions"] = [{**session, "capture_steps": [dict(step, command_output="replacement") for step in steps]}]
+        self.assertEqual(self.req("POST", "/api/v1/ingest/activity", payload, headers=sender, cookie=False)[0], 200)
+        second, old, first = activity()
+        self.assertNotEqual(first["event_id"], second["event_id"])
+        self.assertNotIn("event_id", old)
+        for step, expected in ((first, "first output"), (second, "second output")):
+            status, detail, _ = self.req("GET", f"{BASE}/{step['event_id']}/evidence?organization_id={step['event_org']}")
+            self.assertEqual(status, 200)
+            self.assertEqual(detail["command_output"], expected)
+        # A different session that reuses a byte offset cannot claim it. The agent
+        # also cannot claim an ID directly in its snapshot.
+        payload["sessions"] = [{**session, "session_id": "other-session", "capture_steps": [],
+                                "steps": [dict(steps[0], event_id=first["event_id"], event_org=1)]}]
+        self.assertEqual(self.req("POST", "/api/v1/ingest/activity", payload, headers=sender, cookie=False)[0], 200)
+        self.assertNotIn("event_id", activity()[0])
+
+        _, _, headers = self.req("POST", "/api/v1/auth/register", {
+            "organization": "second", "username": "other-reader", "password": secrets.token_urlsafe(22)}, cookie=False)
+        self.cookie = headers["set-cookie"].split(";")[0]
+        payload["sessions"] = [{**session, "capture_steps": []}]
+        status, _, _ = self.req("POST", "/api/v1/ingest/activity", payload, headers=self.bearer(self.token("other")), cookie=False)
+        self.assertEqual(status, 200)
+        self.assertTrue(all("event_id" not in step for step in activity()))
+
     def test_large_unrelated_metadata_retains_files_and_legacy_details_are_explicitly_absent(self):
         self.login()
         with self.ctx.db.transaction() as conn:
@@ -128,6 +178,54 @@ class EvidenceHTTPTests(ServerHarness):
 
 
 class SourceEvidenceTests(CaptureHarness):
+    def test_claude_result_arriving_on_a_later_scan_completes_only_its_call(self):
+        root = str(self.roots["claude-team"])
+        label = stamp()
+        calls = [{"type": "tool_use", "name": "Bash", "id": f"test-{i}", "input": {"command": "pytest -q"}}
+                 for i in range(2)]
+        log = self.claude(0, extra=[{"type": "assistant", "timestamp": label, "cwd": root,
+                                     "message": {"content": calls}}])
+
+        def result(call, output):
+            return {"type": "user", "timestamp": stamp(5), "cwd": root, "message": {"content": [
+                {"type": "tool_result", "tool_use_id": call, "content": output}]}}
+
+        with patch.dict(os.environ, {"SWARMCONTROL_SHARE_COMMANDS": "1", "SWARMCONTROL_SHARE_COMMAND_OUTPUT": "1"}):
+            self.assertEqual(self.scan()["inserted"], 2)
+            events = [r["id"] for r in self.dbo.query_all("SELECT id FROM events WHERE event_type='observed_step' ORDER BY id")]
+            def outputs():
+                return [event_evidence.detail(self.dbo, 1, event)["command_output"] for event in events]
+            self.assertEqual(outputs(), [None, None])
+            append(log, [result("test-1", "two passed"), result("test-0", "")])
+            self.assertEqual(self.scan().get("inserted", 0), 0)
+            self.assertEqual(outputs(), ["", "two passed"])
+            self.assertEqual(self.scan().get("inserted", 0), 0)
+
+    def test_map_and_journal_agree_on_source_positions_for_all_four_readers(self):
+        self.codex(3)
+        self.claude(3)
+        self.antigravity(3)
+        self.opencode(3)
+        snapshot = inspector.collect_activity(self.scope)
+        self.assertEqual(len(snapshot["sessions"]), 4)
+        self.assertEqual(self.scan()["inserted"], 12)
+        linked = event_evidence.link_map_steps(self.dbo, 1, snapshot)
+        ids = set()
+        for session in linked["sessions"]:
+            self.assertEqual(len(session["steps"]), 3, session["harness"])
+            for step in session["steps"]:
+                self.assertEqual(step.get("event_org"), 1, (session["harness"], step))
+                detail = event_evidence.detail(self.dbo, 1, step["event_id"])
+                self.assertEqual(detail["session"], session["session_id"])
+                ids.add(step["event_id"])
+            self.assertEqual(session["steps"][-1]["event_id"], session["latest_work"]["event_id"])
+        self.assertEqual(len(ids), 12)
+        self.assertNotIn("event_id", snapshot["sessions"][0]["steps"][0], "the source cache is immutable")
+        self.conn.execute("DELETE FROM events")
+        self.conn.commit()
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM event_origins").fetchone()[0], 0)
+        self.assertNotIn("event_id", event_evidence.link_map_steps(self.dbo, 1, snapshot)["sessions"][0]["steps"][0])
+
     def test_workspace_snapshot_is_versioned_and_never_follows_a_link(self):
         root = self.roots["codex-team"]
         file = root / "src/tile.png"

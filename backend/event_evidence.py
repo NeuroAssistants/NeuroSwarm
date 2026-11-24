@@ -6,6 +6,7 @@ import binascii
 import hashlib
 import json
 import math
+import re
 import zlib
 
 from activity_inspector import evidence_text, is_sensitive_path
@@ -13,6 +14,60 @@ from activity_inspector import evidence_text, is_sensitive_path
 MAX_IMAGE_BYTES = 160 * 1024
 WORK_FIELDS = ("session", "parent_session", "workspace", "tool", "action", "basis", "outcome",
                "program", "task_id", "agent", "runtime")
+
+
+SOURCE_POSITION = re.compile(r"[A-Za-z0-9_-]{4,64}:[0-9]{1,12}:[0-9]{1,6}")
+
+
+def step_reference(host, session, step):
+    """Bind a map step to its source position on the same host, in the same session.
+    The source timestamp and tool disambiguate reused byte offsets after rotation,
+    including when the server corrects clock skew before inserting an event.
+    """
+    src = step.get("src")
+    if not host or not session or not isinstance(src, str) or not SOURCE_POSITION.fullmatch(src):
+        return None
+    identity = [host, session, src, step.get("time"), step.get("tool")]
+    return hashlib.sha256(json.dumps(identity, ensure_ascii=True).encode("ascii")).hexdigest()
+
+
+def link_map_steps(db, organization, snapshot):
+    """Attach exact event IDs to lightweight map steps with batched indexed reads.
+    Leave the cached source snapshot untouched. Older and as-yet unrecorded steps
+    can still open their session, but have no exact journal link.
+    """
+    pending = {}
+
+    def bind(step, host, session_id):
+        ref = step_reference(host, session_id, step)
+        if ref is None:
+            return step
+        copy = dict(step)
+        pending.setdefault(ref, []).append(copy)
+        return copy
+
+    sessions = []
+    for session in snapshot.get("sessions", []):
+        host = session.get("host_id") or snapshot.get("host_id")
+        session_id = session.get("session_id")
+        mapped = dict(session)
+        if isinstance(session.get("steps"), list):
+            mapped["steps"] = [bind(step, host, session_id) for step in session["steps"]]
+        for field in ("latest_action", "latest_work"):
+            if isinstance(session.get(field), dict):
+                mapped[field] = bind(session[field], host, session_id)
+        sessions.append(mapped)
+    if not pending:
+        return snapshot
+    refs = list(pending)
+    for start in range(0, len(refs), 400):
+        batch = refs[start:start + 400]
+        marks = ",".join("?" for _ in batch)
+        rows = db.query_all(f"SELECT ref,event_id FROM event_origins WHERE ref IN ({marks})", batch)
+        for row in rows:
+            for step in pending[row["ref"]]:
+                step.update(event_id=row["event_id"], event_org=organization)
+    return {**snapshot, "sessions": sessions}
 
 
 def work_summary(raw):
@@ -40,6 +95,11 @@ def work_summary(raw):
 
 
 def ensure_tables(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS event_origins (
+        event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE, ref TEXT NOT NULL UNIQUE)""")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS delete_event_origin AFTER DELETE ON events BEGIN
+        DELETE FROM event_origins WHERE event_id=OLD.id;
+        END""")
     conn.execute("""CREATE TABLE IF NOT EXISTS event_execution (
         event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
         command_input TEXT, command_output TEXT, exit_code INTEGER, output_truncated INTEGER NOT NULL)""")
@@ -113,7 +173,39 @@ def image_type(data):
     return None
 
 
-def store(conn, event_id, step, shared_paths, stamp):
+def complete_recorded_result(conn, step, shared_paths, stamp, ref):
+    """A collector can see a call and its tool result on different scans.
+    Fill only missing values on that exact recorded step. Never attach results
+    to a legacy time match or serve a path absent from the original event.
+    """
+    results = [item for item in shared_paths if item[1].get("source") == "tool_result"]
+    if not ref or (not results and step.get("command_output") is None and type(step.get("exit_code")) is not int):
+        return
+    row = conn.execute("""SELECT o.event_id,e.metadata_json,x.command_output IS NULL,x.exit_code IS NULL
+                          FROM event_origins o JOIN events e ON e.id=o.event_id
+                          LEFT JOIN event_execution x ON x.event_id=o.event_id WHERE o.ref=?""", (ref,)).fetchone()
+    if row is None:
+        return
+    missing_output = row[2] and isinstance(step.get("command_output"), str)
+    missing_exit = row[3] and type(step.get("exit_code")) is int
+    if not (results or missing_output or missing_exit):
+        return
+    original = work_summary(row[1])
+    if original.get("program") != step.get("program"):
+        return
+    if results:
+        existing = conn.execute("""SELECT 'image_previews',path FROM event_images WHERE event_id=?
+                                   UNION ALL SELECT 'text_previews',path FROM event_texts WHERE event_id=?""",
+                                (row[0], row[0]))
+        recorded = {(field, path) for field, path in existing}
+        results = [item for item in results if item[2] in original.get("files", []) and (item[0], item[2]) not in recorded]
+    if results or missing_output or missing_exit:
+        store(conn, row[0], step, results, stamp)
+
+
+def store(conn, event_id, step, shared_paths, stamp, ref=None):
+    if ref:
+        conn.execute("INSERT INTO event_origins(event_id,ref) VALUES(?,?)", (event_id, ref))
     if step.get("category") in ("shell", "file_read"):
         inp, _ = evidence_text(step.get("command_input"), 1024)
         out, cut = evidence_text(step.get("command_output"), 4096)
@@ -121,7 +213,14 @@ def store(conn, event_id, step, shared_paths, stamp):
         if type(code) is not int or not -(2**31) <= code < 2**31:
             code = None
         if inp is not None or out is not None or code is not None:
-            conn.execute("INSERT INTO event_execution VALUES(?,?,?,?,?)",
+            conn.execute("""INSERT INTO event_execution VALUES(?,?,?,?,?) ON CONFLICT(event_id) DO UPDATE SET
+                command_input=coalesce(command_input,excluded.command_input),
+                command_output=coalesce(command_output,excluded.command_output),
+                exit_code=coalesce(exit_code,excluded.exit_code),
+                output_truncated=CASE WHEN command_output IS NULL THEN excluded.output_truncated ELSE output_truncated END
+                WHERE (command_input IS NULL AND excluded.command_input IS NOT NULL)
+                   OR (command_output IS NULL AND excluded.command_output IS NOT NULL)
+                   OR (exit_code IS NULL AND excluded.exit_code IS NOT NULL)""",
                          (event_id, inp, out, code, cut or step.get("output_truncated") is True))
     for field, preview, display in shared_paths:
         if field == "text_previews":

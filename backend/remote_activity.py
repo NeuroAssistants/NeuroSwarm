@@ -21,6 +21,7 @@ from collections import Counter
 from typing import Any
 
 import step_journal
+from event_evidence import SOURCE_POSITION as SRC_RE
 from validation import ValidationError, validate_host_id
 
 MAX_ACTIVITY_SESSIONS = 200
@@ -34,7 +35,6 @@ MAX_ACTIVITY_PLAN_ITEMS = 20
 MAX_ACTIVITY_FILES = 25
 STEP_RETENTION_SEC = step_journal.RETENTION
 
-SRC_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}:[0-9]{1,12}:[0-9]{1,6}$")
 SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
 
 CATEGORY_LABEL = {

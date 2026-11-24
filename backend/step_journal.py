@@ -620,8 +620,8 @@ def project_rows(
             else:
                 legacy = [r_v1_key]
 
-            if (scoped and evidence_by_key is not None and
-                    any(k in step for k in ("command_input", "command_output", "exit_code", "image_previews", "text_previews"))):
+            if scoped and evidence_by_key is not None:
+                ref = event_evidence.step_reference(host_id, session_id, step)
                 shared_paths = []
                 previews = [(field, item) for field in ("image_previews", "text_previews")
                             if isinstance(step.get(field), list) for item in step[field][:2]]
@@ -638,7 +638,8 @@ def project_rows(
                         display = primary or extra
                         if display and display[0] in all_files:
                             shared_paths.append((field, item, display[0]))
-                evidence_by_key.setdefault(key, (step, shared_paths))
+                if ref or shared_paths or any(k in step for k in ("command_input", "command_output", "exit_code")):
+                    evidence_by_key.setdefault(key, (step, shared_paths, ref))
             severity = step_severity(outcome)
             yield key, legacy, timestamp, (
                 host_id,
@@ -780,6 +781,9 @@ def persist_steps(
     for key, legacy, stamp, event in rows:
         if conn.execute("SELECT 1 FROM observed_step_keys WHERE digest=?", (key,)).fetchone():
             counts["duplicates"] += 1
+            if key in evidence_by_key:
+                step, paths, ref = evidence_by_key[key]
+                event_evidence.complete_recorded_result(conn, step, paths, stamp, ref)
             continue
         exact = [k for k in legacy if isinstance(k, str)]
         near = [k for k in legacy if isinstance(k, tuple)]
@@ -802,8 +806,8 @@ def persist_steps(
             if getattr(cur, "lastrowid", None):
                 claimed.add(int(cur.lastrowid))
                 if key in evidence_by_key:
-                    step, shared_paths = evidence_by_key[key]
-                    event_evidence.store(conn, cur.lastrowid, step, shared_paths, stamp)
+                    step, shared_paths, ref = evidence_by_key[key]
+                    event_evidence.store(conn, cur.lastrowid, step, shared_paths, stamp, ref)
             counts["inserted"] += 1
         else:
             counts["duplicates"] += 1

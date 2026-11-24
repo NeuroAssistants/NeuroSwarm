@@ -537,9 +537,10 @@ TAIL_CEILING = 4_000_000  # bytes; logs with huge records (e.g. screenshots) nee
 MIN_USEFUL_LINES = 40
 
 
-def _tail_lines(path: Path, max_bytes: int = 160_000, max_lines: int = 400) -> list[str]:
-    """Recent complete lines. If the window holds few usable lines (huge records at the end), widen it ×4 up to
-    TAIL_CEILING, so a session with large tool outputs never looks empty. Lines ≥ 400 kB are skipped."""
+def _tail_lines(path: Path, max_bytes: int = 160_000, max_lines: int = 400, *, positions=False):
+    """Read the recent tail, widening the window when large records hide the last steps.
+    With positions, each line carries the same byte offset used by incremental capture.
+    """
     try:
         size = path.stat().st_size
         window = max_bytes
@@ -548,8 +549,18 @@ def _tail_lines(path: Path, max_bytes: int = 160_000, max_lines: int = 400) -> l
                 if size > window:
                     f.seek(size - window)
                     f.readline()
-                data = f.read(window).decode("utf-8", errors="ignore")
-            lines = [ln for ln in data.splitlines()[-max_lines:] if len(ln) < 400_000]
+                data = f.read(window)
+                end = f.tell()
+            # Split the bytes before decoding. Character offsets (e.g. for UTF-8 and CRLF)
+            # are not byte offsets and would select a different record in the journal.
+            tail = data.splitlines(keepends=True)[-max_lines:]
+            pos = end - sum(map(len, tail))
+            lines = []
+            for raw in tail:
+                line = raw.decode("utf-8", errors="ignore").rstrip("\r\n")
+                if len(line) < 400_000:
+                    lines.append((pos, line) if positions else line)
+                pos += len(raw)
             if len(lines) >= MIN_USEFUL_LINES or window >= size or window >= TAIL_CEILING:
                 return lines
             window = min(window * 4, TAIL_CEILING)
@@ -697,10 +708,18 @@ class Capture:
 
 
 def _lines(path: Path, max_bytes: int = 160_000, max_lines: int = 400):
-    """Capture mode: every new line with its position. Map mode: the recent tail, as before."""
+    """Both the map and journal identify a step by its original log record and ordinal."""
+    global _POS, _POS_N
     if _CAPTURE is not None:
-        return _CAPTURE.lines(path)
-    return _tail_lines(path, max_bytes, max_lines)
+        yield from _CAPTURE.lines(path)
+        return
+    key = _file_key(path)
+    try:
+        for offset, line in _tail_lines(path, max_bytes, max_lines, positions=True):
+            _POS, _POS_N = (key, offset), 0
+            yield line
+    finally:
+        _POS = None
 
 
 def _checklist(text: str) -> list[dict[str, Any]]:
@@ -1333,8 +1352,7 @@ def antigravity_sessions(limit: int = 8) -> list[dict[str, Any]]:
 
 # --- OpenCode --------------------------------------------------------------------------
 def _opencode_tools(conn: sqlite3.Connection, sid: str) -> list[sqlite3.Row]:
-    # Only extract structured tool metadata. Never select message text, command lines,
-    # reasoning, tool output, or the contents passed to an editor.
+    # Select typed tool records. Read a tool's output only during an opted-in journal scan.
     messages, parts = (400, CAPTURE_OPENCODE_PARTS) if _CAPTURE is not None else (24, 40)
     max_message = CAPTURE_MAX_RECORD if _CAPTURE is not None else 196_608  # whole messages for the journal
     try:
@@ -1456,9 +1474,8 @@ def opencode_sessions(limit: int = 6) -> list[dict[str, Any]]:
         title = redact(get("title") or get("slug") or "OpenCode session", 160)
         card["what_done"] = f"{title} · {files} file(s) changed, +{adds}/−{dels} lines" if files else title
         tools = by_session.get(r["id"], [])
-        source = ""
+        source = _file_key("opencode:" + str(get("id")))
         if _CAPTURE is not None:
-            source = _file_key("opencode:" + str(get("id")))
             prev = _CAPTURE.offsets.get(source)
             top = max((t["seq"] * 10_000 + int(t["part"] or 0) for t in tools if isinstance(t["seq"], int)), default=0)
             _CAPTURE.note(source, {"inode": 0, "offset": int(float(get("time_updated") or 0)),

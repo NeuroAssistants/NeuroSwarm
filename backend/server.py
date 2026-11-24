@@ -365,7 +365,7 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
         if (self.resources.org_id == 1 and not snapshot.get("hosts") and
                 (os.environ.get("SWARMCONTROL_ACTIVITY_ROOTS", "").strip() or
                  os.environ.get("SWARMCONTROL_ACTIVITY_ADAPTERS", "").strip())):
-            return ACTIVITY.get()
+            return event_evidence.link_map_steps(self.resources.db, self.resources.org_id, ACTIVITY.get())
         active_ids = {h["host_id"] for h in snapshot.get("hosts", [])}
         health_only = [
             {**dict(h), "activity_enabled": False, "activity_roots": []}
@@ -376,7 +376,7 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
         if health_only:
             hosts = snapshot.get("hosts", []) + health_only
             snapshot = {**snapshot, "hosts": hosts, "host": hosts[0]["hostname"] if len(hosts) == 1 else f"{len(hosts)} hosts"}
-        return snapshot
+        return event_evidence.link_map_steps(self.resources.db, self.resources.org_id, snapshot)
 
     def _resolve_links(self, collab=None, reports=None, *, filter_task_id="", filter_session=""):
         db = self.resources.db
