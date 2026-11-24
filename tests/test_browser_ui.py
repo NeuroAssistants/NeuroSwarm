@@ -60,7 +60,7 @@ class BrowserUITests(unittest.TestCase):
                                  "SWARMCONTROL_CHROMIUM; SWARMCONTROL_BROWSER_TESTS=skip opts out explicitly.")
         cls.tmp = tempfile.TemporaryDirectory(prefix="swarm-browser-qa-")
         state = Path(cls.tmp.name)
-        cls.project = state / "work" / "traza-demo"
+        cls.project = state / "work" / "sample-project"
         for rel in (KNOWN_FILE, "backend/event_feed.py", "frontend/live.js", "README.md"):
             (cls.project / rel).parent.mkdir(parents=True, exist_ok=True)
             (cls.project / rel).write_text("# fixture\n", encoding="utf-8")
@@ -90,7 +90,7 @@ class BrowserUITests(unittest.TestCase):
         """A recent Claude Code session inside the shared folder, so the Activity map has real cards."""
         now = time.time()
         p = str(cls.project)
-        _jsonl(home / ".claude/projects/traza-demo/s-map-01.jsonl", [
+        _jsonl(home / ".claude/projects" / cls.project.name / "s-map-01.jsonl", [
             {"type": "user", "cwd": p, "timestamp": _iso(now - 300), "message": {"role": "user", "content": "fix the feed test"}},
             {"type": "assistant", "cwd": p, "timestamp": _iso(now - 240), "message": {"model": "claude-x", "content": [
                 {"type": "tool_use", "name": "TodoWrite", "input": {"todos": [
@@ -135,7 +135,7 @@ class BrowserUITests(unittest.TestCase):
             conn.executemany(
                 "INSERT INTO events(host_id,harness,agent_name,event_type,severity,message,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
                 [("qa-box-02", "codex", "agent-filler", "observed_step", "INFO", f"Filler step #{i:03d}",
-                  json.dumps({"session": "codex:filler", "action": "file_read", "files": [f"docs/n{i}.md"], "workspace": "traza-demo"}),
+                  json.dumps({"session": "codex:filler", "action": "file_read", "files": [f"docs/n{i}.md"], "workspace": cls.project.name}),
                   base + i) for i in range(FILLER)])
         beta = HttpClient(cls.srv.base_url)
         st, _, body = beta.json("POST", "/api/v1/auth/register", {"username": ORG_B[0], "password": ORG_B[1], "organization": ORG_B[2]})

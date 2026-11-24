@@ -1,33 +1,31 @@
-# Verificar una entrega de la consola
+# Check which version of NeuroSwarm is running
 
-Desde la raíz del paquete que se va a publicar, ejecutá este comando antes y después del cambio de versión.
+To check a deployment, compare what a browser downloads from the site with the release files you intended to deploy. Run this command from the extracted release directory. Replace the example origin with the address of your console.
 
 ```sh
 python3 deploy/check_release.py https://console.example.org --candidate .
 ```
 
-El comando devuelve **0** si coinciden el manifiesto, las dos páginas y los seis archivos JavaScript y CSS, y pasan los siete controles del servicio. Una diferencia, un recurso ausente o un error de conexión o de certificado devuelve un código distinto de cero. Cada recurso se descarga completo hasta su tamaño previsto más un byte. La comparación utiliza la representación descomprimida y la URL con versión que carga el navegador. El verificador solo visita el origen indicado y utiliza las rutas de la candidata local.
+Exit code `0` means that the public manifest, both HTML pages and all six JavaScript and CSS files match, and the seven service checks passed. A difference, a missing file, or a network or certificate error returns a nonzero exit code. The checker fetches the same versioned URLs the browser uses and checks their decoded bytes and lengths. It fetches only from the supplied origin, using paths from the local release.
 
-La opción `--candidate` también acepta la ruta a otro paquete extraído. Por defecto se usa el paquete que contiene el verificador. Para una instancia temporal en la misma máquina se admite HTTP en loopback. Para un dominio se exige HTTPS con un certificado de confianza. Se puede usar `SSL_CERT_FILE` para indicar la CA privada de una instalación.
+`--candidate` can point to another extracted release. By default the checker uses the checkout containing the script. For local development you may use an HTTP loopback address such as `http://127.0.0.1:8790`. Remote checks require HTTPS and a trusted certificate. Set `SSL_CERT_FILE` to use a private certificate authority.
 
-## Contrato público
+## What the public endpoint reports
 
-`GET /api/v1/version` devuelve JSON sin autenticación, con `Cache-Control: no-store`. `HEAD` entrega las mismas cabeceras. `GET /health` indica dónde consultar el manifiesto mediante `version_url`.
+`GET /api/v1/version` returns public release metadata as JSON with `Cache-Control: no-store`. `HEAD` returns the same headers. `GET /health` includes `version_url` so clients can find the manifest.
 
-| Campo | Contenido |
+| Field | Meaning |
 | --- | --- |
-| `schema_version` | Entero `1`, la versión de este contrato. |
-| `version` | Identificador de la entrega, con prefijo `sha256:` y los 64 dígitos hexadecimales de la huella. |
-| `runtime_sha256` | Huella agregada de los módulos Python de `backend/*.py`, `backend/adapters/*.py` y `agent/*.py` del paquete al arrancar el servidor. |
-| `assets` | Mapa con las rutas públicas de los seis JS y CSS. Cada entrada contiene `sha256` y `bytes`. La URL de navegador agrega `?v=` y los primeros 12 dígitos de la huella. |
-| `pages` | Mapa con `/` y `/live`. Los mismos campos describen el HTML servido después de insertar las URLs versionadas. `/index.html` es un alias de `/`. |
+| `schema_version` | The manifest format. Its current value is the integer `1`. |
+| `version` | The release identifier. It starts with `sha256:` followed by 64 hexadecimal digits. |
+| `runtime_sha256` | One checksum for the Python files in `backend/*.py`, `backend/adapters/*.py` and `agent/*.py`, captured when the server starts. |
+| `assets` | The six public JavaScript and CSS paths. Each entry gives the SHA-256 checksum and size in bytes. The browser URL appends `?v=` and the first 12 checksum digits. |
+| `pages` | Checksums and sizes for the rendered HTML at `/` and `/live`, including the versioned asset URLs. `/index.html` is an alias for `/`. |
 
-La entrada para `runtime_sha256` es un objeto que asocia cada ruta relativa del paquete con el SHA-256 de sus bytes. Para calcular `version` se toman los cuatro campos restantes del manifiesto. En ambos casos se aplica SHA-256 al JSON con claves ordenadas, separadores compactos `,` y `:` y escape ASCII. Dos extracciones del mismo código producen el mismo identificador independientemente de su directorio, fechas o disponibilidad de Git.
+To reproduce the runtime checksum, map each relative Python path to the SHA-256 of its file bytes, serialize the map as compact JSON with sorted keys and ASCII escaping, and hash that JSON with SHA-256. The release identifier uses the same procedure on the four other manifest fields. Git history, installation paths and file timestamps do not affect the result.
 
-La identidad de Python corresponde al arranque del proceso. El manifiesto lee la interfaz que se sirve en ese momento, lo que permite cambiar los recursos estáticos en caliente. Durante un cambio de archivos, dos peticiones pueden ver versiones distintas y el verificador lo señala. El identificador pertenece al paquete de consola. Los observadores ya instalados en cada máquina informan su propia versión.
+## Use the result
 
-## Alcance de la comprobación
+The runtime checksum describes the package at process startup. The server reads its static files when serving the interface, so a deployment in progress can briefly serve different versions across requests. Installed observers report their own versions.
 
-El verificador contrasta los bytes públicos de la interfaz y la identidad de Python declarada por el servidor. Los instaladores generados por origen conservan su control de disponibilidad. La consulta es anónima y el manifiesto solo contiene metadatos del paquete. La comprobación de una sesión y una edición reales necesita acceso de operador.
-
-Al publicar, registrá en `CHANGELOG.md` la fecha, el identificador que pasó por HTTPS y el resultado de la comprobación con sesión. Para verificar una reversión, repetí el comando apuntando a la extracción de la versión restaurada.
+The checker verifies the public interface bytes, the runtime identity the server reports, access controls and installer availability. To check operator access as well, sign in and follow a known event to its session. Record the date, verified release ID and sign-in result in your release log. After rolling back, rerun the same command against the files from the restored release.

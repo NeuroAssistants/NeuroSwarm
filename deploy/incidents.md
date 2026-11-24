@@ -1,67 +1,69 @@
-# Seguimiento de incidentes repetidos
+# Follow a recurring alert
 
-Desde **Alerts → Incident #** en la consola o **Live → seleccionar alerta → Incident # · History** se puede asignar un responsable, reconocer el caso, ver las mediciones y comprobar cómo terminó. Una lectura que vuelve a disparar la misma regla después de la recuperación crea otro incidente. **Previous incident** abre el anterior.
+Open **Alerts** and select an **Incident #**. In **Live events**, select an alert and open **Incident # · History**. You can see who owns the incident, what triggered it, whether anyone acknowledged it, and how it ended. If the same rule triggers again after recovery, NeuroSwarm opens a new incident. **Previous incident** takes you back to the earlier one.
 
-## Caso de aceptación
+## Example: repeated high memory use
 
-La prueba usa dos organizaciones locales que tienen una máquina llamada `rack-01`. Los valores de esta tabla son datos de prueba.
+The example uses a test machine named `rack-01`. Each row continues the same sequence.
 
-| Observación o acción en la primera organización | Resultado |
-|---|---|
-| RAM al 96 % | Abre el caso 1 con una señal. |
-| Se asigna el caso a `oncall` y llega otra lectura al 96 % | El caso 1 tiene dos señales y conserva el responsable. |
-| `first-admin` reconoce el caso y llega una lectura al 97 % | El caso 1 queda reconocido, con tres señales. El estado de salud del equipo sigue siendo crítico. |
-| Llega un latido que solo informa la memoria total | La recuperación sigue pendiente. |
-| RAM al 72 % | El sistema cierra el caso 1. El historial conserva las tres lecturas altas, el reconocimiento, el responsable y la medición de recuperación. |
-| RAM al 96 % otra vez | Abre el caso 2 con una señal y un enlace al caso 1. Queda disponible para asignar y reconocer. |
+| What happens | What the operator sees |
+| --- | --- |
+| The observer reports 96% memory use. | Incident 1 opens with one signal. |
+| An operator assigns the incident to `oncall`. Another 96% reading arrives. | Incident 1 has two signals and keeps its owner. |
+| `first-admin` acknowledges the incident. A 97% reading arrives. | The incident stays acknowledged with three signals. The machine still shows critical memory use. |
+| A heartbeat includes total memory only. | The incident stays active because there is no usage reading to confirm recovery. |
+| Memory use falls to 72%. | Incident 1 closes. Its history retains the three high readings, owner, acknowledgement and recovery measurement. |
+| Memory use reaches 96% again. | Incident 2 opens with one signal and a link to incident 1. The new incident can be assigned and acknowledged. |
 
-En cada organización los IDs son locales. La segunda puede tener su propio caso 1 para la misma regla y el mismo nombre de máquina. El historial y los candidatos a responsable pertenecen a la organización de la sesión.
+Another organization can have a machine with the same name and its own incident 1. Its operators see only their own incidents, history and eligible owners.
 
-## Qué queda registrado
+## What the history records
 
-- Se mantiene un solo caso `OPEN` o `ACKED` por organización, `host_id` y `rule_code`. La escritura de la señal, el contador y su historial se confirma en una transacción. El contador suma observaciones recibidas que disparan la regla. El protocolo de latidos actual carece de un ID de muestra que permita distinguir un reenvío del observador de una nueva lectura idéntica.
-- Asignar y reconocer son acciones independientes. Si el caso todavía está sin asignar, el primer reconocimiento lo asigna a quien lo hizo. Una repetición conserva responsable, primer reconocimiento y fecha. Se puede reasignar o dejar sin asignar mientras siga activo. Una baja posterior del usuario conserva el nombre en la historia.
-- RAM, CPU, RSS y cantidad de procesos se recuperan con una medición válida bajo el umbral correspondiente. Un latido recibido cierra la alerta de latido ausente. Los refrescos de pantalla no agregan señales para la misma interrupción. Las reglas de bucle, cuota y exposición de secretos requieren que un operador confirme la recuperación. La confirmación manual queda identificada por separado y registra quién la hizo.
-- Cada señal conserva valores de medición y, si existe, el último paso registrado por el diario en esa máquina al observarla. La resolución también registra el paso disponible en ese momento. El detalle muestra agente, sesión, acción, herramienta y archivos relativos confirmados. La proximidad temporal no demuestra qué agente causó el incidente. Un evento genérico, una mención de archivo o un campo ausente no aportan esa evidencia. Cuando falta un paso, la consola lo indica.
-- Los casos guardan estos datos en la base de recursos hasta que se archive la instancia. El resumen conservado puede sobrevivir a la rotación del diario de siete días. La proyección excluye argumentos de comandos, conversaciones, contenido de archivos y mensajes crudos del error.
+NeuroSwarm keeps one active incident (`OPEN` or `ACKED`) for each organization, host and rule. It saves a signal, its occurrence count and its history entry in one transaction. Each received reading that triggers the rule counts as a signal. Heartbeats carry no sample ID, so a retransmitted reading can count again.
+
+The first acknowledgement assigns an unowned incident to the person who acknowledged it. Later signals preserve that acknowledgement and the current owner. Operators can reassign an active incident or leave it unassigned. Historical entries keep the recorded name when someone leaves the organization.
+
+Memory, CPU, process memory and process-count rules need a valid reading below the threshold to recover. A new heartbeat resolves a missing-heartbeat incident. Refreshing the page adds no signals for that same outage. A loop, quota or secret-exposure alert requires an operator to confirm recovery. The history records who confirmed it.
+
+For each signal and recovery, the incident can show the latest recorded agent step on that machine, including the agent, session, action, tool and confirmed relative file paths. That step gives the operator somewhere to look. Timing alone cannot identify who caused the incident. An absent step is shown as unknown. Generic events and file mentions do not establish an edit.
+
+Incident summaries are stored in the organization’s resource database and can outlive the seven-day work journal. They exclude command arguments, conversations, file contents and raw error messages.
 
 ## API
 
-| Ruta | Uso |
-|---|---|
-| `GET /api/v1/alerts?status=ACTIVE` | Últimos 100 casos abiertos o reconocidos. También admite `ALL`, `OPEN`, `ACKED` y `RESOLVED`. El valor predeterminado del cliente legado sigue siendo `OPEN`. |
-| `GET /api/v1/alerts/<id>` | Devuelve `organization`, `alert`, `history` y `next_before`. Los historiales se recorren de a 50 movimientos, del más reciente al más antiguo, con `?before=<next_before>`. |
-| `POST /api/v1/alerts/<id>/owner` | `{"owner_id": 42}` asigna un miembro operador o administrador del espacio. `{"owner_id": null}` lo deja sin asignar. El detalle incluye `assignees` para quienes pueden gestionar un caso activo. |
-| `POST /api/v1/alerts/<id>/ack` | Acepta `{}`. Conserva la respuesta anterior `ok`, `alert_id` y `host_status` y agrega el caso actualizado. |
-| `POST /api/v1/alerts/<id>/resolve` | `{"reason":"operator_verified"}` confirma que alguien verificó la recuperación. Repetir el mismo cierre conserva actor y fecha. |
+| Request | What it does |
+| --- | --- |
+| `GET /api/v1/alerts?status=ACTIVE` | Lists the latest 100 open or acknowledged incidents. Other choices are `ALL`, `OPEN`, `ACKED` and `RESOLVED`. The default remains `OPEN`. |
+| `GET /api/v1/alerts/<id>` | Returns `organization`, `alert`, `history` and `next_before`. History is newest first, in pages of 50. Pass `?before=<next_before>` for the next page. |
+| `POST /api/v1/alerts/<id>/owner` | Send `{"owner_id":42}` to assign an operator or administrator, or `{"owner_id":null}` to clear the owner. Operators and administrators can see the eligible owners in `assignees` when they open an active incident. |
+| `POST /api/v1/alerts/<id>/ack` | Send `{}` to acknowledge. Returns the updated incident along with `ok`, `alert_id`, `organization` and `host_status`. |
+| `POST /api/v1/alerts/<id>/resolve` | Send `{"reason":"operator_verified"}` after verifying recovery. Repeating the request preserves the original actor and time. |
 
-`alert` incluye `occurrence_count`, `count_is_minimum`, `owner`, `created_at`, `last_seen_at`, `updated_at`, `acked_by`, `acked_at`, `resolved_by`, `resolved_at`, `resolution`, `last_step`, `previous_id` y `evidence`. Los tiempos son segundos Unix. `last_seen_at` corresponde a la última señal de fallo. El movimiento `resolved` guarda la evidencia de la recuperación. Tanto el flujo incremental como el histórico usan el ID canónico del caso.
+The `alert` object includes `occurrence_count`, `count_is_minimum`, `owner`, `created_at`, `last_seen_at`, `updated_at`, `acked_by`, `acked_at`, `resolved_by`, `resolved_at`, `resolution`, `last_step`, `previous_id` and `evidence`. Times are Unix seconds. `last_seen_at` is the latest triggering signal. The `resolved` history entry contains the recovery evidence. The live feed and history use the same incident ID.
 
-Pueden leer los miembros del espacio y los tokens de lectura. Las escrituras requieren sesión de operador o administrador. El servidor toma la identidad de esa sesión. La interfaz envía además `organization_id` en las mutaciones y en la lectura del detalle. Si la organización activa ya cambió, responde `409`. Las mutaciones que intenten modificar un caso cerrado también responden `409`, salvo la repetición de una resolución válida.
+Organization members and read tokens can view incidents. Changes require an operator or administrator session. The UI supplies `organization_id` when reading detail or changing an incident. A stale organization ID returns `409`. Changing a resolved incident also returns `409`, except when repeating a valid resolution.
 
-## Migración y recuperación
+## Upgrade an existing installation
 
-El servidor migra al esquema de recursos 2 al abrir cada base de organización. La creación de tablas, la conversión y el registro de versión ocurren en una transacción por base. Se mantienen las rutas del agente, la base legada y las bases hermanas de otros espacios. Un diario anterior puede continuar enviando pasos con el formato anterior. La marca de procedencia que habilita el contexto de incidentes se escribe a partir de la actualización del diario o de la ingesta remota.
+The server migrates each organization’s resource database to schema version 2 when it opens that database. Table creation, conversion and the recorded schema version are committed together. Existing databases, organization-specific files, observer endpoints and older work-journal records remain usable. Incident context starts once the upgraded journal or remote ingestion records the evidence source.
 
-De las filas de alertas legadas con la misma regla y máquina, se consolidan las que carecen de una recuperación registrada entre ellas. El caso conserva el primer ID. Consultar o reconocer cualquiera de sus antiguos IDs apunta al mismo caso. Una recuperación documentada establece el límite con el siguiente episodio. Las filas originales quedan en `incident_v1_snapshots` para revisión local. La API publica la proyección depurada y los hashes de auditoría existentes se conservan.
+For older alerts from the same host and rule, a recorded recovery separates incidents. Without a recorded recovery, the records are grouped under the first incident ID. Older IDs still work for lookups and acknowledgements. Original rows remain in `incident_v1_snapshots` for local inspection. The API serves the filtered incident view, and existing audit hashes remain valid.
 
-La versión anterior sobrescribía mediciones y no registraba asignaciones independientes. Por eso el contador migrado se muestra como **At least**, el primer reconocimiento humano conocido aporta el responsable inicial y la evidencia que no consta permanece desconocida.
+Older versions overwrote measurements and had no separate owner field. Migrated counts therefore say **At least**. The earliest known human acknowledgement supplies the initial owner. Missing evidence remains unknown.
 
-Para una reversión operativa, hacer una copia de la instancia completa con los escritores detenidos antes de migrar. Restaurar esa copia en un directorio nuevo para usar el servidor anterior. Las escrituras posteriores al momento de la copia solo están en la instancia migrada. La herramienta incluye la base principal y sus bases de organización. [Guía de copia y restauración](self-host.md)
+Before upgrading, stop writers and back up the full instance. To roll back, restore that backup to a new directory and run the older server against it. Later writes remain in the upgraded database. The backup tool includes the main database and each organization’s database. [Backup and restore guide](self-host.md)
 
-El primer comando imprime la ruta de la copia. Usar esa ruta como `SNAPSHOT_DIR` y un destino nuevo como `RESTORE_DIR` al ensayar la restauración.
-
-```bash
+```sh
 python3 deploy/backup.py snapshot "$STATE_DIR" "$BACKUP_DIR"
 python3 deploy/backup.py restore "$SNAPSHOT_DIR" "$RESTORE_DIR"
 ```
 
-## Reproducir
+Use the path printed by the first command as `SNAPSHOT_DIR`. Choose a new `RESTORE_DIR`.
 
-Desde la raíz del repositorio, con el Chromium de pruebas instalado, este comando levanta consolas temporales de loopback y ejecuta el caso HTTP, las pruebas de migración y concurrencia y el recorrido en escritorio y móvil emulado.
+## Run the example
 
-```bash
-python3 -m unittest discover -s tests -p 'test_incidents.py' -v
+From the repository root, with the test browser installed, run the storage, HTTP, concurrency and browser checks. They use temporary local databases, synthetic accounts, and desktop and emulated mobile views. Set `SWARMCONTROL_BROWSER_ARTIFACTS` to a directory if you want to keep a screenshot of the resolved incident. [Browser setup](../tests/BROWSER-TESTS.md)
+
+```sh
+python3 -m unittest discover -s tests -p test_incidents.py -v
 ```
-
-`SWARMCONTROL_BROWSER_ARTIFACTS` permite indicar un directorio para guardar la captura del incidente resuelto. La prueba usa cuentas y datos sintéticos y limpia las bases temporales al terminar.
