@@ -33,6 +33,7 @@ from auth import LoginRateLimiter, SESSION_TTL_SECONDS, token_organization  # no
 from db import Database  # noqa: E402
 import incidents
 import event_evidence
+import line_survival
 from event_feed import MAX_LIMIT as FEED_MAX_LIMIT, FeedError, feed as event_feed
 from identity import Directory, IdentityError, role
 from live_history import history
@@ -74,6 +75,7 @@ def _trusted_proxy_networks() -> list[ipaddress._BaseNetwork]:
 MONITORING_ROUTES = {"/api/v1/" + path for path in
                      ("live-records", "event-feed", "activity", "work-board", "links", "digest", "hosts", "alerts", "events", "overview")}
 EVENT_DETAIL = re.compile(r"/api/v1/events/([0-9]{1,19})/(?:evidence|images/([a-f0-9]{64}))")
+LINE_SURVIVAL = re.compile(r"/api/v1/events/([0-9]{1,19})/line-survival")
 ALERT_DETAIL = re.compile(r"/api/v1/alerts/([0-9]{1,19})")
 ALERT_ACTION = re.compile(r"/api/v1/alerts/([0-9]{1,19})/(ack|owner|resolve)")
 ADMIN_READS = {"/api/v1/" + path for path in ("members", "invitations", "tokens", "audit", "audit/verify")}
@@ -302,7 +304,8 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
             token = self._bearer()
             if token["scope"] == "ingest":
                 raise IdentityError(401, "A reader credential is required")
-            if token["scope"] == "read" and self.command in {"GET", "HEAD"} and (path in MONITORING_ROUTES or ALERT_DETAIL.fullmatch(path) or EVENT_DETAIL.fullmatch(path)):
+            if token["scope"] == "read" and self.command in {"GET", "HEAD"} and (path in MONITORING_ROUTES or ALERT_DETAIL.fullmatch(path) or EVENT_DETAIL.fullmatch(path)
+                                                                         or LINE_SURVIVAL.fullmatch(path)):
                 return {"org_id": self.resources.org_id, "role": "viewer", "username": "read token"}
             raise IdentityError(403, "Token does not grant access to this route")
         user = self._get_session_user()
@@ -595,6 +598,16 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
                     raise ValidationError("invalid cursor") from exc
                 page["organization"] = self.resources.org_id
                 self._send_inventory(page)
+                return
+            survival_route = LINE_SURVIVAL.fullmatch(path)
+            if survival_route:
+                org = self.resources.org_id
+                if "organization_id" in qs and qs["organization_id"] != [str(org)]:
+                    raise IdentityError(409, "Active organization changed")
+                result = line_survival.detail(self.resources.db, org, self._id(survival_route[1]))
+                if result is None:
+                    raise IdentityError(404, "Event not found")
+                self._send_json(result)
                 return
             evidence_route = EVENT_DETAIL.fullmatch(path)
             if evidence_route:

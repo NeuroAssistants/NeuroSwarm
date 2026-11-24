@@ -191,6 +191,9 @@ def _clean_step(raw: Any, *, capture=False) -> dict[str, Any]:
         for field in ("command_input", "command_output", "exit_code", "output_truncated", "image_previews", "text_previews"):
             if field in raw:
                 step[field] = raw[field]
+        commit_id = raw.get("git_commit")
+        if isinstance(commit_id, str) and re.fullmatch(r"[0-9a-f]{7,40}", commit_id):
+            step["git_commit"] = commit_id  # only the ID a session's own `git commit` printed
     files = _clean_path_list(raw.get("files"), 12)
     if files:
         step["files"] = files
@@ -453,6 +456,26 @@ def sanitize_activity_payload(body: dict[str, Any]) -> dict[str, Any]:
             "ms": _num(metrics_raw.get("ms"), 0.0, 1e7, 0.0) if metrics_raw.get("ms") is not None else None,
         }
 
+    # Line survival measurements: commit IDs, paths inside the shared folders and line counts only (no contents).
+    survival_raw = body.get("line_survival")
+    line_survival_items: list[dict[str, Any]] | None = None
+    if isinstance(survival_raw, list):
+        line_survival_items = []
+        for item in survival_raw[:300]:
+            if not isinstance(item, dict):
+                continue
+            paths = _clean_path_list([item.get("path")], 1)
+            sha, head = str(item.get("sha") or ""), str(item.get("head") or "")
+            if not paths or not re.fullmatch(r"[0-9a-f]{40}", sha) or not re.fullmatch(r"[0-9a-f]{40}", head):
+                continue
+            line_survival_items.append({
+                "sha": sha, "head": head, "path": paths[0], "exists": bool(item.get("exists")),
+                "added": _int(item.get("added"), 0, 1_000_000), "surviving": _int(item.get("surviving"), 0, 1_000_000),
+                "commit_time": _num(item.get("commit_time"), 0.0, 1e12, 0.0),
+                "prev_time": _num(item.get("prev_time"), 0.0, 1e12, 0.0),
+                "measured_at": _num(item.get("measured_at"), 0.0, 1e12, time.time()),
+            })
+
     raw_reader = str(body.get("capture_reader") or "").strip().lower()
     capture_reader = raw_reader if raw_reader in {"core", "fallback"} else ""
     fallback_reason = _redact_str(body.get("fallback_reason"), 96) if capture_reader == "fallback" else ""
@@ -484,6 +507,8 @@ def sanitize_activity_payload(body: dict[str, Any]) -> dict[str, Any]:
         out["capture_legacy_until"] = capture_legacy_until
     if capture_metrics is not None:
         out["capture_metrics"] = capture_metrics
+    if line_survival_items is not None:
+        out["line_survival"] = line_survival_items
     return out
 
 
@@ -517,6 +542,7 @@ def _strip_capture_for_map(cleaned: dict[str, Any]) -> dict[str, Any]:
         "capture_gaps",
         "capture_metrics",
         "capture_legacy_until",
+        "line_survival",
         "map_update",
         "collected_at_provided",
         "fallback_reason",

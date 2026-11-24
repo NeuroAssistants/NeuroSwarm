@@ -72,3 +72,12 @@ same rules, so local and remote actions are stored identically.
 | Record size | records up to 32 MB are read whole; larger ones ⇒ `capture_gaps: [{reason: "record over 32 MB skipped", file, bytes}]` |
 | Offsets `__baseline__` | written on the first scan with no saved offsets. Saved offsets ⇒ logs not yet seen are read from byte 0; no saved offsets ⇒ last 640 kB. Not a file: never read |
 | Codex plan | `tools.update_plan` in `exec` ⇒ a `plan` step (`tool: update_plan`) |
+
+### 6.2 Line survival (opt-in, `SWARMCONTROL_SHARE_LINE_SURVIVAL=1`)
+
+| Field | Meaning |
+|---|---|
+| `capture_steps[].git_commit` | 7–40 hex characters: the commit ID the session's own successful `git commit` printed. Only on that command's step |
+| `line_survival[]` | Per recent commit and file in a shared folder: `sha`, `path` (absolute, projected like step files), `added`, `surviving` (lines `git blame -M HEAD` still assigns to the commit), `exists`, `commit_time`, `prev_time` (previous commit to the file), `head`, `measured_at`. Counts only, at most 300 items |
+| Event metadata `line_keys` | `<shared folder label>/<path>` for each file of an edit, used to join measurements; `git_commit` on the commit's event |
+| `GET /api/v1/events/{id}/line-survival` | Members and read tokens of the event's organization. Takes no path. Returns per file a `status` (`attributed`, `no_commit`, `not_in_commit`, `earlier_commit`, `other_session`, `not_shared`, `not_tracked`), a plain reason, and counts only when `attributed` |

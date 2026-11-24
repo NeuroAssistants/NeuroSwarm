@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import event_evidence
+import line_survival
 from activity_inspector import (
     CMD_KIND,
     NONTERMINAL,
@@ -369,6 +370,7 @@ def resolve_step_files(
 def ensure_journal_tables(db: Any) -> None:
     """Create unified journal tables and migrate legacy remote dedup digests if present."""
     event_evidence.ensure_tables(db)
+    line_survival.ensure_tables(db)
     db.execute("CREATE TABLE IF NOT EXISTS observed_step_keys (digest TEXT PRIMARY KEY, ts REAL NOT NULL)")
     db.execute(
         """
@@ -591,6 +593,17 @@ def project_rows(
             parent = redact(session.get("parent_session") or "", 96)
             if parent and parent != session_id:  # a sub-agent's step names the session that launched it
                 context["parent_session"] = parent
+            # Line survival: a stable key per edited file in a shared folder, and the commit ID a session's own
+            # `git commit` printed. Neither is used for the step's identity keys, so older rows still match.
+            if category == "file_edit" and str(outcome).lower() not in ("error", "failed"):
+                line_keys = line_survival.canonical_keys(step.get("files") or [], project=project, extra_scope=extra_scope,
+                                                         root_index=None if project is not None else root_index,
+                                                         cwd=step_cwd)
+                if line_keys:
+                    context["line_keys"] = line_keys
+            commit_id = step.get("git_commit")
+            if category == "shell" and isinstance(commit_id, str) and line_survival.SHORT_SHA.fullmatch(commit_id):
+                context["git_commit"] = commit_id
 
             final_metadata = json.dumps(context, sort_keys=True, ensure_ascii=False)
             key = c_key
@@ -813,6 +826,15 @@ def persist_steps(
             counts["duplicates"] += 1
 
     host = snapshot.get("host_id") or snapshot.get("host") or "local"
+
+    if snapshot.get("line_survival") is not None:
+        if project is not None:
+            resolve = lambda p: next(iter(line_survival.canonical_keys([p], project=project, extra_scope=extra_scope)), None)  # noqa: E731
+        else:
+            survival_index = build_root_index(list(activity_roots or []))
+            resolve = lambda p: next(iter(line_survival.canonical_keys([p], root_index=survival_index)), None) if survival_index else None  # noqa: E731
+        counts["line_survival"] = line_survival.store(conn, host, snapshot["line_survival"], now, resolve)
+    line_survival.prune(conn, now - RETENTION)
 
     if capture is not None:
         for file_key, state in capture.read.items():
