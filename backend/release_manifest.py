@@ -14,10 +14,12 @@ ASSETS = {
     "/app.js": "application/javascript",
     "/activity.js": "application/javascript",
     "/needs-attention.js": "application/javascript",
+    "/repro-cases.js": "application/javascript",
     "/live.js": "application/javascript",
     "/styles.css": "text/css",
     "/activity-product.css": "text/css",
     "/needs-attention.css": "text/css",
+    "/repro-cases.css": "text/css",
     "/live.css": "text/css",
 }
 ASSET_REF = re.compile(

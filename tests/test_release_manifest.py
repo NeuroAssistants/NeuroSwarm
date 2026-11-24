@@ -85,7 +85,7 @@ class ReleaseManifestHTTPS(unittest.TestCase):
         self.assertEqual(int(head["Content-Length"]), len(raw))
         self.assertEqual(json.loads(self.request("GET", "/health")[1])["version_url"], VERSION_PATH)
 
-        expected_paths = {"/": {"/app.js", "/activity.js", "/activity-product.css", "/needs-attention.js", "/needs-attention.css", "/styles.css"},
+        expected_paths = {"/": {"/app.js", "/activity.js", "/activity-product.css", "/needs-attention.js", "/needs-attention.css", "/repro-cases.js", "/repro-cases.css", "/styles.css"},
                           "/live": {"/live.js", "/live.css"}}
         self.assertEqual(set(manifest["pages"]), set(expected_paths))
         self.assertEqual(set(manifest["assets"]), expected_paths["/"] | expected_paths["/live"])
