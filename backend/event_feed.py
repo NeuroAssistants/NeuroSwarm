@@ -65,14 +65,50 @@ def _event(r: dict[str, Any]) -> dict[str, Any]:
             "details": details}
 
 
+def _safe_dict(raw: Any) -> dict[str, Any] | None:
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        val = json.loads(raw)
+        return val if isinstance(val, dict) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _causal_event_id(details: Any) -> int | None:
+    if not isinstance(details, dict):
+        return None
+    for key in ("source_event_id", "trigger_event_id", "event_id"):
+        val = details.get(key)
+        if type(val) is int and val > 0:
+            return val
+    return None
+
+
 def _alert(r: dict[str, Any]) -> dict[str, Any]:
-    return {"key": f"alert:{r['id']}", "kind": "alert", "id": r["id"], "ts": r["updated_at"],
-            "created_at": r["created_at"], "updated_at": r["updated_at"], "severity": _sev(r["severity"]),
-            "state": str(r["status"] or "OPEN").upper(), "host_id": r["host_id"], "harness": "", "agent": "",
-            "source": r["rule_code"], "title": r["title"], "summary": r["summary"], "acked_by": r.get("acked_by"),
-            "acked_at": r.get("acked_at"), "details": _json(r.get("evidence_json")), "owner": r["owner"],
-            "occurrence_count": r["occurrence_count"], "count_is_minimum": bool(r["count_is_minimum"]),
-            "previous_id": r["previous_id"], "resolved_at": r["resolved_at"], "resolved_by": r["resolved_by"]}
+    details = _json(r.get("evidence_json"))
+    last_step = _safe_dict(r.get("last_step_json"))
+    out: dict[str, Any] = {
+        "key": f"alert:{r['id']}", "kind": "alert", "id": r["id"], "ts": r["updated_at"],
+        "created_at": r["created_at"], "updated_at": r["updated_at"], "severity": _sev(r["severity"]),
+        "state": str(r["status"] or "OPEN").upper(), "host_id": r["host_id"],
+        "harness": details.get("harness", "") if isinstance(details, dict) else "",
+        "agent": details.get("agent_name", "") if isinstance(details, dict) else "",
+        "source": r["rule_code"], "title": r["title"], "summary": r["summary"], "acked_by": r.get("acked_by"),
+        "acked_at": r.get("acked_at"), "details": details, "owner": r["owner"],
+        "occurrence_count": r["occurrence_count"], "count_is_minimum": bool(r["count_is_minimum"]),
+        "previous_id": r["previous_id"], "resolved_at": r["resolved_at"], "resolved_by": r["resolved_by"],
+    }
+    src_id = _causal_event_id(details)
+    if src_id is not None:
+        out["source_event_id"] = src_id
+    if last_step:
+        out["last_step"] = last_step
+    if isinstance(details, dict) and isinstance(details.get("session"), str) and details["session"]:
+        out["session"] = details["session"]
+    return out
 
 
 def parse_cursor(raw: str | None) -> tuple[int, float, int, str] | None:

@@ -16,9 +16,30 @@ SELECT * FROM (
   SELECT 'Alert',id,updated_at,host_id,severity,title,rule_code,summary,status,'','',
          json_object('owner',owner,'occurrence_count',occurrence_count,'count_is_minimum',count_is_minimum,
                      'previous_id',previous_id,'acked_by',acked_by,'acked_at',acked_at,
-                     'resolved_by',resolved_by,'resolved_at',resolved_at,'created_at',created_at)
+                     'resolved_by',resolved_by,'resolved_at',resolved_at,'created_at',created_at,
+                     'evidence_json',evidence_json,'last_step_json',last_step_json)
     FROM incident_cases
 )"""
+
+
+def _safe_json_obj(raw):
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        val = json.loads(raw)
+        return val if isinstance(val, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _causal_event_id(evidence):
+    for key in ("source_event_id", "trigger_event_id", "event_id"):
+        val = evidence.get(key)
+        if type(val) is int and val > 0:
+            return val
+    return None
 
 
 def history(db, organization, query):
@@ -53,6 +74,20 @@ def history(db, organization, query):
         if row["kind"] == "Alert":
             row.update(json.loads(raw))
             row["count_is_minimum"] = bool(row["count_is_minimum"])
+            evidence = _safe_json_obj(row.pop("evidence_json", None))
+            last_step = _safe_json_obj(row.pop("last_step_json", None)) or None
+            row["evidence"] = evidence
+            row["details"] = evidence
+            row["last_step"] = last_step
+            src_id = _causal_event_id(evidence)
+            if src_id is not None:
+                row["source_event_id"] = src_id
+            if isinstance(evidence.get("session"), str) and evidence["session"]:
+                row["session"] = evidence["session"]
+            if not row.get("agent") and isinstance(evidence.get("agent_name"), str) and evidence["agent_name"]:
+                row["agent"] = evidence["agent_name"]
+            if not row.get("runtime") and isinstance(evidence.get("harness"), str) and evidence["harness"]:
+                row["runtime"] = evidence["harness"]
         elif row["source"] == "observed_step" and raw:
             metadata = json.loads(raw)
             if isinstance(metadata, dict):

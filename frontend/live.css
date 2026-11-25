@@ -1176,3 +1176,161 @@ dialog.event-dialog::backdrop {
     border: 2px solid CanvasText;
   }
 }
+
+/* ===== Readable HTTP / Browser / Missing-Evidence / Alert-Origin Cards ===== */
+.browser-kind-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  margin-right: 6px;
+  border-radius: 999px;
+  border: 1.5px solid var(--sc-ink);
+  font-family: var(--sc-mono);
+  font-size: .66rem;
+  font-weight: 700;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  vertical-align: middle;
+  background: var(--sc-paper);
+  color: var(--sc-ink);
+}
+.browser-kind-pill.bk-visit { background: #E4F4EA; color: #14593E; }
+.browser-kind-pill.bk-search { background: #E3F0FC; color: #184C78; }
+.browser-kind-pill.bk-snapshot { background: #FFF2D6; color: #754608; }
+.browser-kind-pill.bk-interact { background: #EFEAF8; color: #4A357A; }
+.browser-kind-pill.bk-credential { background: #FCEFE3; color: #7C3410; }
+.tbl tbody tr.row.selected .browser-kind-pill {
+  background: rgba(189, 242, 201, .2);
+  color: var(--sc-mint);
+  border-color: rgba(189, 242, 201, .45);
+}
+
+.http-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1.5px solid var(--sc-ink);
+  font-family: var(--sc-mono);
+  font-size: .68rem;
+  font-weight: 800;
+  letter-spacing: .03em;
+}
+.http-pill.ok { background: var(--sev-ok-bg); color: var(--sev-ok-fg); }
+.http-pill.warn { background: var(--sev-warn-bg); color: var(--sev-warn-fg); }
+.http-pill.fail { background: var(--sev-crit-bg); color: var(--sev-crit-fg); box-shadow: 2px 2px 0 var(--sev-crit-fg); }
+.http-pill.neutral { background: var(--sc-inset); color: var(--sc-muted); }
+
+.http-method-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 5px;
+  border: 1.5px solid var(--sc-ink);
+  background: var(--sc-ink);
+  color: var(--sc-mint);
+  font-family: var(--sc-mono);
+  font-size: .68rem;
+  font-weight: 800;
+  letter-spacing: .04em;
+}
+.ev-http-card.is-http-error {
+  border-color: var(--sev-crit-fg);
+  border-top: 3px solid var(--sev-crit-fg);
+  background: #FFF7F8;
+}
+.ev-http-callout {
+  margin: 0 0 8px;
+  padding: 7px 10px;
+  border: 1.5px solid var(--sev-crit-fg);
+  border-radius: 7px;
+  background: var(--sev-crit-bg);
+  color: var(--sev-crit-fg);
+  font-size: .8rem;
+  box-shadow: 2px 2px 0 var(--sev-crit-fg);
+}
+.ev-http-url {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.ev-url-link {
+  font-family: var(--sc-mono);
+  font-size: .77rem;
+  font-weight: 700;
+  color: var(--sc-action);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+.ev-url-link:hover { color: var(--sc-ink); }
+.ev-url-code {
+  font-size: .77rem;
+  overflow-wrap: anywhere;
+}
+.ev-http-body-wrap {
+  border: 1.5px solid var(--sc-ink);
+  border-radius: 6px;
+  background: var(--sc-surface);
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+.ev-http-headers {
+  margin-top: 6px;
+  font-size: .76rem;
+}
+.ev-http-headers summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--sc-muted);
+}
+
+.ev-origin-banner {
+  background: #EEF8F1;
+  border-top: 3px solid var(--sc-action);
+}
+.ev-origin-banner h3 {
+  margin: 0;
+  color: var(--sc-ink);
+}
+
+.ev-reason-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1.5px solid var(--sc-ink);
+  border-radius: 8px;
+  font-size: .8rem;
+  background: var(--sc-paper);
+  color: var(--sc-ink);
+  box-shadow: 2px 2px 0 var(--sc-ink);
+}
+.ev-reason-box.tone-warn { background: #FFF8E6; }
+.ev-reason-box.tone-info { background: #EEF6FC; }
+.ev-reason-box.tone-muted { background: var(--sc-inset); color: var(--sc-muted); }
+.ev-reason-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1.5px solid var(--sc-ink);
+  background: var(--sc-surface);
+  color: var(--sc-ink);
+  font-family: var(--sc-mono);
+  font-size: .67rem;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.ev-reason-box.tone-warn .ev-reason-pill { background: var(--sev-warn-bg); color: var(--sev-warn-fg); }
+.ev-reason-box.tone-info .ev-reason-pill { background: var(--sev-info-bg); color: var(--sev-info-fg); }
+@media (forced-colors: active) {
+  .ev-reason-box, .ev-http-callout, .http-pill, .browser-kind-pill {
+    box-shadow: none;
+    border: 2px solid CanvasText;
+  }
+}

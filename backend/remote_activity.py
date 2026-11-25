@@ -194,6 +194,12 @@ def _clean_step(raw: Any, *, capture=False) -> dict[str, Any]:
         for field in ("command_input", "command_output", "exit_code", "output_truncated", "image_previews", "text_previews"):
             if field in raw:
                 step[field] = raw[field]
+        for field in ("output_reason", "files_reason"):  # why evidence is missing (fixed vocabulary)
+            if raw.get(field) in step_journal.REASONS:
+                step[field] = raw[field]
+        web = step_journal._web_resource(raw.get("web_resource"))  # allowlisted, bounded, redacted
+        if web:
+            step["web_resource"] = web
         commit_id = raw.get("git_commit")
         if isinstance(commit_id, str) and re.fullmatch(r"[0-9a-f]{7,40}", commit_id):
             step["git_commit"] = commit_id  # only the ID a session's own `git commit` printed

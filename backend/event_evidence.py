@@ -10,11 +10,44 @@ import zlib
 
 import edit_verification
 
-from activity_inspector import evidence_text, is_sensitive_path, protected_command
+from activity_inspector import clean_url, evidence_text, is_sensitive_path, protected_command
 
 MAX_IMAGE_BYTES = 160 * 1024
 WORK_FIELDS = ("session", "parent_session", "workspace", "tool", "action", "basis", "outcome",
-               "program", "task_id", "agent", "runtime")
+               "program", "task_id", "agent", "runtime",
+               "evidence_reason", "output_reason", "files_reason", "redaction_reason", "query")
+WEB_RESOURCE_STR_LIMITS = {
+    "kind": 32,
+    "method": 16,
+    "url": 512,
+    "title": 200,
+    "query": 240,
+    "status_text": 80,
+    "response_excerpt": 2400,
+}
+
+
+def _safe_web_resource(raw):
+    """Project an allowlisted, bounded, redacted web/browser resource dict."""
+    if not isinstance(raw, dict):
+        return None
+    out = {}
+    for key, limit in WEB_RESOURCE_STR_LIMITS.items():
+        val = raw.get(key)
+        if not isinstance(val, str) or not val.strip():
+            continue
+        if key == "url":
+            if url := clean_url(val):
+                out[key] = url
+            continue
+        cleaned, _ = evidence_text(val.strip(), limit)
+        if not cleaned:
+            continue
+        out[key] = cleaned
+    code = raw.get("status_code")
+    if type(code) is int and 100 <= code <= 599:
+        out["status_code"] = code
+    return out or None
 
 
 SOURCE_POSITION = re.compile(r"[A-Za-z0-9_-]{4,64}:[0-9]{1,12}:[0-9]{1,6}")
@@ -71,7 +104,7 @@ def link_map_steps(db, organization, snapshot):
     return {**snapshot, "sessions": sessions}
 
 
-def work_summary(raw):
+def work_summary(raw, *, include_response=False):
     """Project the public work record. An unrelated large field cannot hide its files."""
     try:
         metadata = json.loads(raw) if isinstance(raw, str) else raw
@@ -92,6 +125,11 @@ def work_summary(raw):
             if any(not part or part.startswith(".") for part in path.split("/")) or is_sensitive_path(path):
                 continue
             work["files"].append(path)
+    web_res = _safe_web_resource(metadata.get("web_resource"))
+    if web_res:
+        if not include_response:
+            web_res.pop("response_excerpt", None)
+        work["web_resource"] = web_res
     return work
 
 
@@ -270,7 +308,7 @@ def detail(db, org, event_id):
     if event is None:
         return None
     metadata = event.pop("metadata_json")
-    work = work_summary(metadata) if event["source"] == "observed_step" else {}
+    work = work_summary(metadata, include_response=True) if event["source"] == "observed_step" else {}
     execution = db.query_one("SELECT command_input,command_output,exit_code,output_truncated "
                              "FROM event_execution WHERE event_id=?", (event_id,)) or {}
     images = db.query_all("SELECT path,digest AS sha256,mime_type,source,captured_at,length(content) AS size_bytes "
@@ -282,7 +320,11 @@ def detail(db, org, event_id):
     for image in images:
         image["url"] = f"/api/v1/events/{event_id}/images/{image['sha256']}?organization_id={org}"
     verification = {"verification": edit_verification.for_edit(db, event_id, work)} if work.get("action") == "file_edit" else {}
-    return {"organization": org, "event_id": event_id, "files": work.get("files", []), **verification,
+    extra = {}
+    for key in ("evidence_reason", "output_reason", "files_reason", "redaction_reason", "web_resource"):
+        if key in work:
+            extra[key] = work[key]
+    return {"organization": org, "event_id": event_id, "files": work.get("files", []), **verification, **extra,
             "record": {**event, "kind": "Event", "work": work} if work else None,
             "workspace": work.get("workspace"), "session": work.get("session"), "program": work.get("program"),
             "command_input": execution.get("command_input"), "command_output": execution.get("command_output"),

@@ -24,6 +24,8 @@ from activity_inspector import (
     CMD_KIND,
     NONTERMINAL,
     PROGRAM_RE,
+    clean_url,
+    evidence_text,
     is_sensitive_path,
     redact,
 )
@@ -380,6 +382,76 @@ def _step_in_scope(cwd: Any, project: Any, extra_scope: Any, root_index: Any) ->
         return False
 
 
+REASONS = {"empty_output", "capture_disabled", "outside_scope", "protected", "not_recorded", "no_file_target"}
+WEB_KINDS = {"http", "visit", "search", "snapshot", "interact", "credential"}
+_WEB_LIMITS = {"kind": 16, "method": 10, "url": 512, "query": 240, "title": 200, "status_text": 80, "response_excerpt": 1200}
+
+
+def _web_resource(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict) or raw.get("kind") not in WEB_KINDS:
+        return None
+    out: dict[str, Any] = {}
+    for key, limit in _WEB_LIMITS.items():
+        val = raw.get(key)
+        if isinstance(val, str) and val.strip():
+            if key == "url":
+                if cleaned := clean_url(val):
+                    out["url"] = cleaned
+                continue
+            if key == "method" and not re.fullmatch(r"[A-Z]{3,10}", val):
+                continue
+            out[key] = (evidence_text(val, limit)[0] or "") if key == "response_excerpt" else redact(val, limit)
+    code = raw.get("status_code")
+    if type(code) is int and 100 <= code <= 599:
+        out["status_code"] = code
+    if out.get("kind") == "credential":
+        out = {"kind": "credential"}  # nothing of a credential step is kept
+    return out
+
+
+def evidence_reasons(context: dict[str, Any], step: dict[str, Any], category: str, step_scoped: bool,
+                     all_files: list[str], harness: str) -> bool:
+    """Say why a step's output or files are missing, and what a web call asked and got. Returns True if changed.
+
+    output_reason: empty_output, capture_disabled, protected, not_recorded (from the reader) or outside_scope (the
+    command ran outside the folders the journal may share). files_reason: no_file_target (the command names no
+    file), protected, or outside_scope (it named files, none inside the shared folders). Older events have neither;
+    Live then says "not recorded". These fields are not part of the step's identity keys."""
+    before = dict(context)
+    has_command = category in ("shell", "file_read", "file_edit") and any(
+        k in step for k in ("command_input", "command_output", "exit_code", "output_reason"))
+    reason = step.get("output_reason") if step.get("output_reason") in REASONS else None
+    if has_command:
+        if not step_scoped and reason not in ("capture_disabled", "protected"):
+            reason = "outside_scope"  # evidence was not stored
+        if reason:
+            context["output_reason"] = reason
+    if category in ("shell", "file_read", "file_edit") and not all_files:
+        files_reason = step.get("files_reason") if step.get("files_reason") in REASONS else None
+        if step.get("files"):
+            files_reason = "outside_scope"  # the reader saw files, the journal may not share any of them
+        if files_reason:
+            context["files_reason"] = files_reason
+    web = _web_resource(step.get("web_resource"))
+    if web and not step_scoped and web.get("kind") == "http":
+        web = {k: v for k, v in web.items() if k in ("kind", "method")}  # address and response stay private
+    if web is None and category == "web":
+        web = {"kind": _web_kind(step.get("tool"))}
+    if web:
+        context["web_resource"] = web
+    return context != before
+
+
+def _web_kind(tool: Any) -> str:
+    key = str(tool or "").lower()
+    for kind, words in (("credential", ("secret", "login", "vault", "takeover", "api_key", "password")),
+                        ("snapshot", ("snapshot", "screenshot", "window_state", "desktop_state")),
+                        ("search", ("search",)), ("visit", ("open", "navigate", "goto", "fetch", "browse", "visit"))):
+        if any(w in key for w in words):
+            return kind
+    return "interact"
+
+
 def ensure_journal_tables(db: Any) -> None:
     """Create unified journal tables and migrate legacy remote dedup digests if present."""
     event_evidence.ensure_tables(db)
@@ -679,6 +751,8 @@ def project_rows(
                             shared_paths.append((field, item, display[0]))
                 if ref or shared_paths or any(k in step for k in ("command_input", "command_output", "exit_code", "native_call_ref")):
                     evidence_by_key.setdefault(key, (step, shared_paths, ref))
+            if evidence_reasons(context, step, category, step_scoped, all_files, harness):
+                final_metadata = json.dumps(context, sort_keys=True, ensure_ascii=False)
             severity = step_severity(outcome)
             yield key, legacy, timestamp, (
                 host_id,

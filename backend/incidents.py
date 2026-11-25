@@ -17,8 +17,20 @@ _LOCAL_CREDENTIAL = re.compile(r"\b(?:sc_ro_[\w-]{8,}|s2\.[A-Za-z0-9_-]{32,})")
 _PRIVATE_PATH = re.compile(r"""(?<![\w.<])(?:/(?!/)[\w.-]+(?:/[\w.+-]+)+|[A-Za-z]:[\\/][^\s"'<>]+)""")
 _NUMERIC_EVIDENCE = (
     "mem_used_mb", "mem_total_mb", "hot_count", "count", "affected_agents", "process_count",
-    "age_seconds", "event_id", "max_cpu_pct", "max_rss_mb", "threshold", "last_heartbeat_at",
+    "age_seconds", "event_id", "source_event_id", "trigger_event_id",
+    "max_cpu_pct", "max_rss_mb", "threshold", "last_heartbeat_at",
 )
+
+
+def _causal_event_id(data):
+    """Return an explicit causal event ID when recorded, never inferring from host last_step."""
+    if not isinstance(data, dict):
+        return None
+    for key in ("source_event_id", "trigger_event_id", "event_id"):
+        val = data.get(key)
+        if type(val) is int and val > 0:
+            return val
+    return None
 
 
 def _object(raw):
@@ -51,7 +63,7 @@ def _numbers(data, keys):
 def signal_evidence(data):
     """Keep measured values and identifiers, never free-text log samples or a process command line."""
     safe = _numbers(data, _NUMERIC_EVIDENCE)
-    for key in ("agent_name", "harness"):
+    for key in ("agent_name", "harness", "session"):
         if value := _label(data.get(key)):
             safe[key] = value
     if isinstance(data.get("process"), dict):
@@ -82,10 +94,13 @@ def _last_step(db, host, now):
                 and all(part and not part.startswith(".") for part in path.split("/"))
                 and not is_sensitive_path(path) and _display_text(path, 240) == path):
             confirmed.append(path)
-    return {"event_id": row["id"], "at": row["created_at"], "agent": _label(row["agent_name"]),
-            "runtime": _label(row["harness"]), "session": _label(meta.get("session")),
-            "action": _label(meta.get("action")), "tool": _label(meta.get("tool")),
-            "confirmed_files": confirmed[:12], "basis": "last_observed_on_host"}
+    out = {"event_id": row["id"], "at": row["created_at"], "agent": _label(row["agent_name"]),
+           "runtime": _label(row["harness"]), "session": _label(meta.get("session")),
+           "action": _label(meta.get("action")), "tool": _label(meta.get("tool")),
+           "confirmed_files": confirmed[:12], "basis": "last_observed_on_host"}
+    if prog := _label(meta.get("program")):
+        out["program"] = prog
+    return out
 
 
 def _entry(conn, case_id, kind, actor, at, data):
@@ -181,9 +196,21 @@ def _import_episode(conn, rows, previous):
 def observe(db, host, rule, severity, title, summary, evidence):
     with db.transaction() as conn:
         now = time.time()
-        active = db.query_one(f"SELECT id FROM incident_cases WHERE host_id=? AND rule_code=? AND {ACTIVE}", (host, rule))
+        active = db.query_one(
+            f"SELECT id,evidence_json FROM incident_cases WHERE host_id=? AND rule_code=? AND {ACTIVE}",
+            (host, rule),
+        )
         step = _last_step(db, host, now)
         safe = signal_evidence(evidence)
+        if active:
+            prev_ev = _object(active["evidence_json"])
+            prev_eid = _causal_event_id(prev_ev)
+            if prev_eid is not None and _causal_event_id(safe) is None:
+                safe["source_event_id"] = prev_eid
+                if type(prev_ev.get("event_id")) is int and prev_ev["event_id"] > 0:
+                    safe["event_id"] = prev_ev["event_id"]
+            if not safe.get("session") and prev_ev.get("session"):
+                safe["session"] = prev_ev["session"]
         values = (severity, _display_text(title, 512), _display_text(summary, 1000), json.dumps(safe), now, now,
                   json.dumps(step) if step else None)
         if active:
@@ -245,6 +272,11 @@ def present(row):
     result["evidence"] = _object(result.pop("evidence_json"))
     result["last_step"] = _object(result.pop("last_step_json")) or None
     result["count_is_minimum"] = bool(result["count_is_minimum"])
+    src_id = _causal_event_id(result["evidence"])
+    if src_id is not None:
+        result["source_event_id"] = src_id
+    if isinstance(result["evidence"].get("session"), str) and result["evidence"]["session"]:
+        result["session"] = result["evidence"]["session"]
     result.pop("merged_into")
     return result
 

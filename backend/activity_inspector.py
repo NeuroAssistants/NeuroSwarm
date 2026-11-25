@@ -39,7 +39,7 @@ from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import url2pathname
 
 SCHEMA_VERSION = "1.0"
@@ -391,10 +391,11 @@ FILE_OPERAND_PROGRAMS = {
 
 
 def command_files(command: Any, cwd: Any, limit: int = 6) -> list[str]:
-    """Existing files a shell command names as operands (`tail -n 20 app.log`, `python3 tools/run.py`, `cd x && cat y`).
+    """Find existing file operands relative to the directory established by the reader.
 
-    Only programs that take files are considered, only arguments that resolve to an existing regular file count, and
-    the caller keeps only paths inside the shared folders. Nothing is read; the file is only checked to exist."""
+    When the command itself changes directory, its input alone cannot establish
+    where it ran. The reader must supply the child command and verified directory.
+    This helper checks existence without reading file contents."""
     c = str(command or "").strip()
     unwrapped = re.match(r"""^(?:/\S*/)?(?:ba|z)?sh\s+-l?c\s+(['"])(.*)\1\s*$""", c, re.S)
     if unwrapped:
@@ -412,12 +413,8 @@ def command_files(command: Any, cwd: Any, limit: int = 6) -> list[str]:
         if not tokens:
             continue
         program = tokens[0].rsplit("/", 1)[-1]
-        if program == "cd":
-            target = tokens[1] if len(tokens) > 1 else ""
-            if target and not target.startswith(("~", "$", "-")):
-                base = Path(target) if Path(target).is_absolute() else (Path(here) / target if here else None)
-                here = clean_path(base) if base is not None else ""
-            continue
+        if program in {"cd", "pushd", "popd"}:
+            return []
         if re.fullmatch(r"python3?(?:\.\d+)?", program):
             program = "python3"
         if program not in FILE_OPERAND_PROGRAMS:
@@ -517,19 +514,181 @@ def execution_detail(command, output, code):
         sha = recorded_commit(command, output, code)
         if sha:
             info["git_commit"] = sha
-    if os.environ.get("SWARMCONTROL_SHARE_COMMANDS") == "1":
+    share_commands = os.environ.get("SWARMCONTROL_SHARE_COMMANDS") == "1"
+    share_output = os.environ.get("SWARMCONTROL_SHARE_COMMAND_OUTPUT") == "1"
+    protected = protected_command(command)
+    if share_commands:
         text, _ = evidence_text(command, 1024)
         if text is not None:
             info["command_input"] = text
-    if os.environ.get("SWARMCONTROL_SHARE_COMMAND_OUTPUT") == "1":
-        # A command that asks for credential files or the environment has no shareable output.
-        if protected_command(command):
-            return info
+    # Why there is no output to show (Live explains it instead of an empty box). The journal may still change it to
+    # "outside_scope" when the command ran outside the folders it may share.
+    if not share_output:
+        info["output_reason"] = "capture_disabled"
+    elif protected:
+        info["output_reason"] = "protected"  # a command that asks for credential files or the environment
+    else:
         text, cut = evidence_text(output, 4096)
-        if text is not None:
+        if text is None:
+            info["output_reason"] = "not_recorded"  # the runtime did not report an output for this call
+        else:
             info.update(command_output=text, output_truncated=cut)
+            if not text.strip():
+                info["output_reason"] = "empty_output"
+    if names_no_file(command):
+        info["files_reason"] = "no_file_target"
+    web = http_resource(command, None if (protected or not share_output) else output, share_commands)
+    if web:
+        info["web_resource"] = web
     return info
 
+
+# ---------- why a step has no file, and what a web call asked and got ----------
+_PATHISH = re.compile(r"(?:/|\\|^\.{1,2}$|\.[A-Za-z0-9]{1,8}$)")
+
+
+def names_no_file(command: Any) -> bool:
+    """True when no argument of the command looks like a file (`python3 -c ...`, `git status`, `curl https://...`)."""
+    c = str(command or "").strip()
+    if not c:
+        return False
+    for segment in re.split(r"\n|;|&&|\|\||\|", c):
+        try:
+            tokens = shlex.split(segment, posix=True)
+        except ValueError:
+            return False  # cannot tell
+        program = tokens[0].rsplit("/", 1)[-1] if tokens else ""
+        if program == "cd":
+            continue
+        if re.fullmatch(r"python3?(?:\.\d+)?", program) and len(tokens) > 1 and tokens[1] in ("-c", "-m"):
+            continue  # inline code or a module, not a file
+        for tok in tokens[1:]:
+            if tok.startswith("-") or re.match(r"^[a-z][\w+.-]*://", tok, re.I) or "=" in tok.split("/", 1)[0]:
+                continue
+            if _PATHISH.search(tok):
+                return False
+    return True
+
+
+_SECRET_QUERY = re.compile(r"(?i)(token|secret|passw|pwd|key|sig|auth|session|code|jwt|credential|cookie)")
+
+
+def clean_url(raw: Any) -> str:
+    """An http(s) address without user, password, fragment or the values of secret-looking query parameters."""
+    if not isinstance(raw, str):
+        return ""
+    try:
+        u = urlsplit(raw.strip().strip("'\""))
+        port = u.port
+    except ValueError:
+        return ""
+    if u.scheme.lower() not in ("http", "https") or not u.hostname:
+        return ""
+    host = u.hostname + (f":{port}" if port else "")
+    # Each part is checked on its own: a secret-looking value is masked without swallowing the parameters after it.
+    query = urlencode([(redact(k, 64), "[redacted]" if _SECRET_QUERY.search(k) else redact(v, 200))
+                       for k, v in parse_qsl(u.query, keep_blank_values=True)], safe="[]/:")
+    out = urlunsplit((u.scheme.lower(), redact(host, 255), redact(u.path, 300), query, ""))
+    return out[:512]
+
+
+_HTTP_STATUS = re.compile(r"^(?:<\s*)?HTTP/[\d.]+\s+(\d{3})(?:[ \t]+([^\r\n]*))?", re.M)
+_DATA_FLAGS = {"-d", "--data", "--data-raw", "--data-binary", "--data-urlencode", "--json", "-F", "--form", "--form-string"}
+
+
+def http_resource(command: Any, output: Any, share_url: bool) -> dict[str, Any] | None:
+    """Method, address, HTTP status and an excerpt of the response of a curl or wget call, when they were recorded.
+    The address needs command sharing; status and excerpt need output sharing (the caller passes None otherwise)."""
+    c = str(command or "")
+    for segment in re.split(r"\n|;|&&|\|\||\|", c):
+        try:
+            tokens = shlex.split(segment, posix=True)
+        except ValueError:
+            continue
+        while tokens and (tokens[0].rsplit("/", 1)[-1] in WRAPPERS or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", tokens[0])):
+            tokens = tokens[1:]
+        program = tokens[0].rsplit("/", 1)[-1] if tokens else ""
+        if program not in ("curl", "wget"):
+            continue
+        method, url, write_code, get = "", "", False, False
+        args = tokens[1:]
+        for i, tok in enumerate(args):
+            nxt = args[i + 1] if i + 1 < len(args) else ""
+            if tok in ("-X", "--request"):
+                method = nxt.upper()
+            elif tok.startswith("-X") and len(tok) > 2:
+                method = tok[2:].upper()
+            elif tok.startswith("--method="):
+                method = tok.split("=", 1)[1].upper()
+            elif tok in ("-I", "--head"):
+                method = method or "HEAD"
+            elif tok in ("-G", "--get"):
+                get = True
+            elif tok in ("-T", "--upload-file"):
+                method = method or "PUT"
+            elif tok in _DATA_FLAGS or tok.startswith(("--data", "--post-data", "--post-file", "--json")):
+                method = method or "POST"
+            elif tok in ("-w", "--write-out") and re.search(r"%\{(?:http_code|response_code)\}", nxt):
+                write_code = True
+            elif not url and re.match(r"^https?://", tok, re.I):
+                url = tok
+        if get:
+            method = "GET" if method in ("", "POST") else method
+        out: dict[str, Any] = {"kind": "http", "method": (method if re.fullmatch(r"[A-Z]{3,10}", method or "") else "GET")}
+        if share_url and (clean := clean_url(url)):
+            out["url"] = clean
+        if isinstance(output, str) and output.strip():
+            body = output
+            statuses = list(_HTTP_STATUS.finditer(output))
+            if statuses:
+                last = statuses[-1]
+                out["status_code"] = int(last[1])
+                if last[2] and last[2].strip():
+                    out["status_text"] = redact(last[2].strip(), 80)
+                rest = output[last.end():]
+                split = re.search(r"\r?\n\r?\n", rest)
+                body = rest[split.end():] if split else ""
+                body = "\n".join(ln for ln in body.splitlines() if not re.match(r"^[<>*] ", ln))
+            elif write_code and (m := re.search(r"(?<!\d)([1-5]\d\d)\s*$", output)):
+                out["status_code"] = int(m[1])
+                body = output[:m.start(1)]
+            excerpt, _ = evidence_text(body.strip(), 1200)
+            if excerpt:
+                out["response_excerpt"] = excerpt
+        return out
+    return None
+
+
+_WEB_KINDS = (
+    ("credential", re.compile(r"secret|login|vault|takeover|api_key|password|credential")),
+    ("snapshot", re.compile(r"snapshot|screenshot|window_state|desktop_state|capture")),
+    ("search", re.compile(r"search")),
+    ("visit", re.compile(r"open|navigate|goto|fetch|browse|visit|new_tab|tab_open")),
+)
+
+
+def web_kind(tool: Any) -> str:
+    key = str(tool or "").lower()
+    for kind, pat in _WEB_KINDS:
+        if pat.search(key):
+            return kind
+    return "interact"
+
+
+def web_tool_resource(tool: Any, args: Any) -> dict[str, Any]:
+    """What a browser or web tool did: a visit, a search, a page capture, an interaction or a credential step.
+    The address and the query are kept only with command sharing; nothing of a credential step is kept."""
+    kind = web_kind(tool)
+    out: dict[str, Any] = {"kind": kind}
+    if kind == "credential" or not isinstance(args, dict) or os.environ.get("SWARMCONTROL_SHARE_COMMANDS") != "1":
+        return out
+    url = clean_url(next((args[k] for k in ("url", "uri", "href", "link") if isinstance(args.get(k), str)), ""))
+    if url:
+        out["url"] = url
+    query = next((args[k] for k in ("query", "q", "search_query", "search_term") if isinstance(args.get(k), str)), "")
+    if query.strip():
+        out["query"] = redact(query, 240)
+    return out
 
 
 def _workspace_image(path, when, scope):
@@ -905,11 +1064,6 @@ def _finish(card: dict[str, Any], steps: list[dict[str, Any]], edited: list[str]
     for step in steps:
         raw = step.pop("_shell", None)
         here = step.pop("_cwd", None)
-        # Recognize the effective directory only for an unambiguous single read.
-        if isinstance(raw, str) and here:
-            scoped_read = re.fullmatch(r"cd (/[-./\w]+) && cat ([-./\w]+)", raw.strip())
-            if scoped_read and not scoped_read[2].startswith("-") and ".." not in Path(scoped_read[2]).parts:
-                here = scoped_read[1]
         if here and _CAPTURE is not None and scope.contains(clean_path(here)):
             step["cwd"] = clean_path(here)  # read by the journal to resolve relative paths and the command's folder
         if raw and not step.get("files") and step.get("category") in ("shell", "file_read", "file_edit"):
@@ -1120,11 +1274,23 @@ _CODEX_EDIT_TOOLS = {"edit", "edit_file", "write", "write_file", "multiedit", "n
 _CODEX_READ_TOOLS = {"read", "read_file", "view_image", "read_image"}
 _CODEX_FILE_TOOLS = _CODEX_EDIT_TOOLS | _CODEX_READ_TOOLS
 
+# Literal shell text only. Quoted punctuation is an argument, unquoted shell
+# operators, substitutions and redirections change what actually ran.
+_LITERAL_SHELL_CHUNK = re.compile(r'''[\w \t.,/@%+:=-]+|'[^'\x00-\x1f]*'|"[^"\\$`\x00-\x1f]*"''')
+
+
+def _literal_shell_end(command: str) -> int:
+    pos = 0
+    while pos < len(command):
+        chunk = _LITERAL_SHELL_CHUNK.match(command, pos)
+        if not chunk:
+            break
+        pos = chunk.end()
+    return pos
+
 
 def _literal_shell_words(command: str) -> list[str]:
-    # Only a simple command. Guessing after cd, expansion, substitution, a pipe,
-    # redirection or a shell comment can associate an entirely different file.
-    if len(command) > 8192 or re.search(r"""[^\w \t.,/@%+:="'-]""", command):
+    if len(command) > 8192 or _literal_shell_end(command) != len(command):
         return []
     try:
         return shlex.split(command)
@@ -1142,10 +1308,14 @@ def _codex_command_parts(raw, parsed) -> tuple[str, list[str]]:
         if not command and len(parsed) == 1 and isinstance(parsed[0].get("cmd"), str):
             command = parsed[0]["cmd"]
         words = _literal_shell_words(command)
-    if (len(words) >= 3 and Path(words[0]).name in {"sh", "bash", "dash", "zsh", "ksh"}
-            and words[1] in {"-c", "-lc", "-cl"}):
-        command = words[2]
-        words = _literal_shell_words(command)
+    if words and Path(words[0]).name in {"sh", "bash", "dash", "zsh", "ksh"}:
+        index = 1
+        if Path(words[0]).name == "bash":
+            while index < len(words) and words[index] in {"--noprofile", "--norc"}:
+                index += 1
+        if index + 1 < len(words) and words[index] in {"-c", "-lc", "-cl"}:
+            command = words[index + 1]
+            words = _literal_shell_words(command)
     return command, words
 
 
@@ -1225,6 +1395,111 @@ def _codex_target(raw, cwd) -> str:
     return target
 
 
+# A standard POSIX shell reports a failed literal cd on stderr. Codex records
+# stdout and stderr together in aggregated_output. Treat shell diagnostics,
+# incomplete captures and missing results as insufficient to locate the child.
+_CD_DIAGNOSTIC = re.compile(r"(?im)^(?:[ \t]*(?:cd|chdir|fchdir)(?=[\s:]|$)|"
+                            r"(?:[^\s:]+/)?-?(?:ba|da|z|k)?sh:)|: (?:line )?\d+: cd:")
+_OMITTED_OUTPUT = re.compile(r"(?im)(?:output (?:was )?truncated|(?:tokens|characters|lines) truncated|"
+                             r"omitted (?:\d+ |middle )?(?:lines|bytes|tokens))")
+
+
+def _guarded_command_directory(prefix, launcher):
+    """Resolve the intended directory without using its present existence as evidence of execution."""
+    args = _literal_shell_words(prefix)
+    if args[:2] == ["cd", "--"]:
+        args = ["cd", *args[2:]]
+    if len(args) != 2 or args[0] != "cd":
+        return "", "not_recorded"
+    destination = Path(args[1])
+    if not destination.is_absolute():
+        # A bare relative name may use CDPATH, and '-' may use OLDPWD.
+        if not args[1].startswith("./") or not clean_path(launcher):
+            return "", "not_recorded"
+        destination = Path(clean_path(launcher)) / destination
+    if is_sensitive_path(str(destination)):
+        return "", "protected"
+    root = _scope().root_of(destination)
+    if not root or not destination.is_relative_to(root):
+        return "", "outside_scope"
+    try:
+        if any(p.startswith(".") for p in destination.relative_to(root).parts):
+            return "", "protected"
+        if not clean_path(destination) or destination.resolve() != destination:
+            return "", "not_recorded"
+    except (OSError, RuntimeError):
+        return "", "outside_scope"
+    return str(destination), ""
+
+
+def _guarded_child_ran(item, directory, argv):
+    code = item.get("exit_code")
+    if type(code) is not int:
+        return False
+    if code == 0:
+        return True
+    output = item.get("aggregated_output")
+    if (not isinstance(output, str) or len(output) > 128_000 or item.get("truncated")
+            or item.get("output_truncated") or "\x00" in output):
+        return False
+    output = _CONTROL_SEQ.sub("", output)
+    if _CD_DIAGNOSTIC.search(output) or _OMITTED_OUTPUT.search(output):
+        return False
+
+    # A noninteractive POSIX sh -c without a login profile reports a failed cd
+    # on the combined stream. In a login shell a profile can print arbitrary
+    # text and exit before the cd, so require a recognizable child result there.
+    raw = item.get("command")
+    if (isinstance(raw, list) and len(raw) == 3 and isinstance(raw[0], str)
+            and Path(raw[0]).name in {"sh", "dash"} and raw[1] == "-c"):
+        return bool(output.strip())
+    lines = output.lstrip().splitlines()
+    if not lines:
+        return False
+    program = Path(argv[0]).name
+    if lines[0].startswith((program + ":", argv[0] + ":", "usage: " + program + " ")):
+        return True
+    if program == "git" and code == 128 and lines[0].startswith("fatal: "):
+        return True
+    if re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", program):
+        source, separator, message = lines[0].partition(": ")
+        if (separator and Path(source).is_absolute() and Path(source).name == program
+                and message.startswith(("No module named ", "can't open file "))):
+            return True
+        files = _command_file_operands(argv)
+        frame = str(Path(directory) / files[0]) if files else "<string>"
+        return (lines[0] == "Traceback (most recent call last):" or lines[0].startswith('File "')) and any(
+            line.lstrip().startswith(f'File "{frame}", line ') for line in lines)
+    return (program in {"grep", "rg"} and ("-c" in argv or "--count" in argv)
+            and code == 1 and output.strip() == "0")
+
+
+def _guarded_operands_local(argv, directory):
+    """A cd must not elevate an explicit operand in a different/private folder."""
+    if len(argv) > 128:
+        return False
+    base = Path(directory)
+    args = argv if argv[0].startswith(("./", "../")) else argv[1:]
+    for arg in args:
+        value = arg.partition("=")[2] if arg.startswith("--") and "=" in arg else arg
+        # Some short options take an attached path, for example git -C/path.
+        attached = re.match(r"^-[a-zA-Z](@?/|\.\.?/)", value)
+        if attached:
+            value = value[2:]
+        value = value.removeprefix("@")
+        if not value or value.startswith(("-", "https://", "http://")):
+            continue
+        if value.startswith(("file:", "~")):
+            return False
+        path = base / value
+        try:
+            if ".." in path.parts or not path.is_relative_to(base) or not path.resolve().is_relative_to(base):
+                return False
+        except (OSError, RuntimeError, ValueError):
+            return False
+    return True
+
+
 def _codex_command_step(item, cwd, stamp, read):
     parsed = [p for p in item.get("parsed_cmd") or [] if isinstance(p, dict)]
     kinds = {p.get("type") for p in parsed}
@@ -1232,14 +1507,50 @@ def _codex_command_step(item, cwd, stamp, read):
     # Each descriptor may record its own directory. A relative path after a cd
     # in a compound shell command cannot safely use the launcher directory.
     moved = re.search(r"(?:^|[\s(;|&])(?:cd|pushd|popd)(?=\s|$)", command)
-    # A literal "cd /project && program args" executes the second command in
-    # that directory only when cd succeeds. A newline or semicolon lacks that guarantee.
-    prefix = re.fullmatch(r"cd (/[-./\w]+) && (.+)", command.strip()) if not words else None
-    if prefix and item.get("exit_code") == 0:
-        argv = _literal_shell_words(prefix[2])
-        if argv and (argv[0] in {"wc", "head", "tail", "cat", "rg", "git", "curl"}
-                     or re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", argv[0])):
-            cwd, words, moved = prefix[1], argv, False
+    child = ""
+    if not words and re.match(r"^\s*cd\s", command):
+        boundary = _literal_shell_end(command) if len(command) <= 8192 else 0
+        if command.startswith("&&", boundary):
+            child = command[boundary + 2:].strip()
+        argv = _literal_shell_words(child)
+        directory, reason = _guarded_command_directory(command[:boundary], cwd)
+        shell_result = {}
+        if (not argv or argv[0] in {"cd", "pushd", "popd", ".", "source", "eval"}
+                or (Path(argv[0]).name in {"bash", "sh", "dash", "ksh", "zsh"}
+                    and any(arg.startswith("-") and "c" in arg for arg in argv[1:2]))):
+            reason = "not_recorded"
+        elif directory and not _guarded_operands_local(argv, directory):
+            reason = "outside_scope"
+        elif directory and not _guarded_child_ran(item, directory, argv):
+            reason = "not_recorded"
+            # If the intended destination is below the launcher, permission to
+            # share the launcher covers either stage. Keep the shell result under
+            # *that* cwd, without claiming the child opened its intended files.
+            launch = clean_path(cwd)
+            if _CAPTURE is not None and launch and Path(directory).is_relative_to(Path(launch)):
+                detail = execution_detail(command, item.get("aggregated_output"), item.get("exit_code"))
+                shell_result = {key: detail[key] for key in ("command_input", "command_output", "exit_code",
+                                "output_truncated", "output_reason") if key in detail}
+        if reason:
+            # Parsed commands describe the input even if the shell never got to
+            # that operand. Do not re-infer files in _finish or publish startup
+            # output using the intended project's permissions.
+            step = _step("exec_command", "Run a shell command", stamp)
+            step["files"] = []
+            if _CAPTURE is not None:
+                step["files_reason"] = reason
+                if "command_output" not in shell_result:
+                    sharing = os.environ.get("SWARMCONTROL_SHARE_COMMAND_OUTPUT") == "1"
+                    step["output_reason"] = reason if sharing else "capture_disabled"
+                if type(item.get("exit_code")) is int:
+                    step["exit_code"] = item["exit_code"]  # shell exit, subject to launcher scope
+            if program := command_info(command).get("program"):
+                step["program"] = program
+            if cwd:
+                step["_cwd"] = cwd
+            step.update(shell_result)
+            return step
+        cwd, words, moved = directory, argv, False
     withheld = False
     files = []
     native_operands = set()
@@ -1259,6 +1570,8 @@ def _codex_command_step(item, cwd, stamp, read):
     read.extend(files)
     confirmed = len(files)
     operands = _command_file_operands(words)
+    if child and words[0].startswith("./"):
+        operands.insert(0, words[0])
     if len(operands) > 64:
         withheld = True  # the public file list is bounded; do not ship output from unchecked operands
     for operand in operands[:64]:
@@ -1280,12 +1593,14 @@ def _codex_command_step(item, cwd, stamp, read):
     elif category == "file_read":
         label = "List or search files"
     else:
-        label = command_kind(command or (parsed[0].get("cmd") if parsed else ""))
+        label = command_kind(child.strip() or command or (parsed[0].get("cmd") if parsed else ""))
     step = _step("exec_command", label, stamp)
     step.update(category=category, files=files)
     if len(files) > confirmed:
         step["file_basis"] = "recorded"  # an argv operand alone does not prove a successful read or edit
     evidence = execution_detail(command, None if withheld else item.get("aggregated_output"), item.get("exit_code"))
+    if child:
+        evidence["_shell"] = child.strip()[:4000]  # effective directory already incorporates the cd
     if withheld:
         evidence.pop("command", None)
         evidence.pop("command_input", None)
@@ -1293,6 +1608,8 @@ def _codex_command_step(item, cwd, stamp, read):
         step["_cwd"] = cwd
     if withheld or (words and Path(words[0]).name.lower().startswith(("python", "tail"))):
         evidence.pop("_shell", None)  # explicit operand parser already handled these
+    if withheld and evidence.get("output_reason") not in ("capture_disabled", "protected"):
+        evidence["output_reason"] = "outside_scope"  # a named file is outside the shared folders
     step.update(evidence)
     return step
 
@@ -1389,6 +1706,8 @@ def codex_sessions(limit: int = 8) -> list[dict[str, Any]]:
                             delivered += [str(x) for x in args.get("paths") or []]
                         step = _step(tool, tool.replace("_", " "), stamp)
                         steps.append(step)
+                        if _CAPTURE is not None and step.get("category") == "web":
+                            step["web_resource"] = web_tool_resource(tool, args)
                         if key not in _CODEX_FILE_TOOLS or not isinstance(args, dict):
                             continue
                         editing = key in _CODEX_EDIT_TOOLS
@@ -1424,6 +1743,8 @@ def codex_sessions(limit: int = 8) -> list[dict[str, Any]]:
                                     step["text_previews"] = snippets
                     elif t == "Extension" and it.get("query"):
                         steps.append(_step("web_search", f"Search: {it['query']}", stamp))
+                        if _CAPTURE is not None:
+                            steps[-1]["web_resource"] = web_tool_resource("web_search", {"query": it["query"]})
                     elif t == "AgentMessage":
                         text = " ".join(str(b.get("text") or "") for b in it.get("content") or [] if isinstance(b, dict))
                         if text.strip():
@@ -1592,6 +1913,8 @@ def claude_sessions(limit: int = 6) -> list[dict[str, Any]]:
                         steps.append(_step(inp["name"], "", o.get("timestamp")))  # wrapper call: show the wrapped tool's action
                     else:
                         steps.append(_step(name, label, o.get("timestamp")))
+                    if _CAPTURE is not None and steps[-1].get("category") == "web":
+                        steps[-1]["web_resource"] = web_tool_resource(name, inp)
                     if _CAPTURE is not None and (name in CLAUDE_EDIT or name == "Bash"):
                         ref = native_call_ref(f"claude-code:{jf.stem}", b.get("id"))
                         if ref:

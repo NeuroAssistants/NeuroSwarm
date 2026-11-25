@@ -100,3 +100,29 @@ elsewhere; the observer does not read the variables of other processes.
 variable that chose it or `default`. `status` is `found`, `not found`, `no permission`, or
 `unsupported format (<file>)` (optionally `; reading <older file>`). Remote ingest keeps at most 12 entries with these
 statuses and shows them on the map's machine card; they are never stored as events.
+
+### 6.4 Why evidence is missing, and web resources
+
+Each step's event metadata may carry `output_reason` and `files_reason`, from a fixed vocabulary:
+
+| Value | Meaning |
+|---|---|
+| `empty_output` | The command ran and printed nothing. |
+| `capture_disabled` | The machine does not share command output (`SWARMCONTROL_SHARE_COMMAND_OUTPUT`). |
+| `outside_scope` | The command ran, or named a file, outside the folders this journal may share. |
+| `protected` | The command asked for credential files or the environment; its output is never kept. |
+| `not_recorded` | The runtime did not report an output for this call. |
+| `no_file_target` | The command names no file (`git status`, `python3 -c`, `curl https://…`). |
+
+Events recorded before these fields existed have neither; Live shows them as "not recorded".
+
+`web_resource` describes curl/wget calls and browser or web tools: `kind` (`http`, `visit`, `search`, `snapshot`, `interact`, `credential`), `method`, `url` (http/https only, without user, password, fragment or the values of secret-looking query parameters), `query`, `status_code`, `status_text` and `response_excerpt` (redacted, at most 1,200 characters). The address and the query need `SWARMCONTROL_SHARE_COMMANDS=1`; the status and the excerpt need `SWARMCONTROL_SHARE_COMMAND_OUTPUT=1`. A command outside the shared folders keeps only `kind` and `method`, and a credential step keeps only `kind`. The status comes from the response headers (`-i`, `-I`, `-v`) or from `-w '%{http_code}'`; a 401 is visible even when curl exits 0.
+
+Which commands lose evidence most often:
+
+```sql
+SELECT json_extract(metadata_json, '$.program') AS program,
+       COALESCE(json_extract(metadata_json, '$.output_reason'), 'kept or not recorded') AS reason, COUNT(*) AS steps
+FROM events WHERE event_type = 'observed_step' AND json_extract(metadata_json, '$.action') = 'shell'
+GROUP BY 1, 2 ORDER BY steps DESC;
+```

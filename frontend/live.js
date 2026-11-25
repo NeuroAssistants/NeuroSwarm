@@ -355,6 +355,17 @@
     const rawState = String(r.state || r.status || (isAlert ? "OPEN" : "RECORDED")).toUpperCase();
     const files = Array.isArray(details.files) ? details.files.map(String) : [];
     const ws = String(details.workspace || "");
+    const rawOriginId =
+      r.source_event_id ??
+      r.evidence_event_id ??
+      details.source_event_id ??
+      details.trigger_event_id ??
+      details.event_id ??
+      null;
+    const originEventId = /^[1-9]\d{0,18}$/.test(String(rawOriginId ?? "")) ? String(rawOriginId) : null;
+    const alertSession = String(r.session || details.session || (details.last_step && details.last_step.session) || "");
+    const alertProgram = String(details.program || "");
+    const alertCommand = String(details.command || "");
     const cat = isAlert
       ? "guardrail"
       : src.includes("work_") || src === "plan"
@@ -365,6 +376,8 @@
     return {
       key: String(r.key || `${isAlert ? "alert" : "event"}:${r.id}`),
       rawId: r.id,
+      evidenceEventId: originEventId,
+      evidenceEventOrg: r.organization ?? state.org?.id ?? null,
       kind: isAlert ? "Alert" : "Event",
       severity: normSev(r.severity, rawState),
       status: normStatus(rawState),
@@ -380,7 +393,8 @@
       workspace: ws,
       files,
       where: files.length ? shortPath(files[0]) : shortPath(ws) || src,
-      program: "",
+      program: alertProgram,
+      command: alertCommand,
       message: String(r.title || r.message || src || "Record"),
       summary: String(r.summary || r.detail || r.message || ""),
       ackedBy: String(r.acked_by || ""),
@@ -389,7 +403,7 @@
       signalCount: r.occurrence_count,
       countIsMinimum: r.count_is_minimum,
       previousCase: r.previous_id,
-      sessionId: "",
+      sessionId: alertSession,
       taskId: String(details.task_id || ""),
       changeId: String(details.task_id || ""),
       sessionFiles: { edited: [], delivered: [], read: [] },
@@ -967,6 +981,331 @@
   }
 
   /* ---------- Render Main Table & Status Bar ---------- */
+  const SENSITIVE_QUERY_RE = /^(?:token|access_token|refresh_token|id_token|api_?key|key|secret|client_secret|password|passwd|pwd|auth|authorization|bearer|jwt|sig|signature|session|sid|code|x-amz-signature|x-amz-credential|x-amz-security-token)$/i;
+
+  function redactDisplayUrl(raw) {
+    const s = String(raw || "").trim().replace(/^['"<]+|['">),.;]+$/g, "");
+    if (!s || !/^https?:/i.test(s)) return null;
+    try {
+      const u = new URL(s);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+      const hadCreds = Boolean(u.username || u.password);
+      u.username = "";
+      u.password = "";
+      let redactedParams = false;
+      const parts = [];
+      for (const [k, v] of u.searchParams.entries()) {
+        if (SENSITIVE_QUERY_RE.test(k)) {
+          parts.push(`${encodeURIComponent(k)}=[REDACTED]`);
+          redactedParams = true;
+        } else {
+          parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+        }
+      }
+      const qs = parts.join("&");
+      const display = `${u.protocol}//${u.host}${u.pathname}${qs ? "?" + qs : ""}`;
+      const short = `${u.host}${u.pathname === "/" ? "" : u.pathname}`;
+      const clickable = !hadCreds && !redactedParams && !display.includes("[REDACTED]") && !display.includes("***");
+      return { display, short, href: clickable ? u.toString() : "", host: u.host, redacted: hadCreds || redactedParams };
+    } catch {
+      return null;
+    }
+  }
+
+  function redactCommandForDisplay(cmd) {
+    const raw = String(cmd || "");
+    if (!raw) return "";
+    return raw.replace(/https?:\/\/[^\s'"]+/gi, (match) => {
+      const parsed = redactDisplayUrl(match);
+      return parsed ? parsed.display : match;
+    });
+  }
+
+  function classifyBrowserStep(item, ev) {
+    if (!item) return null;
+    const wr = (ev && (ev.web_resource || ev.browser_action || ev.web)) || (item.details && (item.details.web_resource || item.details.browser_action || item.details.web)) || null;
+    const toolRaw = String(wr?.tool || wr?.action_kind || item.source || item.details?.tool || "").toLowerCase();
+    const msgRaw = String(item.message || "").toLowerCase();
+    const isBrowserLike =
+      item.category === "web" ||
+      Boolean(wr && !wr.http_client) ||
+      /(?:browser|web_search|search_web|web_fetch|fetch_url|snapshot|screenshot|submit_secret|list_logins|vault|takeover|navigate)/.test(toolRaw);
+    if (!isBrowserLike) return null;
+    if (String(item.program || "").toLowerCase() === "curl" || String(item.program || "").toLowerCase() === "wget") return null;
+
+    let kind = "web";
+    let label = "Web action";
+    if (/(?:submit_secret|list_logins|vault|request_takeover|fill_card)/.test(toolRaw)) {
+      kind = "credential";
+      label = "Credential step";
+    } else if (/(?:snapshot|screenshot|capture_screen|get_window_state|get_desktop_state)/.test(toolRaw) || /\bsnapshot\b|\bscreenshot\b/.test(msgRaw) || wr?.kind === "snapshot") {
+      kind = "snapshot";
+      label = "Page snapshot";
+    } else if (/(?:search_web|web_search|brave_search|\bsearch\b)/.test(toolRaw) || /^search:/i.test(item.message || "") || wr?.kind === "search") {
+      kind = "search";
+      label = "Web search";
+    } else if (/(?:open|navigate|goto|web_fetch|fetch_url|browse|\bpage\b)/.test(toolRaw) || wr?.kind === "visit") {
+      kind = "visit";
+      label = "Page visit";
+    } else if (/(?:click|type|fill_fields|press|hover|scroll|select_option|set_checked|drag|run_script|\bact\b|handle_dialog|close_tab|list_tabs)/.test(toolRaw) || wr?.kind === "interact") {
+      kind = "interact";
+      label = "Browser action";
+    }
+    const rawUrl = wr?.url || item.details?.url || "";
+    const urlInfo = redactDisplayUrl(rawUrl);
+    const query = String(wr?.query || item.details?.query || (/^search:\s*(.+)$/i.exec(item.message || "")?.[1] || "")).trim();
+    const title = String(wr?.title || item.details?.page_title || item.details?.title || "").trim();
+    const excerpt = String(wr?.response_excerpt || wr?.excerpt || wr?.body || "").trim();
+    const statusCode = Number.isFinite(Number(wr?.status_code)) && Number(wr?.status_code) >= 100 ? Number(wr.status_code) : null;
+    return { kind, label, tool: String(item.source || ""), urlInfo, query, title, excerpt, statusCode };
+  }
+
+  function parseHttpTrace(item, ev) {
+    const wr = (ev && (ev.http || ev.web_resource)) || (item?.details && (item.details.http || item.details.web_resource)) || null;
+    const prog = String((ev && ev.program) || item?.program || "").toLowerCase();
+    const cmdIn = String((ev && ev.command_input) || item?.command || "").trim();
+    const cmdOut = typeof ev?.command_output === "string" ? ev.command_output : "";
+    const looksLikeHttpCmd = prog === "curl" || prog === "wget" || /(?:^|&&|\|\||;|\s)(?:curl|wget)\s/i.test(cmdIn);
+    if (!looksLikeHttpCmd && !(wr && (wr.status_code || wr.method || (wr.url && prog)))) return null;
+
+    let method = String(wr?.method || "").toUpperCase();
+    if (!method && cmdIn) {
+      const mExplicit = cmdIn.match(/(?:^|\s)(?:-X|--request)\s+['"]?([A-Za-z]+)['"]?/);
+      if (mExplicit) method = mExplicit[1].toUpperCase();
+      else if (/(?:^|\s)(?:-I|--head)(?:\s|$)/.test(cmdIn)) method = "HEAD";
+      else if (/(?:^|\s)(?:-d|--data(?:-[a-z]+)?|-F|--form|--json)(?:\s|=)/.test(cmdIn)) method = "POST";
+      else method = "GET";
+    }
+
+    let urlInfo = redactDisplayUrl(wr?.url || "");
+    if (!urlInfo && cmdIn) {
+      const urlMatches = cmdIn.match(/https?:\/\/[^\s'"]+/gi) || [];
+      for (const cand of urlMatches) {
+        const parsed = redactDisplayUrl(cand);
+        if (parsed) { urlInfo = parsed; break; }
+      }
+    }
+
+    let statusCode = Number.isFinite(Number(wr?.status_code ?? ev?.http_status)) && Number(wr?.status_code ?? ev?.http_status) >= 100
+      ? Number(wr?.status_code ?? ev?.http_status)
+      : null;
+    let statusText = String(wr?.status_text || ev?.http_status_text || "").trim();
+    let responseHeaders = "";
+    let responseBody = String(wr?.response_excerpt || wr?.body || "").trim();
+
+    if (cmdOut) {
+      const normalized = cmdOut.replace(/\r\n/g, "\n");
+      const statusRe = /^HTTP\/(?:\d+(?:\.\d+)?)\s+(\d{3})(?:[ \t]+([^\n]*))?$/gm;
+      let m;
+      let lastStatusEnd = -1;
+      let lastHeaderStart = -1;
+      while ((m = statusRe.exec(normalized)) !== null) {
+        const code = Number(m[1]);
+        if (code === 100) continue; // skip 100 Continue
+        if (statusCode === null) {
+          statusCode = code;
+          statusText = (m[2] || "").trim();
+        } else if (m.index > lastStatusEnd) {
+          statusCode = code;
+          statusText = (m[2] || "").trim();
+        }
+        lastHeaderStart = m.index;
+        lastStatusEnd = m.index + m[0].length;
+      }
+      if (lastHeaderStart >= 0) {
+        const tail = normalized.slice(lastHeaderStart);
+        const sep = tail.indexOf("\n\n");
+        if (sep >= 0) {
+          responseHeaders = tail.slice(0, sep).trim();
+          if (!responseBody) responseBody = tail.slice(sep + 2).trim();
+        } else {
+          responseHeaders = tail.trim();
+        }
+      } else if (!responseBody) {
+        responseBody = normalized.trim();
+      }
+    }
+
+    let formattedBody = responseBody;
+    let isJson = false;
+    if (responseBody && (responseBody.startsWith("{") || responseBody.startsWith("["))) {
+      try {
+        formattedBody = JSON.stringify(JSON.parse(responseBody), null, 2);
+        isJson = true;
+      } catch {
+        formattedBody = responseBody;
+      }
+    }
+    if (formattedBody.length > 2400) {
+      formattedBody = formattedBody.slice(0, 2400) + "\n… (excerpt truncated)";
+    }
+
+    const exitCode = ev && ev.exit_code !== null && ev.exit_code !== undefined ? Number(ev.exit_code) : null;
+    const isHttpError = statusCode !== null && statusCode >= 400;
+    const exitZeroHttpError = isHttpError && exitCode === 0;
+    return {
+      method: method || "GET",
+      urlInfo,
+      statusCode,
+      statusText,
+      isHttpError,
+      exitZeroHttpError,
+      responseHeaders,
+      formattedBody,
+      isJson,
+      exitCode,
+    };
+  }
+
+  function normalizeReasonCode(raw) {
+    const s = String(raw || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+    if (!s) return "";
+    if (["empty_output", "output_empty", "empty", "no_output"].includes(s)) return "empty_output";
+    if (["capture_disabled", "output_disabled", "commands_disabled", "share_disabled", "disabled", "opt_out"].includes(s)) return "capture_disabled";
+    if (["outside_scope", "out_of_scope", "unscoped", "outside_project", "outside_authorized_roots", "cd_failed", "outside_root"].includes(s)) return "outside_scope";
+    if (["protected", "protected_command", "protected_file", "redacted", "sensitive_path", "privacy_redacted", "secret_redacted"].includes(s)) return "protected";
+    if (["no_file_target", "inline_command", "not_applicable"].includes(s)) return "no_file_target";
+    if (["not_recorded", "unknown", "legacy", "unavailable"].includes(s)) return "not_recorded";
+    return s;
+  }
+
+  function classifyEvidenceReason(item, ev) {
+    const rawCode =
+      ev?.output_reason ||
+      ev?.evidence_reason ||
+      ev?.missing_reason ||
+      ev?.redaction_reason ||
+      ev?.evidence_status ||
+      item?.details?.output_reason ||
+      item?.details?.evidence_reason ||
+      item?.details?.missing_reason ||
+      item?.details?.redaction_reason ||
+      "";
+    let code = normalizeReasonCode(rawCode);
+    const flags = ev?.capture_flags || item?.details?.capture_flags || null;
+    if (!code && typeof ev?.command_output === "string" && ev.command_output === "") {
+      code = "empty_output";
+    } else if (!code && flags && (flags.share_command_output === false || flags.share_commands === false)) {
+      code = "capture_disabled";
+    } else if (!code && (ev?.outside_scope === true || item?.details?.outside_scope === true)) {
+      code = "outside_scope";
+    } else if (!code && (ev?.protected === true || item?.details?.protected === true)) {
+      code = "protected";
+    } else if (!code) {
+      code = "not_recorded";
+    }
+    const copy = {
+      empty_output: {
+        badge: "Empty output",
+        tone: "info",
+        text: "Command completed and its captured output is empty (0 bytes).",
+      },
+      capture_disabled: {
+        badge: "Capture disabled",
+        tone: "warn",
+        text: "Command or output capture is disabled on this host (enable SWARMCONTROL_SHARE_COMMANDS / SWARMCONTROL_SHARE_COMMAND_OUTPUT to record it).",
+      },
+      outside_scope: {
+        badge: "Outside authorized folders",
+        tone: "warn",
+        text: "Command ran outside authorized project folders (or its directory change failed), so output was withheld.",
+      },
+      protected: {
+        badge: "Withheld by privacy policy",
+        tone: "warn",
+        text: "Command output was withheld because it touched protected credentials, secrets, or sensitive paths.",
+      },
+      not_recorded: {
+        badge: "Not recorded",
+        tone: "muted",
+        text: "Not recorded — historical event or no capture metadata was saved for this step.",
+      },
+    };
+    return { code, ...(copy[code] || copy.not_recorded) };
+  }
+
+  function classifyFilesReason(item, ev) {
+    const rawCode =
+      ev?.files_reason ||
+      ev?.missing_files_reason ||
+      item?.details?.files_reason ||
+      item?.details?.missing_files_reason ||
+      ev?.redaction_reason ||
+      item?.details?.redaction_reason ||
+      "";
+    let code = normalizeReasonCode(rawCode);
+    const flags = ev?.capture_flags || item?.details?.capture_flags || null;
+    const cmdIn = String((ev && ev.command_input) || item?.command || "");
+    if (!code && (ev?.outside_scope === true || item?.details?.outside_scope === true)) {
+      code = "outside_scope";
+    } else if (!code && (ev?.protected === true || item?.details?.protected === true)) {
+      code = "protected";
+    } else if (!code && flags && flags.share_files === false) {
+      code = "capture_disabled";
+    } else if (
+      !code &&
+      (item?.category === "web" ||
+        String(item?.program || "").toLowerCase() === "curl" ||
+        String(item?.program || "").toLowerCase() === "wget" ||
+        /\bpython3?\s+-(?:c|m)\b/.test(cmdIn))
+    ) {
+      code = "no_file_target";
+    } else if (!code) {
+      code = "not_recorded";
+    }
+    const copy = {
+      outside_scope: {
+        badge: "Outside authorized folders",
+        tone: "warn",
+        text: "No file path shown because the target path was outside this host's authorized project folders.",
+      },
+      capture_disabled: {
+        badge: "Capture disabled",
+        tone: "warn",
+        text: "File path capture is disabled for this host.",
+      },
+      protected: {
+        badge: "Protected file",
+        tone: "warn",
+        text: "File path was withheld by privacy policy (such as .env, keys, or credential files).",
+      },
+      no_file_target: {
+        badge: "No workspace file target",
+        tone: "info",
+        text: "This action ran inline code or a web/network request with no local workspace file target.",
+      },
+      not_recorded: {
+        badge: "Not recorded",
+        tone: "muted",
+        text: "No file path was recorded for this event. Historical event or no file path capture metadata available.",
+      },
+    };
+    return { code, ...(copy[code] || copy.not_recorded) };
+  }
+
+  function renderEvidenceGapSummary(pool) {
+    const counts = new Map();
+    let totalMissingFiles = 0;
+    for (let i = 0; i < pool.length; i++) {
+      const r = pool[i];
+      if (r.kind !== "Agent Work") continue;
+      if ((r.category === "shell" || r.category === "file_read" || r.category === "file_edit") && !(r.files && r.files.length)) {
+        const key = r.program || r.source || r.category;
+        counts.set(key, (counts.get(key) || 0) + 1);
+        totalMissingFiles++;
+      }
+    }
+    if (!totalMissingFiles) return "";
+    const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
+    return `
+      <section class="ev-section ev-gap-section" aria-label="Commands missing file evidence">
+        <h3><span>Commands without recorded files (${totalMissingFiles})</span><span class="muted">Loaded stream breakdown</span></h3>
+        <div class="chips">
+          ${top.map(([prog, cnt]) => `<button type="button" class="chip-btn" data-gap-search="${esc(prog)}" title="Search ${esc(prog)} in stream"><code>${esc(prog)}</code> · ${cnt}</button>`).join("")}
+        </div>
+      </section>`;
+  }
+
   function renderRow(r) {
     const sel = r.key === state.selectedKey ? " selected" : "";
     const fresh = state.newKeys.has(r.key) ? " is-new" : "";
@@ -975,6 +1314,18 @@
     const catCls = safeCls(r.category, "other");
     const stCls = safeCls(r.status, "recorded");
     const progHtml = r.program ? `<span class="prog-badge" title="Program executed">${esc(r.program)}</span>` : "";
+    const browserStep = classifyBrowserStep(r, null);
+    const browserBadge = browserStep
+      ? `<span class="browser-kind-pill bk-${safeCls(browserStep.kind, "web")}" title="${esc(browserStep.tool || browserStep.label)}">${esc(browserStep.label)}</span>`
+      : "";
+    const rowMsg = browserStep && /^web request$/i.test(String(r.message || "").trim())
+      ? (browserStep.query
+          ? browserStep.query
+          : browserStep.urlInfo
+            ? (browserStep.title ? `${browserStep.title} · ${browserStep.urlInfo.short}` : browserStep.urlInfo.short)
+            : (browserStep.tool || browserStep.label))
+      : r.message;
+    const rowWhere = browserStep?.urlInfo ? browserStep.urlInfo.host : (r.where || "—");
     return `<tr class="row sev-${sevCls}${sel}${fresh}" data-key="${esc(r.key)}" tabindex="0" aria-selected="${r.key === state.selectedKey ? "true" : "false"}">
       <td class="col-sev"><span class="sev-pill ${sevCls}">${esc(r.severity)}</span></td>
       <td class="col-kind"><span class="kind-pill ${kindCls}">${esc(r.kind)}</span></td>
@@ -984,8 +1335,8 @@
       <td class="col-age num">${esc(fmtAge(r.ts))}</td>
       <td class="col-host" title="${esc(r.host_id)}">${esc(r.host_id)}</td>
       <td class="col-agent" title="${esc(r.agent)} · ${esc(r.harness)}">${esc(r.agent)}</td>
-      <td class="col-where" title="${esc((r.files || []).join(", ") || r.workspace)}"><code>${esc(r.where || "—")}</code></td>
-      <td class="col-msg" title="${esc(r.message)}${r.command ? " · " + esc(r.command) : ""}">${progHtml}<strong>${esc(r.message)}</strong>${r.summary && !r.message.includes(r.summary.slice(0, 24)) ? ` <span class="muted">— ${esc(r.summary)}</span>` : ""}</td>
+      <td class="col-where" title="${esc((r.files || []).join(", ") || browserStep?.urlInfo?.display || r.workspace)}"><code>${esc(rowWhere)}</code></td>
+      <td class="col-msg" title="${esc(rowMsg)}${r.command ? " · " + esc(r.command) : ""}">${progHtml}${browserBadge}<strong>${esc(rowMsg)}</strong>${r.summary && !String(rowMsg || "").includes(r.summary.slice(0, 24)) && !(browserStep && /^web request$/i.test(r.summary.trim())) ? ` <span class="muted">— ${esc(r.summary)}</span>` : ""}</td>
     </tr>`;
   }
 
@@ -1280,6 +1631,17 @@
 
   function renderEvidenceHtml(ev, item, opts = {}) {
     const sections = [];
+    const evId = getEvidenceEventId(item);
+    if (item && item.kind === "Alert" && evId && !opts.filesTab) {
+      const evRecordMsg = ev?.record?.message ? ` · ${ev.record.message}` : "";
+      sections.push(`
+        <section class="ev-section ev-origin-banner" aria-label="Original triggering event">
+          <h3>
+            <span>Original triggering result (Event #${esc(evId)}${esc(evRecordMsg)})</span>
+            <button type="button" class="btn small" data-open-origin-event="${esc(evId)}" data-org="${esc(state.org?.id || "")}">Open original event #${esc(evId)} ↗</button>
+          </h3>
+        </section>`);
+    }
     if (ev?.verification) {
       const proof = ev.verification;
       const tests = (proof.tests || []).filter(t => Number.isSafeInteger(t.event_id) && t.event_id > 0);
@@ -1290,30 +1652,106 @@
         ${tests.length ? `<p>Task <code>${esc(proof.task_id)}</code> · ${esc(proof.actor)} · Revision <code title="${esc(proof.revision)}">${esc(proof.revision.slice(0, 12))}</code></p><ul>${links}</ul>`
                        : '<p class="muted">No verification recorded</p>'}</section>`);
     }
+
+    const httpTrace = !opts.filesTab ? parseHttpTrace(item, ev) : null;
+    if (httpTrace) {
+      const statusCls = httpTrace.statusCode === null ? "neutral" : httpTrace.statusCode >= 400 ? "fail" : httpTrace.statusCode >= 300 ? "warn" : "ok";
+      const statusLabel = httpTrace.statusCode !== null
+        ? `HTTP ${httpTrace.statusCode}${httpTrace.statusText ? " " + httpTrace.statusText : ""}`
+        : "HTTP status not recorded";
+      const mismatchCallout = httpTrace.exitZeroHttpError
+        ? `<div class="ev-http-callout" data-http-mismatch="1" role="status"><strong>HTTP ${esc(httpTrace.statusCode)}</strong> returned even though <code>${esc((ev && ev.program) || item.program || "curl")}</code> exited 0.</div>`
+        : "";
+      const urlHtml = httpTrace.urlInfo
+        ? `<div class="ev-http-url"><span class="http-method-pill">${esc(httpTrace.method)}</span>${
+            httpTrace.urlInfo.href
+              ? `<a href="${esc(httpTrace.urlInfo.href)}" target="_blank" rel="noopener noreferrer" class="ev-url-link">${esc(httpTrace.urlInfo.display)} ↗</a>`
+              : `<code class="ev-url-code">${esc(httpTrace.urlInfo.display)}</code>`
+          }${httpTrace.urlInfo.redacted ? '<span class="ev-source-badge snap">Credentials redacted</span>' : ""}</div>`
+        : `<div class="ev-http-url"><span class="http-method-pill">${esc(httpTrace.method)}</span><span class="muted">URL not recorded</span></div>`;
+      const headersHtml = httpTrace.responseHeaders
+        ? `<details class="ev-http-headers"><summary>Response headers</summary><pre class="ev-text-pre">${esc(httpTrace.responseHeaders)}</pre></details>`
+        : "";
+      const bodyHtml = httpTrace.formattedBody
+        ? `<div class="ev-http-body-wrap"><div class="ev-text-head"><span>Response excerpt${httpTrace.isJson ? " (JSON)" : ""}</span>${ev?.output_truncated ? '<span class="trunc-pill">Truncated</span>' : ""}</div><pre class="ev-text-pre">${esc(httpTrace.formattedBody)}</pre></div>`
+        : "";
+      sections.push(`
+        <section class="ev-section ev-http-card${httpTrace.isHttpError ? " is-http-error" : ""}" aria-label="HTTP request and response" data-http-status="${esc(httpTrace.statusCode ?? "")}">
+          <h3>
+            <span>HTTP Request &amp; Response</span>
+            <span class="ev-cmd-badges">
+              <span class="http-pill ${statusCls}">${esc(statusLabel)}</span>
+              ${httpTrace.exitCode !== null ? `<span class="exit-pill ${httpTrace.exitCode === 0 ? "ok" : "fail"}">Exit ${esc(httpTrace.exitCode)}</span>` : ""}
+            </span>
+          </h3>
+          ${mismatchCallout}
+          ${urlHtml}
+          ${bodyHtml}
+          ${headersHtml}
+        </section>`);
+    }
+
+    const browserStep = !opts.filesTab ? classifyBrowserStep(item, ev) : null;
+    if (browserStep) {
+      const bUrl = browserStep.urlInfo
+        ? (browserStep.urlInfo.href
+            ? `<a href="${esc(browserStep.urlInfo.href)}" target="_blank" rel="noopener noreferrer" class="ev-url-link">${esc(browserStep.urlInfo.display)} ↗</a>`
+            : `<code class="ev-url-code">${esc(browserStep.urlInfo.display)}</code>`)
+        : "";
+      const bRows = [
+        browserStep.query ? `<div><strong>Search query:</strong> <code>${esc(browserStep.query)}</code></div>` : "",
+        bUrl ? `<div><strong>URL:</strong> ${bUrl}${browserStep.urlInfo?.redacted ? ' <span class="ev-source-badge snap">Credentials redacted</span>' : ""}</div>` : "",
+        browserStep.title ? `<div><strong>Page title:</strong> ${esc(browserStep.title)}</div>` : "",
+        browserStep.kind === "credential" ? '<div class="muted">Credential and vault contents are never captured.</div>' : "",
+      ].filter(Boolean).join("");
+      const bExcerpt = browserStep.excerpt
+        ? `<pre class="ev-text-pre" style="margin-top:6px;">${esc(browserStep.excerpt)}</pre>`
+        : "";
+      sections.push(`
+        <section class="ev-section ev-browser-card" aria-label="Web and browser action" data-browser-kind="${esc(browserStep.kind)}">
+          <h3>
+            <span>Web &amp; Browser Action</span>
+            <span class="ev-cmd-badges">
+              <span class="browser-kind-pill bk-${safeCls(browserStep.kind, "web")}">${esc(browserStep.label)}</span>
+              ${browserStep.statusCode ? `<span class="http-pill ${browserStep.statusCode >= 400 ? "fail" : "ok"}">HTTP ${esc(browserStep.statusCode)}</span>` : ""}
+            </span>
+          </h3>
+          ${bRows || `<p class="muted" style="margin:0;">Tool: <code>${esc(browserStep.tool || "browser")}</code> · No URL or response excerpt was recorded for this step.</p>`}
+          ${bExcerpt}
+        </section>`);
+    }
+
     const cmdIn = (ev && ev.command_input) || item.command || "";
     const cmdOut = ev?.command_output;
     const hasExit = ev && ev.exit_code !== null && ev.exit_code !== undefined;
     const truncated = Boolean(ev && ev.output_truncated);
+    const evReason = classifyEvidenceReason(item, ev);
 
     if (!opts.filesTab && (cmdIn || typeof cmdOut === "string" || hasExit)) {
       const exitBadge = hasExit
         ? `<span class="exit-pill ${Number(ev.exit_code) === 0 ? "ok" : "fail"}">Exit ${esc(ev.exit_code)}</span>`
         : "";
+      const httpInlineBadge = httpTrace && httpTrace.statusCode !== null
+        ? `<span class="http-pill ${httpTrace.statusCode >= 400 ? "fail" : httpTrace.statusCode >= 300 ? "warn" : "ok"}">HTTP ${esc(httpTrace.statusCode)}</span>`
+        : "";
       const truncBadge = truncated ? '<span class="trunc-pill">Output truncated</span>' : "";
       const progBadge = (ev && ev.program) || item.program ? `<span class="prog-badge">${esc((ev && ev.program) || item.program)}</span>` : "";
+      const emptyOutHtml = cmdOut === ""
+        ? `<pre class="ev-cmd-out muted" data-evidence-reason="empty_output">(captured output is empty · 0 bytes)</pre>`
+        : `<pre class="ev-cmd-out muted" data-evidence-reason="${esc(evReason.code)}">(${esc(evReason.badge)}: ${esc(evReason.text)})</pre>`;
       sections.push(`
-        <section class="ev-section" aria-label="Command input and output">
+        <section class="ev-section" aria-label="Command input and output" data-evidence-reason="${esc(cmdOut ? "captured" : evReason.code)}">
           <h3>
             <span>Command &amp; Output</span>
-            <span class="ev-cmd-badges">${progBadge}${exitBadge}${truncBadge}</span>
+            <span class="ev-cmd-badges">${progBadge}${httpInlineBadge}${exitBadge}${truncBadge}</span>
           </h3>
           <div class="ev-terminal">
             <div class="ev-cmd-head">
               <span>Redacted execution capture</span>
               ${cmdIn ? `<button type="button" class="btn" data-act="copy-ev-cmd" data-ev-key="${esc(item.key)}">Copy command</button>` : ""}
             </div>
-            ${cmdIn ? `<pre class="ev-cmd-in">$ ${esc(cmdIn)}</pre>` : ""}
-            ${cmdOut ? `<pre class="ev-cmd-out">${esc(cmdOut)}</pre>` : `<pre class="ev-cmd-out muted">${cmdOut === "" ? "(captured output is empty)" : "(no command output captured)"}</pre>`}
+            ${cmdIn ? `<pre class="ev-cmd-in">$ ${esc(redactCommandForDisplay(cmdIn))}</pre>` : ""}
+            ${cmdOut ? `<pre class="ev-cmd-out">${esc(cmdOut)}</pre>` : emptyOutHtml}
           </div>
         </section>`);
     }
@@ -1384,16 +1822,24 @@
 
     if (opts.filesTab) {
       el("files-count").textContent = String(mergedFiles.length);
-      if (!mergedFiles.length) sections.unshift('<p class="muted">No file path was recorded for this event.</p>');
+      if (!mergedFiles.length) {
+        const fReason = classifyFilesReason(item, ev);
+        sections.unshift(`
+          <div class="ev-reason-box tone-${safeCls(fReason.tone, "muted")}" data-files-reason="${esc(fReason.code)}">
+            <span class="ev-reason-pill">${esc(fReason.badge)}</span>
+            <span>${esc(fReason.text)}</span>
+          </div>`);
+      }
     }
-    if (!sections.length && ev && ["shell", "web"].includes(item.category)) {
-      const missing = item.category === "web"
-        ? "This event contains no captured request URL or response."
-        : "This event contains no captured command input, output or exit code.";
-      return `<p class="muted">${missing}</p>`;
+    if (!sections.length && ev && ["shell", "web", "file_read"].includes(item.category)) {
+      sections.push(`
+        <div class="ev-reason-box tone-${safeCls(evReason.tone, "muted")}" data-evidence-reason="${esc(evReason.code)}">
+          <span class="ev-reason-pill">${esc(evReason.badge)}</span>
+          <span>${esc(evReason.text)}</span>
+        </div>`);
     }
     if (!sections.length && !opts.compact) {
-      return '<p class="muted" style="margin:0;">No captured command output, images, or file previews recorded for this event.</p>';
+      return `<div class="ev-reason-box tone-${safeCls(evReason.tone, "muted")}" data-evidence-reason="${esc(evReason.code)}"><span class="ev-reason-pill">${esc(evReason.badge)}</span><span>${esc(evReason.text)}</span></div>`;
     }
     return sections.join("");
   }
@@ -1671,6 +2117,7 @@
     if (state.detailTab === "evidence") {
       detailEl.innerHTML = `
         ${isNumericEventId(item) ? `<div id="detail-evidence-slot" class="detail-evidence-slot" data-ev-key="${esc(item.key)}"></div>` : ""}
+        ${renderEvidenceGapSummary(pool)}
         <p class="muted" style="margin:8px 0 6px;">Redacted structured details for <code>${esc(item.key)}</code>:</p>
         <pre class="pre">${esc(JSON.stringify(item.details || {}, null, 2))}</pre>`;
       if (isNumericEventId(item)) {
@@ -1708,7 +2155,7 @@
       ? `<div class="chips">${item.files.map((f) => `<button type="button" class="chip-btn edited" data-scope-file="${esc(f)}" title="Filter by ${esc(f)}">${esc(shortPath(f))}</button>`).join("")}</div>`
       : "";
     const cmdBlock = item.command
-      ? `<div class="cmd-wrap"><div class="cmd-bar"><span>Redacted command</span><button type="button" class="btn" data-act="copy-cmd">Copy</button></div><pre class="cmd-preview">$ ${esc(item.command)}</pre></div>`
+      ? `<div class="cmd-wrap"><div class="cmd-bar"><span>Redacted command</span><button type="button" class="btn" data-act="copy-cmd">Copy</button></div><pre class="cmd-preview">$ ${esc(redactCommandForDisplay(item.command))}</pre></div>`
       : "";
     detailEl.innerHTML = `
       <div class="detail-grid">
@@ -2150,16 +2597,42 @@
       });
       reqs.push(api(`/api/v1/live-records?${qs.toString()}`).catch((e) => (e.status === 401 ? Promise.reject(e) : null)));
     }
-    if (!reqs.length) return;
-    const pages = await Promise.all(reqs);
-    if (gen !== state.generation) return;
     let any = false;
-    for (const data of pages) {
-      if (!data || !sameActiveOrg(data.organization)) continue;
-      for (const rec of data.records || []) {
-        const norm = normalizeFeedRecord(rec);
-        state.historyMap.set(norm.key, norm);
-        any = true;
+    if (reqs.length) {
+      const pages = await Promise.all(reqs);
+      if (gen !== state.generation) return;
+      for (const data of pages) {
+        if (!data || !sameActiveOrg(data.organization)) continue;
+        for (const rec of data.records || []) {
+          const norm = normalizeFeedRecord(rec);
+          state.historyMap.set(norm.key, norm);
+          any = true;
+        }
+      }
+    }
+    const pending = state.pendingEventKey;
+    if (pending && !state.feedMap.has(pending) && !state.historyMap.has(pending) && state.org) {
+      const evMatch = /^event:([1-9]\d{0,18})$/.exec(pending);
+      const alertMatch = /^alert:([1-9]\d{0,18})$/.exec(pending);
+      if (evMatch) {
+        const qs = new URLSearchParams({ organization_id: String(state.org.id) });
+        const ev = await api(`/api/v1/events/${encodeURIComponent(evMatch[1])}/evidence?${qs.toString()}`).catch((e) => (e.status === 401 ? Promise.reject(e) : null));
+        if (gen !== state.generation) return;
+        if (ev && sameActiveOrg(ev.organization) && ev.record) {
+          state.evidenceCache.set(`${state.org.id}:${evMatch[1]}`, ev);
+          const norm = normalizeFeedRecord(ev.record);
+          state.historyMap.set(norm.key, norm);
+          any = true;
+        }
+      } else if (alertMatch) {
+        const qs = new URLSearchParams({ organization_id: String(state.org.id) });
+        const page = await api(`/api/v1/alerts/${encodeURIComponent(alertMatch[1])}?${qs.toString()}`).catch((e) => (e.status === 401 ? Promise.reject(e) : null));
+        if (gen !== state.generation) return;
+        if (page && sameActiveOrg(page.organization) && page.alert) {
+          const norm = normalizeFeedRecord({ ...page.alert, kind: "alert" });
+          state.historyMap.set(norm.key, norm);
+          any = true;
+        }
       }
     }
     if (any) markPoolDirty();
@@ -2445,6 +2918,11 @@
       }).catch(() => {});
     });
     eventDialog.addEventListener("click", (e) => {
+      const originBtn = e.target.closest("[data-open-origin-event]");
+      if (originBtn) {
+        openVerificationTest({ dataset: { verificationTest: originBtn.dataset.openOriginEvent, org: originBtn.dataset.org }, isConnected: true });
+        return;
+      }
       const test = e.target.closest("[data-verification-test]");
       if (test) { openVerificationTest(test); return; }
       if (e.target === eventDialog) {
@@ -2511,6 +2989,18 @@
   });
 
   el("details").addEventListener("click", (e) => {
+    const originBtn = e.target.closest("[data-open-origin-event]");
+    if (originBtn) {
+      openVerificationTest({ dataset: { verificationTest: originBtn.dataset.openOriginEvent, org: originBtn.dataset.org }, isConnected: true });
+      return;
+    }
+    const gapBtn = e.target.closest("[data-gap-search]");
+    if (gapBtn) {
+      state.search = gapBtn.dataset.gapSearch || "";
+      if (el("search")) el("search").value = state.search;
+      render({ skipExplorer: true });
+      return;
+    }
     const test = e.target.closest("[data-verification-test]");
     if (test) { openVerificationTest(test); return; }
     const zoomBtn = e.target.closest("[data-zoom-src]");

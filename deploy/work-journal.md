@@ -126,3 +126,17 @@ lines within a file still count (`git blame -M`); lines moved to another file do
 refreshed while the commit is within the 7-day window. Remote observers need the shared reader (`activity_core.py`);
 the fallback reader does not measure lines. Timestamps from the session log and from Git must come from the same
 machine clock.
+
+### Measure recorded results
+
+Run the following from the repository with the path to one organization's event database:
+
+```sh
+python3 deploy/evidence_coverage.py /path/to/swarmcontrol.db --hours 24
+```
+
+The report opens the database read-only and groups observed steps by action and program
+(or tool). Groups with the most missing command outputs appear first. A captured empty
+string counts as recorded. File and image previews are counted separately, once per
+event. A missing command output can be expected for file or browser actions. Historical
+counts alone cannot establish whether capture was disabled or a path was outside the project.

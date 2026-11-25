@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
 import sqlite3
+import subprocess
 import tempfile
 import time
 import unittest
@@ -23,6 +26,8 @@ except ImportError:
 
 import activity_inspector as ai
 import event_evidence
+import event_feed
+import live_history
 import work_journal as wj
 from db import Database
 
@@ -63,11 +68,17 @@ class StepScopeTests(unittest.TestCase):
                       (str(self.agent_dir), "gpt-x", 1, int(time.time()), str(self.rollout), "openai"))
         self.n = 0
 
-    def command(self, cmd, cwd, output="", code=0):
+    def command(self, cmd, cwd, output="", code=0, shell=("bash", "-lc"), **fields):
         self.n += 1
         append(self.rollout, [{"timestamp": stamp(self.n), "payload": {"type": "item_completed", "item": {
-            "type": "CommandExecution", "cwd": str(cwd), "command": ["bash", "-lc", cmd],
-            "parsed_cmd": [{"type": "unknown", "cmd": cmd}], "aggregated_output": output, "exit_code": code}}}])
+            "type": "CommandExecution", "cwd": str(cwd), "command": [*shell, cmd],
+            "parsed_cmd": [{"type": "unknown", "cmd": cmd}], "aggregated_output": output, "exit_code": code, **fields}}}])
+
+    def run_shell(self, cmd, shell=("sh", "-c"), **env):
+        run = subprocess.run([*shell, cmd], cwd=self.agent_dir, text=True, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, timeout=5, env={"PATH": os.defpath, "LC_ALL": "C", **env})
+        self.command(cmd, self.agent_dir, run.stdout, run.returncode, shell)
+        return run
 
     def scan(self, roots):
         with patch.dict(os.environ, SHARE):
@@ -134,6 +145,101 @@ class StepScopeTests(unittest.TestCase):
         self.command(f"cd {self.copy}/missing && python3 -V", self.agent_dir, "cd failed", 1)
         self.scan([self.copy])
         self.assertIsNone(self.events()["python3"][1]["command_output"])
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("sh") and shutil.which("python3"), "POSIX shell fixture")
+    def test_failed_python_and_custom_program_have_their_own_historical_output(self):
+        repo = self.copy / "quoted project && subdir"
+        repo.mkdir()
+        (repo / "job.py").write_text("raise ValueError('cd check failed')\n")
+        tool = repo / "check-ledger"
+        tool.write_text("#!/bin/sh\nprintf 'report rows differ\\n' >&2\nexit 23\n")
+        tool.chmod(0o700)
+        cursor = event_feed.feed(self.dbo)["cursor"]
+        prefix = "cd -- " + shlex.quote(str(repo)) + " && "
+        python = self.run_shell(prefix + "python3 job.py", ("bash", "--noprofile", "--norc", "-c"))
+        custom = self.run_shell(prefix + "./check-ledger")
+        self.assertEqual((python.returncode, custom.returncode), (1, 23))
+        self.assertIn("ValueError: cd check failed", python.stdout)
+        self.assertEqual(self.scan([self.copy])["inserted"], 2)
+        fresh = event_feed.feed(self.dbo, cursor)["records"]
+        self.assertEqual(len(fresh), 2)
+        (repo / "job.py").write_text("print('changed after execution')\n")
+        tool.write_text("changed after execution\n")
+        reopened = Database(self.dbo.db_path)
+        self.addCleanup(reopened.close)
+        history = live_history.history(reopened, 1, {})["records"]
+        self.assertEqual({r["id"] for r in history}, {r["id"] for r in fresh})
+        results = {r["details"]["program"]: event_evidence.detail(reopened, 1, r["id"]) for r in fresh}
+        for program, path, marker, code in (("python3", "job.py", "ValueError: cd check failed", 1),
+                                            ("check-ledger", "check-ledger", custom.stdout, 23)):
+            with self.subTest(program=program):
+                ev = results[program]
+                self.assertEqual(ev["files"], ["product-feature/quoted project && subdir/" + path])
+                self.assertIn(path, ev["command_input"])
+                self.assertIn(marker, ev["command_output"])
+                self.assertEqual(ev["exit_code"], code)
+                self.assertNotIn("changed after", ev["command_output"])
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("python3"), "POSIX shell fixture")
+    def test_failed_module_after_cd_keeps_the_interpreter_diagnostic(self):
+        result = self.run_shell(f"cd {self.copy} && python3 -m neuroswarm_module_missing", ("bash", "-c"))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("No module named neuroswarm_module_missing", result.stdout)
+        self.scan([self.copy])
+        _, evidence = self.events()["python3"]
+        self.assertEqual(evidence["files"], [])
+        self.assertIn("No module named neuroswarm_module_missing", evidence["command_output"])
+        self.assertEqual(evidence["exit_code"], result.returncode)
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("sh"), "POSIX shell fixture")
+    def test_failed_cd_and_shell_startup_do_not_borrow_project_permissions(self):
+        late = self.copy / "created-later"
+        cd_failure = self.run_shell(f"cd {shlex.quote(str(late))} && cat notes.txt")
+        self.assertNotEqual(cd_failure.returncode, 0)
+        late.mkdir()
+        (late / "notes.txt").write_text("never read")
+        startup = self.agent_dir / "startup.sh"
+        startup.write_text("echo 'private launcher message' >&2\nexit 1\n")
+        unexecuted = self.run_shell(f"cd {shlex.quote(str(self.copy))} && python3 tools/run.py",
+                                    ("bash", "-c"), BASH_ENV=str(startup))
+        self.assertEqual(unexecuted.stdout, "private launcher message\n")
+        self.assertEqual(unexecuted.returncode, 1)
+        self.scan([self.copy])
+        for program in ("cat", "python3"):
+            meta, ev = self.events()[program]
+            self.assertEqual(meta["files"], [])
+            self.assertIsNone(ev["command_input"])
+            self.assertIsNone(ev["command_output"])
+            self.assertNotIn("private launcher message", json.dumps(ev))
+
+    def test_partial_results_and_private_operands_cannot_promote_a_cd(self):
+        cmd = f"cd {self.copy} && "
+        (self.copy / "linked.txt").symlink_to(self.agent_dir / "private-notes.txt")
+        for argv in (f"cat {self.agent_dir / 'private-notes.txt'}", "head linked.txt",
+                     f"git -C{self.agent_dir} status", f"rg token --file={self.agent_dir / 'private-notes.txt'}"):
+            self.command(cmd + argv, self.agent_dir, "private file data", 0)
+        possible_error = f'Traceback (most recent call last):\n  File "{self.copy}/tools/run.py", line 1\nValueError\n'
+        self.command(cmd + "python3 tools/run.py", self.agent_dir, possible_error, 1, output_truncated=True)
+        self.command(cmd + "wc -l notes.txt", self.agent_dir, None, 1)
+        self.scan([self.copy])
+        results = self.events()
+        self.assertEqual(len(results), 6)
+        for program, (meta, ev) in results.items():
+            with self.subTest(program=program):
+                self.assertEqual(meta["files"], [])
+                self.assertIsNone(ev["command_output"])
+                self.assertIsNone(ev["command_input"])
+
+    def test_ambiguous_shell_result_keeps_the_launchers_policy(self):
+        self.command(f"cd {self.copy / 'tools'} && custom-reader run.py", self.copy, "opaque error", 1)
+        self.command(f"cd {self.copy} && custom-exporter notes.txt", self.shared, "private parent result", 1)
+        self.scan([self.copy])
+        _, inside = self.events()["custom-reader"]
+        self.assertEqual((inside["command_output"], inside["exit_code"], inside["files"]), ("opaque error", 1, []))
+        _, outside = self.events()["custom-exporter"]
+        self.assertIsNone(outside["command_output"])
+        self.assertIsNone(outside["command_input"])
+        self.assertEqual(outside["files"], [])
 
     def test_files_outside_the_journal_roots_stay_out(self):
         """Journal roots narrower than the copy (only the project): the copy's files and output are not stored."""
