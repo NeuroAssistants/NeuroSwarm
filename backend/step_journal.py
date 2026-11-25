@@ -26,6 +26,7 @@ from activity_inspector import (
     PROGRAM_RE,
     TEST_LABEL,
     clean_url,
+    command_kind,
     evidence_text,
     is_sensitive_path,
     recorded_command_kind,
@@ -49,6 +50,7 @@ CANONICAL_CATEGORY: dict[str, str] = {
 }
 
 COMMANDS: set[str] = {label for _, label in CMD_KIND} | {TEST_LABEL, "List or search files"}
+READ_COMMANDS = {"Read a file", "Search files", "List files"}
 
 COMMAND_FORMS: dict[str, tuple[str, ...]] = {
     "git": ("diff", "status", "log", "show", "add", "commit", "rev-parse"),
@@ -755,11 +757,19 @@ def project_rows(
                     evidence_by_key.setdefault(key, (step, shared_paths, ref))
             if evidence_reasons(context, step, category, step_scoped, all_files, harness):
                 final_metadata = json.dumps(context, sort_keys=True, ensure_ascii=False)
+            # Labels may change without changing a legacy event's deduplication keys.
+            raw_command = step.get("command_input") or step.get("command")
             if category == "shell":
-                # Keep legacy deduplication keys stable when correcting labels from older observers.
-                raw_command = step.get("command_input") or step.get("command")
                 kind = recorded_command_kind(action, program or "", raw_command, step.get("files_reason"))
                 summary = kind + summary[len(action):]
+            elif category == "file_read" and program:
+                # Codex can describe a shell invocation as a native read or search.
+                # Use only known labels, even if an older observer supplied arbitrary text.
+                kind = command_kind(raw_command or program)
+                if kind not in READ_COMMANDS and raw_command:
+                    kind = command_kind(program)
+                if kind in READ_COMMANDS:
+                    summary = kind + summary[len(action):]
             severity = step_severity(outcome)
             yield key, legacy, timestamp, (
                 host_id,
