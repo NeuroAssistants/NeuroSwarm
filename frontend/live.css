@@ -874,3 +874,148 @@ dialog.event-dialog::backdrop {
   .event-dialog-body { padding: 11px 12px 14px; }
   .ev-images-grid { grid-template-columns: 1fr; }
 }
+
+/* ===== NeuroSwarm identity for Live NOC controls (index tabs, crisp 2px instruments, square status marks) ===== */
+.shell {
+  --lv-ease: cubic-bezier(.22, 1, .36, 1);
+  --lv-cap: 600 .67rem/1.3 var(--sc-mono);
+}
+.shell .btn,
+.shell .search,
+.shell .select,
+.shell .org-select,
+.shell .top-select,
+.shell .icon-btn,
+.shell .org-pill,
+.shell .title-chip,
+.shell .mode-chip,
+.shell .role-pill,
+.shell .sev-pill,
+.shell .state-pill,
+.shell .kind-pill,
+.shell .cat-pill,
+.shell .chip,
+.shell .corr-btn,
+.shell .key-item,
+.shell .pre,
+.shell .cmd-wrap,
+.shell .detail-link-hop,
+.shell .detail-link-unknown {
+  border-radius: 2px;
+}
+.shell .search:focus,
+.shell .select:focus {
+  border-color: var(--carbon, var(--sc-ink));
+  box-shadow: 0 0 0 3px rgba(168, 68, 35, .14);
+}
+.shell .toolbar .btn {
+  font: var(--lv-cap);
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+.shell .live-pill {
+  border-radius: 2px;
+  font-family: var(--sc-mono);
+  letter-spacing: .08em;
+}
+.shell .live-pill i,
+.shell .dot {
+  border-radius: 0;
+}
+.shell .tree-btn {
+  border-radius: 2px;
+}
+.shell .tree-cnt {
+  border-radius: 2px;
+  border: 1px solid var(--rule, var(--sc-line));
+  font-family: var(--sc-mono);
+}
+.shell .tree-btn.active .tree-cnt {
+  border-color: rgba(189, 242, 201, .35);
+}
+
+/* Detail tabs: uppercase monospace index tabs with sliding copper rule */
+.shell .detail-tabs {
+  gap: 0;
+}
+.shell .dtab {
+  position: relative;
+  height: 35px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font: var(--lv-cap);
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--sc-muted);
+  transition: color 180ms var(--lv-ease);
+}
+.shell .dtab::after {
+  content: "";
+  position: absolute;
+  left: 13px;
+  right: 13px;
+  bottom: 0;
+  height: 2px;
+  background: var(--copper, var(--sc-action));
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 240ms var(--lv-ease);
+}
+.shell .dtab:hover {
+  color: var(--carbon, var(--sc-ink));
+}
+.shell .dtab:hover::after {
+  transform: scaleX(.35);
+}
+.shell .dtab.active {
+  color: var(--carbon, var(--sc-ink));
+  background: transparent;
+  border-bottom-color: transparent;
+}
+.shell .dtab.active::after {
+  transform: scaleX(1);
+}
+.shell .tab-cnt {
+  border-radius: 2px;
+  padding: 1px 5px;
+  font: 600 .64rem/1.2 var(--sc-mono);
+  background: var(--stock, var(--sc-paper));
+  border: 1px solid var(--rule, var(--sc-line));
+  color: var(--sc-muted);
+}
+.shell .dtab.active .tab-cnt {
+  background: var(--carbon, var(--sc-ink));
+  border-color: var(--carbon, var(--sc-ink));
+  color: var(--sc-mint);
+}
+.shell .detail-msg {
+  border-left: 0;
+  border: 1px solid var(--rule, var(--sc-line));
+  border-top: 2px solid var(--sc-action);
+  border-radius: 2px;
+}
+.shell .corr-btn {
+  transition: transform 150ms var(--lv-ease), border-color 150ms var(--lv-ease), box-shadow 150ms var(--lv-ease);
+}
+.shell .corr-btn:hover {
+  border-color: var(--carbon, var(--sc-ink));
+  box-shadow: inset 3px 0 var(--copper, var(--sc-action));
+}
+.shell .file-group h4,
+.shell .kv dt {
+  font-family: var(--sc-mono);
+  font-size: .7rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+@media (prefers-reduced-motion: reduce) {
+  .shell *, .shell *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+@media (forced-colors: active) {
+  .shell .dtab.active { border-bottom: 2px solid CanvasText; }
+}

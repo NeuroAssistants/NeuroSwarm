@@ -41,6 +41,18 @@
     return c || "info";
   }
 
+  function categoryGlyph(kind) {
+    const shapes = {
+      permission: '<polygon points="6,1.2 10.8,6 6,10.8 1.2,6"/><path d="M6 4v2.4M6 8.3h.01"/>',
+      failed_test: '<rect x="1.5" y="1.5" width="9" height="9"/><path d="M4 4l4 4M8 4l-4 4"/>',
+      quota_exhausted: '<path d="M2 10.5V7.2M6 10.5V4.4M10 10.5V1.8"/>',
+      no_signal: '<rect x="2" y="2" width="8" height="8" stroke-dasharray="2 2"/>',
+      resolved: '<rect x="1.5" y="1.5" width="9" height="9"/><path d="M3.5 6.3l1.7 1.7 3.3-3.6"/>',
+    };
+    const inner = shapes[kind] || '<rect x="2" y="2" width="8" height="8"/>';
+    return `<svg class="na-glyph" viewBox="0 0 12 12" aria-hidden="true">${inner}</svg>`;
+  }
+
   function fmtAge(seconds) {
     const s = Math.max(0, Math.floor(Number(seconds) || 0));
     if (s < 60) return `${s}s ago`;
@@ -122,8 +134,8 @@
       <li class="na-item cat-${catCls}${isResolved ? " is-resolved" : ""}" data-na-category="${esc(it.category)}" data-na-event-id="${esc(it.event_id ?? "")}">
         <div class="na-item-top">
           <div class="na-item-badges">
-            <span class="na-cat-pill cat-${catCls}">${esc(it.category_label || it.category)}</span>
-            ${isResolved ? '<span class="na-cat-pill cat-resolved">Resolved</span>' : ""}
+            <span class="na-cat-pill cat-${catCls}">${categoryGlyph(catCls)}${esc(it.category_label || it.category)}</span>
+            ${isResolved ? `<span class="na-cat-pill cat-resolved">${categoryGlyph("resolved")}Resolved</span>` : ""}
           </div>
           <time class="na-age" data-age-sec="${esc(it.age_seconds)}" title="${esc(sinceTitle)}">${esc(ageText)}</time>
         </div>
@@ -145,7 +157,7 @@
       <li class="na-item cat-no_signal" data-na-host="${esc(h.host_id)}" data-cause-inferred="false">
         <div class="na-item-top">
           <div class="na-item-badges">
-            <span class="na-cat-pill cat-no_signal">No signal</span>
+            <span class="na-cat-pill cat-no_signal">${categoryGlyph("no_signal")}No signal</span>
             <span class="na-cause-tag">Heartbeat only · cause not inferred</span>
           </div>
           <time class="na-age" data-age-sec="${esc(h.age_seconds)}" title="Last heartbeat: ${esc(lastSeenTitle)}">Last heartbeat ${esc(ageText)}</time>
