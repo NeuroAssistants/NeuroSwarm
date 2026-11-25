@@ -121,6 +121,20 @@ class StepScopeTests(unittest.TestCase):
         self.assertIsNone(ev["command_output"])
         self.assertIsNone(ev["command_input"])
 
+    def test_python_and_wc_after_literal_cd(self):
+        self.command(f"cd {self.copy} && python3 tools/run.py", self.agent_dir, "ok\n")
+        self.command(f"cd {self.copy} && wc -l notes.txt", self.agent_dir, "1 notes.txt\n")
+        self.scan([self.copy])
+        results = self.events()
+        self.assertEqual(results["python3"][0]["files"], ["product-feature/tools/run.py"])
+        self.assertEqual(results["python3"][1]["command_output"], "ok\n")
+        self.assertEqual(results["wc"][1]["command_output"], "1 notes.txt\n")
+
+    def test_failed_cd_does_not_share_its_output(self):
+        self.command(f"cd {self.copy}/missing && python3 -V", self.agent_dir, "cd failed", 1)
+        self.scan([self.copy])
+        self.assertIsNone(self.events()["python3"][1]["command_output"])
+
     def test_files_outside_the_journal_roots_stay_out(self):
         """Journal roots narrower than the copy (only the project): the copy's files and output are not stored."""
         self.command("tail -n 2 logs/app.log", self.copy, "started\nready\n")

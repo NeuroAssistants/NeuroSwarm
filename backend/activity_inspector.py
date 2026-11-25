@@ -1232,6 +1232,14 @@ def _codex_command_step(item, cwd, stamp, read):
     # Each descriptor may record its own directory. A relative path after a cd
     # in a compound shell command cannot safely use the launcher directory.
     moved = re.search(r"(?:^|[\s(;|&])(?:cd|pushd|popd)(?=\s|$)", command)
+    # A literal "cd /project && program args" executes the second command in
+    # that directory only when cd succeeds. A newline or semicolon lacks that guarantee.
+    prefix = re.fullmatch(r"cd (/[-./\w]+) && (.+)", command.strip()) if not words else None
+    if prefix and item.get("exit_code") == 0:
+        argv = _literal_shell_words(prefix[2])
+        if argv and (argv[0] in {"wc", "head", "tail", "cat", "rg", "git", "curl"}
+                     or re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", argv[0])):
+            cwd, words, moved = prefix[1], argv, False
     withheld = False
     files = []
     native_operands = set()
