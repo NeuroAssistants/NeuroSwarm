@@ -42,6 +42,8 @@ The observer sends host health by default. Session capture is opt-in by folder. 
 
 [Share your installation experience](.github/ISSUE_TEMPLATE/self-host.md). Tell us how long it took to find your first confirmed edit, where you got stuck, and whether you would use NeuroSwarm for another session. Use example names for hosts and files.
 
+[Release notes](CHANGELOG.md) · [Report a security concern privately](SECURITY.md)
+
 ## License
 
 [PolyForm Noncommercial 1.0.0](LICENSE). Existing installations keep the same service names and configuration variables (for example, `SWARMCONTROL_PORT`).
