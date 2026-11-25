@@ -259,7 +259,7 @@
 
 /* timeline: glyph tiles on hairline lanes */
 #activity-map .ap-dot { cursor: pointer; transform-box: fill-box; }
-#activity-map .ap-dot .ap-plate { fill: var(--stock, var(--sc-paper)); stroke: currentColor; stroke-width: 1.2; transition: fill 160ms var(--ap-ease); }
+#activity-map .ap-dot .ap-plate { rx: 4.5px; fill: var(--stock, var(--sc-paper)); stroke: currentColor; stroke-width: 1.2; transition: fill 160ms var(--ap-ease); }
 #activity-map .ap-dot .ap-mark { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: square; pointer-events: none; }
 #activity-map .ap-dot { color: var(--cat, var(--cat-other)); }
 #activity-map .ap-dot:hover .ap-plate, #activity-map .ap-dot:focus-visible .ap-plate { fill: currentColor; }
@@ -317,3 +317,192 @@
 #activity-map .ap-sources .is-found i { background: var(--sc-action); border-color: var(--sc-action); }
 #activity-map .ap-sources .is-warn { color: var(--sc-warn-fg); }
 #activity-map .ap-sources .is-warn i { border-color: var(--sc-warn-fg); transform: rotate(45deg); }
+
+/* ===== Toon ink: the console drawn as a cartoon in the NeuroSwarm palette =====
+   Ink outlines with a slight hand wobble, flat cel shading, hard offset shadows that lift on hover and flatten on press,
+   rounded sticker shapes, and the mark as a character in empty and loading states. Palette: ink, paper, mint, action;
+   copper still marks only what is selected. Text is never filtered. No motion with reduced-motion. */
+:root {
+  /* Shares the console's Ink & Cel tokens (identity.css) when present; the fallbacks are the same values. */
+  --toon-ink: var(--sc-ink); --toon-w: 2.5px; --toon-r: var(--toon-r-lg, 14px); --toon-r-card: var(--toon-r-md, 10px);
+  --toon-pop: var(--toon-sh-sm, 3px 3px 0 var(--toon-ink)); --toon-pop-hi: 5px 6px 0 var(--toon-ink); --toon-pop-lo: var(--toon-sh-xs, 2px 2px 0 var(--toon-ink));
+  --toon-pick: 4px 4px 0 var(--copper, var(--sc-action));
+  --toon-shade: color-mix(in srgb, var(--sc-mint) 55%, var(--sc-action));
+  --toon-tint: color-mix(in srgb, var(--sc-mint) 35%, var(--sc-surface));
+  --toon-dots: radial-gradient(color-mix(in srgb, var(--sc-ink) 15%, transparent) 1px, transparent 1.5px) 0 0 / 8px 8px;
+  --toon-boing: var(--toon-spring, cubic-bezier(.34, 1.56, .64, 1));
+}
+
+/* frames: the outline and its shadow are drawn by a filtered layer, so the box wobbles and the text inside stays crisp */
+#activity-map :is(.ap-hosts > li, .am-session, .am-ws, .ap-empty, .am-stats),
+#activity-map + dialog.am-detail .am-survival {
+  position: relative; border: var(--toon-w) solid transparent; border-radius: var(--toon-r); background-image: none;
+  background-color: var(--sc-surface); box-shadow: none; }
+#activity-map :is(.ap-hosts > li, .am-session, .am-ws, .ap-empty, .am-stats)::before,
+#activity-map + dialog.am-detail .am-survival::before {
+  content: ""; position: absolute; inset: calc(-1 * var(--toon-w)); border: var(--toon-w) solid var(--toon-ink); border-radius: inherit;
+  box-shadow: var(--toon-pop); filter: url(#ns-ink); pointer-events: none;
+  transition: box-shadow 260ms var(--toon-boing); }
+#activity-map .ap-hosts > li, #activity-map .am-session { transition: transform 260ms var(--toon-boing); }
+#activity-map .ap-hosts > li:hover, #activity-map .am-session:not([open]):hover { transform: translate(-2px, -2px); box-shadow: none; }
+#activity-map .ap-hosts > li:hover::before, #activity-map .am-session:not([open]):hover::before { box-shadow: var(--toon-pop-hi); }
+#activity-map .am-session:not([open]):active { transform: translate(1px, 1px); }
+#activity-map .am-session:not([open]):active::before { box-shadow: var(--toon-pop-lo); }
+#activity-map .am-session[open] { border-inline-start: var(--toon-w) solid transparent; background-image: none; }
+#activity-map .am-session[open]::before { box-shadow: var(--toon-pick); }
+#activity-map .am-session.active { border-top-color: transparent; }
+#activity-map .am-session > summary { border-radius: calc(var(--toon-r) - 3px); }
+#activity-map .am-session > summary:hover { background: var(--toon-tint); }
+#activity-map .am-session > summary::after { content: "+"; display: grid; place-items: center; width: 22px; height: 22px; border: 2px solid var(--toon-ink);
+  border-radius: 50%; background: var(--sc-mint); color: var(--toon-ink); font: 700 .95rem/1 var(--sc-mono); box-shadow: var(--toon-pop-lo);
+  transition: transform 300ms var(--toon-boing); }
+#activity-map .am-session[open] > summary::after { transform: rotate(135deg); background: var(--sc-surface); }
+#activity-map .am-grid { border-top: 2px dashed color-mix(in srgb, var(--toon-ink) 30%, transparent); }
+#activity-map .am-older > summary { color: var(--toon-ink); }
+
+/* machines */
+#activity-map .ap-hosts { gap: 14px; }
+#activity-map .ap-hosts > li { padding: 12px 14px 13px; }
+#activity-map .ap-hosts > li.on { background: var(--sc-surface) var(--toon-dots); background-size: 8px 8px; background-position: 0 0; }
+#activity-map .ap-hosts > li.on > *:not(.ap-sources) { position: relative; }
+#activity-map .ap-host-mark { width: 10px; height: 10px; border: 2px solid var(--toon-ink); border-radius: 50%; background: var(--sc-surface); }
+#activity-map .ap-hosts > li.on .ap-host-mark { background: var(--sc-mint); border-color: var(--toon-ink); box-shadow: 0 0 0 0 color-mix(in srgb, var(--sc-mint) 90%, transparent); animation: toon-blink 2.6s ease-out infinite; }
+#activity-map .ap-root { border: 1.5px solid var(--toon-ink); border-radius: 999px; background: var(--sc-mint); color: var(--toon-ink); font-weight: 700; }
+#activity-map .ap-root.more { background: var(--sc-surface); border-style: dashed; }
+/* where the observer looked: little stickers, filled when records were found */
+#activity-map .ap-sources { gap: 6px; border-top: 2px dashed color-mix(in srgb, var(--toon-ink) 25%, transparent); padding-top: 8px; }
+#activity-map .ap-sources li { flex-direction: row; padding: 2px 8px 2px 6px; border: 1.5px dashed var(--sc-control); border-radius: 999px; background: var(--sc-surface); color: var(--sc-muted);
+  transform: none; box-shadow: none; }
+#activity-map .ap-sources li:hover { transform: none; box-shadow: none; }
+#activity-map .ap-sources i { width: 8px; height: 8px; border-radius: 50%; }
+#activity-map .ap-sources .is-found { border: 1.5px solid var(--toon-ink); background: var(--sc-mint); color: var(--toon-ink); box-shadow: var(--toon-pop-lo); }
+#activity-map .ap-sources .is-found i { background: var(--sc-action); border-color: var(--toon-ink); }
+#activity-map .ap-sources .is-warn { border-style: solid; border-color: var(--sc-warn-fg); }
+#activity-map .ap-sources .is-warn i { border-radius: 1px; }
+
+/* counts: one inked strip, chunky serif numerals */
+#activity-map .am-stats { border-radius: var(--toon-r); overflow: visible; margin-bottom: 18px; }
+#activity-map .am-stats > div { box-shadow: inset 2px 0 color-mix(in srgb, var(--toon-ink) 14%, transparent); }
+#activity-map .am-stats > div:first-child { box-shadow: none; }
+#activity-map .am-stats b { font-size: 2.15rem; color: var(--toon-ink); text-shadow: 2px 2px 0 var(--sc-mint); }
+
+/* toolbar: sticker tabs and a sticker search */
+#activity-map .ap-tabs { gap: 8px; border: 0; padding: 2px 6px 6px 0; }
+#activity-map .ap-tab { border: 2px solid var(--toon-ink); border-radius: 999px; padding: 6px 13px; background: var(--sc-surface); color: var(--toon-ink);
+  box-shadow: var(--toon-pop-lo); transition: transform 240ms var(--toon-boing), box-shadow 240ms var(--toon-boing), background 140ms, color 140ms; }
+#activity-map .ap-tab::after { display: none; }
+#activity-map .ap-tab:hover { background: var(--toon-tint); transform: translate(-1px, -2px) rotate(-2deg); box-shadow: 3px 4px 0 var(--toon-ink); }
+#activity-map .ap-tab:active { transform: translate(1px, 1px); box-shadow: 0 0 0 var(--toon-ink); }
+#activity-map .ap-tab.on { background: var(--toon-ink); color: var(--sc-mint); box-shadow: 3px 3px 0 var(--copper, var(--sc-action)); transform: rotate(-1.5deg); }
+#activity-map .ap-search input { border: 2px solid var(--toon-ink); border-radius: 999px; background: var(--sc-surface); box-shadow: var(--toon-pop-lo); }
+#activity-map .ap-search input:focus { border-color: var(--toon-ink); box-shadow: 3px 3px 0 var(--toon-ink), 0 0 0 4px var(--sc-mint); }
+#activity-map .ap-search svg { stroke: var(--toon-ink); stroke-width: 2.4; }
+#activity-map .ap-search kbd, #activity-map .am-foot kbd { border: 1.5px solid var(--toon-ink); border-bottom-width: 3px; border-radius: 6px; color: var(--toon-ink); }
+#activity-map .ap-live i { width: 10px; height: 10px; border: 2px solid var(--toon-ink); background: var(--sc-mint); }
+#activity-map .ap-spans { border: 2px solid var(--toon-ink); border-radius: 999px; overflow: hidden; box-shadow: var(--toon-pop-lo); }
+#activity-map .ap-spans .am-chip + .am-chip { box-shadow: inset 2px 0 var(--toon-ink); }
+#activity-map .ap-spans .am-chip.on { background: var(--toon-ink); color: var(--sc-mint); }
+#activity-map .am-chip, #activity-map .am-provider { border-width: 1.5px; }
+#activity-map .am-agent-card .am-provider { border: 1.5px solid var(--toon-ink); border-radius: 999px; box-shadow: var(--toon-pop-lo); }
+
+/* graph: inked boxes on a halftone sheet, runs drawn by hand, rivets for ports */
+#activity-map .am-flow, #activity-map .ap-timeline { border: var(--toon-w) solid var(--toon-ink); border-radius: var(--toon-r); box-shadow: var(--toon-pop);
+  background: var(--sc-surface) var(--toon-dots); margin-right: 4px; }
+#activity-map .am-node .am-shade { fill: var(--toon-ink); stroke: none; transition: transform 240ms var(--toon-boing); }
+#activity-map .am-node .am-face { fill: var(--sc-surface); stroke: var(--toon-ink); stroke-width: 2; transition: transform 240ms var(--toon-boing), fill 140ms; }
+#activity-map .am-node.ws .am-face { fill: var(--toon-tint); }
+#activity-map .am-node.agent:hover .am-face, #activity-map .am-node.agent:focus-visible .am-face { transform: translate(-1.5px, -1.5px); fill: var(--toon-tint); stroke: var(--toon-ink); }
+#activity-map .am-node.agent:hover .am-shade { transform: translate(1px, 1px); }
+#activity-map .am-node.selected .am-face { fill: var(--toon-ink); stroke: var(--toon-ink); }
+#activity-map .am-node.selected .am-shade { fill: var(--copper, var(--sc-action)); }
+#activity-map .am-node text { pointer-events: none; }
+#activity-map .am-node circle { stroke: var(--toon-ink); stroke-width: 2; }
+#activity-map .am-node.running circle, #activity-map .am-node.active circle { fill: var(--sc-mint); stroke: var(--toon-ink); }
+#activity-map .am-link { stroke: var(--toon-ink); stroke-width: 2.2; stroke-linecap: round; opacity: .8; filter: url(#ns-ink); }
+#activity-map .am-link.on { stroke: var(--sc-action); opacity: 1; }
+#activity-map .am-link.off { opacity: .15; }
+#activity-map .ap-hovering .am-link.ap-hl { stroke: var(--copper, var(--sc-action)); stroke-width: 2.8; }
+#activity-map .am-port { fill: var(--sc-mint); stroke: var(--toon-ink); stroke-width: 2; }
+#activity-map .am-port.off { opacity: .25; }
+
+/* timeline: each step is a sticker in its kind's colour, its glyph drawn in paper, with a shine */
+#activity-map .ap-dot .ap-plate { rx: 4.5px; fill: var(--cat, var(--cat-other)); stroke: var(--toon-ink); stroke-width: 1.6; transform-box: fill-box; transform-origin: center;
+  transition: transform 260ms var(--toon-boing); }
+#activity-map .ap-dot .ap-mark { stroke: var(--sc-surface); stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; transform-box: view-box; }
+#activity-map .ap-dot .ap-shine { fill: none; stroke: #fff; stroke-width: 1.2; stroke-linecap: round; opacity: .75; pointer-events: none; }
+#activity-map .ap-dot:hover, #activity-map .ap-dot:focus-visible { transform: none; }
+#activity-map .ap-dot:hover .ap-plate, #activity-map .ap-dot:focus-visible .ap-plate { fill: var(--cat, var(--cat-other)); transform: scale(1.3) rotate(-8deg); stroke-width: 2; }
+#activity-map .ap-dot:hover .ap-mark, #activity-map .ap-dot:focus-visible .ap-mark { stroke: var(--sc-surface); }
+#activity-map .ap-dot.is-error .ap-plate { fill: var(--sc-critical-fg); stroke: var(--toon-ink); }
+#activity-map .ap-burst rect { rx: 7.5px; stroke: var(--toon-ink); stroke-width: 1.6; }
+#activity-map .ap-burst text { fill: var(--sc-surface); }
+#activity-map .ap-burst:hover rect { stroke: var(--toon-ink); stroke-width: 2.2; }
+#activity-map .ap-burst.c-file_edit rect, #activity-map .ap-burst.c-shell rect, #activity-map .ap-burst.c-file_read rect, #activity-map .ap-burst.c-think rect,
+#activity-map .ap-burst.c-plan rect, #activity-map .ap-burst.c-web rect, #activity-map .ap-burst.c-coordination rect, #activity-map .ap-burst.c-visual rect,
+#activity-map .ap-burst.c-other rect { fill: var(--cat, var(--cat-other)); }
+#activity-map .ap-lane-line { stroke: color-mix(in srgb, var(--toon-ink) 35%, transparent); stroke-width: 1.5; stroke-dasharray: 1 6; stroke-linecap: round; }
+
+/* step glyphs everywhere else: a round sticker in the kind's tint */
+.ap-glyph { box-sizing: content-box; width: 11px; height: 11px; padding: 2.5px; border: 1.5px solid var(--toon-ink); border-radius: 50%;
+  background: color-mix(in srgb, var(--cat, var(--cat-other)) 18%, var(--sc-surface)) !important; color: var(--cat, var(--cat-other));
+  stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; vertical-align: -5px; }
+#activity-map .am-bar { height: 12px; border: 2px solid var(--toon-ink); border-radius: 999px; box-shadow: var(--toon-pop-lo); }
+#activity-map .am-seg + .am-seg { box-shadow: inset 2px 0 var(--toon-ink); }
+#activity-map .am-folders b { border: 1.5px solid var(--toon-ink); border-radius: 999px; height: 9px; }
+
+/* the mark as a character */
+.ap-mascot { display: block; width: 116px; height: auto; overflow: visible; }
+.ap-mascot path, .ap-mascot circle { stroke-linejoin: round; stroke-linecap: round; }
+.ap-mascot-shadow path { fill: var(--toon-ink); transform: translate(4px, 4px); }
+.ap-mascot-body > path:first-child { fill: var(--sc-mint); stroke: var(--toon-ink); stroke-width: 3; }
+.ap-mascot-shine { fill: none; stroke: #fff; stroke-width: 2.4; opacity: .8; }
+.ap-mascot-lens circle { fill: color-mix(in srgb, var(--sc-surface) 70%, transparent); stroke: var(--toon-ink); stroke-width: 3; }
+.ap-mascot-handle { stroke: var(--toon-ink); stroke-width: 6; }
+.ap-mascot-lens .ap-mascot-shine { stroke: var(--sc-action); opacity: .7; }
+#activity-map .ap-empty { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 22px; align-items: start; border-style: solid; padding: 18px 20px; }
+#activity-map .ap-empty > .ap-mascot { grid-row: 1 / span 9; margin-top: 4px; }
+#activity-map .ap-empty > :not(.ap-mascot) { grid-column: 2; }
+#activity-map .ap-empty--soft { grid-template-columns: minmax(0, 1fr); text-align: center; }
+#activity-map .ap-empty--soft > * { grid-column: 1; }
+#activity-map .ap-skeleton span { border-radius: 999px; border: 2px solid color-mix(in srgb, var(--toon-ink) 15%, transparent); }
+#activity-map .ap-skeleton span:nth-of-type(1) { width: 40%; height: 28px; } #activity-map .ap-skeleton span:nth-of-type(2) { height: 64px; border-radius: var(--toon-r); }
+#activity-map .ap-skeleton span:nth-of-type(3) { height: 160px; border-radius: var(--toon-r); } #activity-map .ap-skeleton span:nth-of-type(4) { width: 70%; }
+.ap-loading { display: flex; align-items: center; gap: 16px; margin-bottom: 4px; }
+.ap-loading .ap-mascot { width: 84px; }
+.ap-loading p { margin: 0; font-weight: 700; color: var(--toon-ink); }
+@media (max-width: 560px) {
+  #activity-map .ap-empty { grid-template-columns: minmax(0, 1fr); }
+  #activity-map .ap-empty > .ap-mascot { grid-row: auto; width: 92px; margin: 0 0 8px; }
+  #activity-map .ap-empty > :not(.ap-mascot) { grid-column: 1; }
+  #activity-map .ap-tabs { gap: 6px; } #activity-map .ap-tab { padding: 6px 4px; }
+}
+
+/* step detail: a big inked card that pops in with a little squash */
+#activity-map + dialog.am-detail { border: 2.5px solid var(--toon-ink); border-radius: 18px; box-shadow: 7px 8px 0 var(--toon-ink); }
+#activity-map + dialog.am-detail .am-survival { padding: 12px 14px; margin-right: 4px; }
+#activity-map + dialog.am-detail .am-term { border: 2px solid var(--toon-ink); border-radius: var(--toon-r-card); box-shadow: 3px 3px 0 var(--toon-shade); }
+#activity-map + dialog.am-detail .am-shot, #activity-map + dialog.am-detail .am-text { border: 2px solid var(--toon-ink); border-radius: var(--toon-r-card); }
+#activity-map + dialog.am-detail .am-survival-bar { height: 12px; border: 2px solid var(--toon-ink);
+  background: repeating-linear-gradient(-45deg, var(--sc-critical-bg) 0 5px, color-mix(in srgb, var(--sc-critical-bg) 60%, var(--sc-surface)) 5px 10px); }
+#activity-map + dialog.am-detail .am-survival-bar span { border-right: 2px solid var(--toon-ink); }
+#activity-map + dialog.am-detail .am-line-range { border: 1.5px solid var(--toon-ink); border-radius: 999px; background: var(--sc-mint); color: var(--toon-ink); }
+#activity-map + dialog.am-detail .btn { border-width: 2px; border-color: var(--toon-ink); border-radius: 999px; box-shadow: var(--toon-pop-lo); }
+
+@keyframes toon-blink { 0%, 60% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--sc-action) 45%, transparent); } 100% { box-shadow: 0 0 0 7px transparent; } }
+@keyframes toon-look { 0%, 35% { transform: translateX(0); } 45%, 65% { transform: translateX(-3px); } 75%, 92% { transform: translateX(3px); } 100% { transform: translateX(0); } }
+@keyframes toon-bob { 0%, 100% { transform: translateY(0) rotate(0); } 50% { transform: translateY(-3px) rotate(-1.5deg); } }
+@keyframes toon-squash { 0% { opacity: 0; transform: translateY(14px) scale(.94, 1.04); } 60% { opacity: 1; transform: translateY(-2px) scale(1.02, .98); } 100% { transform: none; } }
+@media (prefers-reduced-motion: no-preference) {
+  .ap-mascot.is-looking .ap-mascot-lens { animation: toon-look 2.4s ease-in-out infinite; }
+  #activity-map .ap-empty .ap-mascot { animation: toon-bob 3.2s ease-in-out infinite; }
+  #activity-map + dialog.am-detail[open] { animation: toon-squash 320ms var(--toon-boing); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ap-mascot, .ap-mascot * { animation: none !important; transition: none !important; }
+}
+@media (forced-colors: active) {
+  #activity-map :is(.ap-hosts > li, .am-session, .am-ws, .ap-empty, .am-stats)::before, #activity-map + dialog.am-detail .am-survival::before { filter: none; border-color: CanvasText; }
+  #activity-map .am-link { filter: none; }
+  .ap-glyph { border-color: CanvasText; }
+}
+#activity-map .ap-empty a { color: var(--sc-action); font-weight: 700; text-underline-offset: 3px; }

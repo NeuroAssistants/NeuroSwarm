@@ -5,7 +5,24 @@
   const root = document.getElementById("activity-map");
   if (!root) return;
   const app = document.getElementById("app-view");
-  root.innerHTML = `<div class="ap-skeleton" role="status" aria-label="Loading agent activity"><span></span><span></span><span></span><span></span></div>`;
+  /* Toon ink: one hand-drawn line filter for the whole console (frames, graph runs). Same-document only, so it is
+     added once here; CSS refers to it as url(#ns-ink). */
+  if (!document.getElementById("ns-ink-defs")) {
+    document.body.insertAdjacentHTML("beforeend", `<svg id="ns-ink-defs" width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute;width:0;height:0;overflow:hidden">
+      <filter id="ns-ink" x="-4%" y="-4%" width="108%" height="108%" color-interpolation-filters="sRGB">
+        <feTurbulence type="fractalNoise" baseFrequency="0.022" numOctaves="1" seed="11" result="grain"/>
+        <feDisplacementMap in="SourceGraphic" in2="grain" scale="2.2" xChannelSelector="R" yChannelSelector="G"/></filter></svg>`);
+  }
+  /* The three-slab NeuroSwarm mark with an inspection lens.
+     Brand palette only, drawn for this product. Decorative: every state that shows it also says it in words. */
+  const MASCOT = (mood = "") => `<svg class="ap-mascot${mood ? " is-" + mood : ""}" viewBox="0 0 132 92" aria-hidden="true" focusable="false">
+    <g class="ap-mascot-shadow"><path d="M34 6h64l-16 16H18zM18 33h64l-16 16H2zM18 60h48l-16 16H2z"/></g>
+    <g class="ap-mascot-body"><path d="M34 6h64l-16 16H18zM18 33h64l-16 16H2zM18 60h48l-16 16H2z"/>
+      <path class="ap-mascot-shine" d="M37 10h52M21 37h52M21 64h36"/></g>
+    <g class="ap-mascot-lens"><path class="ap-mascot-handle" d="M111 74l13 13"/><circle cx="102" cy="64" r="13"/>
+      <path class="ap-mascot-shine" d="M95 59a8 8 0 0 1 6-4"/></g></svg>`;
+  const LOADING = `<div class="ap-skeleton" role="status" aria-label="Loading agent activity"><div class="ap-loading">${MASCOT("looking")}<p>Reading agent records…</p></div><span></span><span></span><span></span><span></span></div>`;
+  root.innerHTML = LOADING;
   const H = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const CAT_ORDER = ["file_edit", "shell", "file_read", "think", "plan", "web", "coordination", "visual", "other"];
   const CAT_ALIAS = { shell_exec: "shell", web_research: "web", visual_asset: "visual", reasoning: "think" };
@@ -201,10 +218,10 @@
       const xm = Math.round((x1 + x2) / 2), r = Math.min(6, Math.abs(y2 - y1) / 2), dir = y2 > y1 ? 1 : -1;
       const run = Math.abs(y2 - y1) < 1 ? `M${x1} ${y1} H${x2}`
         : `M${x1} ${y1} H${xm - r} Q${xm} ${y1} ${xm} ${y1 + dir * r} V${y2 - dir * r} Q${xm} ${y2} ${xm + r} ${y2} H${x2}`;
-      paths += `<path class="am-link ${on}" data-from="${H(from)}" data-to="${H(to)}" d="${run}"/><rect class="am-port ${on}" x="${x2 - 3}" y="${y2 - 3}" width="6" height="6"/>`;
+      paths += `<path class="am-link ${on}" data-from="${H(from)}" data-to="${H(to)}" d="${run}"/><circle class="am-port ${on}" cx="${x2}" cy="${y2}" r="3.5"/>`;
     }
     const nodes = cols.flatMap((c, ci) => c.map(n => `<g class="am-node ${n.cls}" data-node="${H(n.id)}" transform="translate(${colX[ci]} ${pos[n.id]})"${n.agent ? ` data-agent="${H(n.agent)}" tabindex="0" role="button" aria-pressed="${state.agent === n.agent}" aria-label="Show only ${H(n.title)}"` : ""}>
-      <rect width="${boxW}" height="${boxH}" rx="5"/>${n.s ? providerMark(n.s, true) : `<circle cx="15" cy="${boxH / 2}" r="4.5"/>`}
+      <rect class="am-shade" x="3" y="3" width="${boxW}" height="${boxH}" rx="10"/><rect class="am-face" width="${boxW}" height="${boxH}" rx="10"/>${n.s ? providerMark(n.s, true) : `<circle cx="15" cy="${boxH / 2}" r="4.5"/>`}
       <text x="30" y="14">${H(n.title.length > 28 ? n.title.slice(0, 27) + "…" : n.title)}</text><text class="sub" x="30" y="27">${H(n.sub)}</text><title>${H(n.title)} · ${H(n.sub)}</title></g>`)).join("");
     const head = ["Machine", "Harness", "Agent", "Shared folder"].map((t, i) => `<text class="am-col" x="${colX[i]}" y="16">${t}</text>`).join("");
     return `<div class="am-flow${state.intro && !reduceMotion() ? " ap-intro" : ""}"><svg viewBox="0 0 ${W} ${top + rows * rowH + 6}" role="img" aria-label="Which harness each agent used on each machine, and which shared folder it worked in">${head}${paths}${nodes}</svg></div>`;
@@ -460,17 +477,17 @@
   function emptyState(d) {
     const hosts = d.hosts;
     if (!hosts.length) {
-      return `<div class="ap-empty" role="status"><h3>No machine has shared activity yet</h3>
+      return `<div class="ap-empty" role="status">${MASCOT()}<h3>No machine has shared activity yet</h3>
         <ol><li>Install the observer on a machine that runs agents. <a href="#enrollment">Open the installer</a></li>
         <li>Choose the folders to share with <code>SWARMCONTROL_ACTIVITY_ROOTS</code>. Without folders, the machine sends health data only.</li>
         <li>Optionally check what would leave the machine: <code>swarmcontrol_agent.py --preview-activity</code></li></ol>${PRIVACY}</div>`;
     }
     const off = hosts.filter(h => !h.activity_enabled);
     if (off.length === hosts.length) {
-      return `<div class="ap-empty" role="status"><h3>Activity sharing is off on ${hosts.length === 1 ? "this machine" : `all ${hosts.length} machines`}</h3>
+      return `<div class="ap-empty" role="status">${MASCOT()}<h3>Activity sharing is off on ${hosts.length === 1 ? "this machine" : `all ${hosts.length} machines`}</h3>
         <p>${hosts.length === 1 ? "It sends" : "They send"} health data only, because no folder was chosen. To show tasks, plans and files, reinstall with <code>SWARMCONTROL_ACTIVITY_ROOTS</code> set to the project folders.</p>${PRIVACY}</div>`;
     }
-    return `<div class="ap-empty" role="status"><h3>No agent session found in the shared folders yet</h3>
+    return `<div class="ap-empty" role="status">${MASCOT()}<h3>No agent session found in the shared folders yet</h3>
       <p>Shared folders are being read, but no supported agent session has worked inside them recently.</p>
       <p class="muted small">Each machine lists where it looked for agent records. A hollow mark means no records there;
         if an agent keeps them elsewhere, set its own variable (for example <code>CODEX_HOME</code> or <code>CLAUDE_CONFIG_DIR</code>) in the observer's environment.</p></div>`;
@@ -543,14 +560,14 @@
         const o = b.at(-1), fresh = b.some(q => state.fresh.has(stepKey(q.s, q.st))), err = b.some(q => q.st.status === "error");
         const attrs = `data-session="${d.sessions.indexOf(o.s)}" data-kind="step" data-index="${o.i}" tabindex="0" role="button"`;
         if (b.length === 1) return `<g class="ap-dot c-${H(o.st.category)}${fresh ? " is-new" : ""}${err ? " is-error" : ""}" transform="translate(${x(o.t).toFixed(1)} ${y})" ${attrs}
-          aria-label="${H(`${l.name}: ${o.st.label} at ${clock(o.st.time)}`)}"><rect class="ap-plate" x="-7.5" y="-7.5" width="15" height="15"/>
-          <path class="ap-mark" transform="translate(-6 -6)" d="${GLYPH[o.st.category] || GLYPH.other}"/><title>${H(describe(o))}</title></g>`;
+          aria-label="${H(`${l.name}: ${o.st.label} at ${clock(o.st.time)}`)}"><rect class="ap-plate" x="-7.5" y="-7.5" width="15" height="15" rx="4.5"/>
+          <path class="ap-mark" transform="translate(-6 -6)" d="${GLYPH[o.st.category] || GLYPH.other}"/><path class="ap-shine" d="M-4.6 -1.8v-1.4a1.6 1.6 0 0 1 1.6-1.6h1.4"/><title>${H(describe(o))}</title></g>`;
         const cats = b.reduce((m, q) => (m[q.st.category] = (m[q.st.category] || 0) + 1, m), {});
         const main = Object.entries(cats).sort((p, q) => q[1] - p[1])[0][0];
         const x1 = x(b[0].t) - 6, w = Math.max(x(o.t) - x(b[0].t) + 12, 22);
         return `<g class="ap-burst c-${H(main)}${fresh ? " is-new" : ""}${err ? " is-error" : ""}" ${attrs}
           aria-label="${H(`${l.name}: ${b.length} steps from ${clock(b[0].st.time)} to ${clock(o.st.time)}; opens the latest`)}">
-          <rect x="${x1.toFixed(1)}" y="${y - 7.5}" width="${w.toFixed(1)}" height="15"/><text x="${(x1 + w / 2).toFixed(1)}" y="${y + 3.5}" text-anchor="middle">${b.length}</text>
+          <rect x="${x1.toFixed(1)}" y="${y - 7.5}" width="${w.toFixed(1)}" height="15" rx="7.5"/><text x="${(x1 + w / 2).toFixed(1)}" y="${y + 3.5}" text-anchor="middle">${b.length}</text>
           <title>${H(b.slice(-8).map(describe).join("\n") + (b.length > 8 ? `\n… ${b.length - 8} earlier` : ""))}</title></g>`;
       }).join("");
       return `<g class="ap-lane"><line class="ap-lane-line" x1="${L}" x2="${W - R}" y1="${y}" y2="${y}"/>
@@ -751,7 +768,7 @@
     state.open.clear();
     if (app) delete app.dataset.includeActivity;
     notice.hidden = true;
-    root.innerHTML = `<div class="ap-skeleton" role="status" aria-label="Loading agent activity"><span></span><span></span><span></span><span></span></div>`;
+    root.innerHTML = LOADING;
   }
   async function load() {
     if (pending || dialog.open || signedOut()) return;
