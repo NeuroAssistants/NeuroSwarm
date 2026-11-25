@@ -312,9 +312,10 @@ def _step(tool: str, label: Any, ts: Any = None) -> dict[str, Any]:
 
 _PYTHON_EXE = r"(?:\S*[/\\])?python(?:\d+(?:\.\d+)?)?(?:\.exe)?"
 _PYTHON_FLAGS = rf"^{_PYTHON_EXE}\s+(?:-[bBdEiIOPqRsSuvx]+\s+)*"
+TEST_RUNNERS = frozenset({"pytest", "py.test", "unittest", "jest", "vitest", "mocha", "rspec", "phpunit", "ctest"})
+TEST_DRIVERS = frozenset({"npm", "pnpm", "yarn", "go", "cargo", "mvn", "gradle", "dotnet"})
+TEST_LABEL = "Run tests"
 CMD_KIND = [
-    (re.compile(r"^(?:\S*[/\\])?(?:unittest|pytest|py\.test|npm (?:run )?test|go test|cargo test)(?=\s|$)"
-                rf"|{_PYTHON_FLAGS}-m\s*(?:unittest|pytest)(?=\s|$)"), "Run tests"),
     (re.compile(r"^(?:sudo\s+(?:-n\s+)?)?systemctl\b"), "Manage a service"),
     (re.compile(_PYTHON_FLAGS + r"-c"), "Run inline Python"),
     (re.compile(_PYTHON_FLAGS + r"-m"), "Run a Python module"),
@@ -332,11 +333,85 @@ CMD_KIND = [
 ]
 
 
+def _label_words(cmd: str) -> list[str]:
+    """Read the first invocation after literal cd and assignment prefixes, without executing shell text."""
+    cmd = cmd.lstrip()
+    while re.match(r"^cd[ \t]", cmd):
+        boundary = _literal_shell_end(cmd)
+        rest = cmd[boundary:]
+        if not rest.startswith(("&&", ";")):
+            break
+        args = _literal_shell_words(cmd[:boundary])
+        if not (len(args) == 2 or (len(args) == 3 and args[1] == "--")):
+            break
+        cmd = rest[2 if rest.startswith("&&") else 1:].lstrip()
+    lexer = shlex.shlex(cmd, posix=True, punctuation_chars=";&|\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    if re.search(r"\b[A-Za-z]:\\", cmd):
+        lexer.escape = ""  # keep the separators in a Windows executable path
+    words = []
+    try:
+        for word in lexer:
+            if re.fullmatch(r"[;&|\n]+", word):
+                break
+            if not words and re.fullmatch(r"[A-Za-z_]\w*=.*", word, re.S):
+                continue
+            words.append(word)
+    except ValueError:
+        pass  # stored commands can be truncated after the runner and its subcommand
+    if not words:
+        return []
+    words[0] = words[0].replace("\\", "/").rsplit("/", 1)[-1].removesuffix(".exe").removesuffix(".cmd")
+    return words
+
+
+def is_test_invocation(argv: list[str]) -> bool:
+    if not argv:
+        return False
+    program = argv[0]
+    if program in TEST_RUNNERS:
+        return True
+    if program in TEST_DRIVERS:
+        return argv[1:2] == ["test"] or (program in {"npm", "pnpm", "yarn"} and argv[1:3] == ["run", "test"])
+    if not re.fullmatch(_PYTHON_EXE, program):
+        return False
+    args = iter(argv[1:])
+    for arg in args:
+        if arg == "-m":
+            return next(args, None) in ("pytest", "unittest")
+        if arg.startswith("-m"):
+            return arg[2:] in ("pytest", "unittest")
+        if arg in ("-W", "-X", "--check-hash-based-pycs"):
+            next(args, None)
+        elif not re.fullmatch(r"-(?:[bBdEiIOPqRsSuvx]+|[WX].+)", arg):
+            break  # a script, -c, stdin, or an unknown option precedes any module name
+    return False
+
+
+def recorded_command_kind(label: str, program: str, command: Any, files_reason: Any = None) -> str:
+    """Reconcile a possibly old observer's test label with its recorded invocation."""
+    if (label in ("Shell command", "Run a shell command") and files_reason in ("outside_scope", "not_recorded")
+            and (not command or str(command).lstrip().startswith("cd "))):
+        # A guarded cd did not establish that the child actually ran.
+        return label
+    if command:
+        kind = command_kind(command)
+        if kind == TEST_LABEL or label == TEST_LABEL:
+            return kind
+    elif program in TEST_RUNNERS:
+        return TEST_LABEL
+    elif label == TEST_LABEL and program and program not in TEST_DRIVERS and not re.fullmatch(_PYTHON_EXE, program):
+        return command_kind(program)
+    return label
+
+
 def command_kind(cmd: Any) -> str:
     """Describe a shell command by its kind only; never return its arguments."""
-    c = str(cmd or "").strip()
-    c = re.sub(r"^(?:cd\s+\S+\s*(?:&&|;)\s*)+", "", c)
-    c = re.sub(r"^(?:[A-Z_][A-Z0-9_]*=\S*\s+)+", "", c)
+    words = _label_words(str(cmd or "")[:8192])
+    if is_test_invocation(words):
+        return TEST_LABEL
+    c = shlex.join(words)
     for pat, label in CMD_KIND:
         if pat.search(c):
             return label

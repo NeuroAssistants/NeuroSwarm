@@ -17,6 +17,7 @@ from urllib.parse import urlencode
 
 import event_evidence
 import incidents
+from activity_inspector import TEST_LABEL, recorded_command_kind
 
 DEFAULT_WINDOW_SEC = 24 * 3600
 MAX_EVENTS_SCAN = 2500
@@ -57,13 +58,6 @@ PERMISSION_RESOLVED_OUTCOMES = {
     "approved",
     "denied",
 }
-
-TEST_PROGRAMS = {"pytest", "py.test", "unittest", "jest", "vitest", "mocha", "rspec", "phpunit", "ctest"}
-TEST_CMD_RE = re.compile(
-    r"(?i)\b(?:pytest|py\.test|unittest|npm\s+(?:run\s+)?test|pnpm\s+test|yarn\s+test|"
-    r"go\s+test|cargo\s+test|vitest|jest|mocha|mvn\s+test|gradle\s+test|"
-    r"dotnet\s+test|rspec|phpunit|ctest)\b"
-)
 
 QUOTA_EVENT_TYPES = {"quota_429", "rate_limit", "quota_exhausted", "rate_limit_exceeded"}
 QUOTA_OUTCOMES = {"quota_exhausted", "rate_limited", "rate_limit_exceeded", "quota_exceeded"}
@@ -219,14 +213,12 @@ def _scope_key(ev: dict[str, Any]) -> tuple[str, ...]:
 def _is_test_command(ev: dict[str, Any]) -> bool:
     if ev["event_type"] in {"test_failed", "test_passed", "test_result"}:
         return True
-    if ev["program"].removesuffix(".exe") in TEST_PROGRAMS:
-        return True
-    if ev["message"].lower().startswith("run tests"):
-        return True
-    for text in (ev["command_input"], ev["message"], _clean_str(ev["meta"].get("command_form"), 120)):
-        if text and TEST_CMD_RE.search(text):
-            return True
-    return False
+    if ev["event_type"] != "observed_step" or ev["action"] != "shell":
+        return False
+    program = ev["program"].removesuffix(".exe").removesuffix(".cmd")
+    label = ev["message"].partition(" · ")[0]
+    command = ev["command_input"] or _clean_str(ev["meta"].get("command_form"))
+    return recorded_command_kind(label, program, command, ev["meta"].get("files_reason")) == TEST_LABEL
 
 
 def _is_permission_request(ev: dict[str, Any]) -> bool:

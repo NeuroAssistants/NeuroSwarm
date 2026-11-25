@@ -223,7 +223,12 @@ def _categorize_tool(tool_name: str) -> tuple[str, str]:
 
 
 CMD_KIND: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\b(unittest|pytest|npm (?:run )?test|go test|cargo test)\b"), "Run tests"),
+    # Older standalone installs may lack activity_core.py. Match an invocation
+    # at the start, never a test runner mentioned in another program's arguments.
+    (re.compile(r"^(?:(?:\S+[/\\])?(?:pytest|py\.test|unittest|jest|vitest|mocha|rspec|phpunit|ctest)(?:\.exe)?"
+                r"|(?:npm|pnpm|yarn)\s+(?:run\s+)?test|(?:go|cargo|mvn|gradle|dotnet)\s+test"
+                r"|(?:\S+[/\\])?python(?:\d+(?:\.\d+)?)?(?:\.exe)?\s+(?:-[bBdEiIOPqRsSuvx]+\s+)*-m\s*(?:pytest|unittest))"
+                r"(?=\s|$)"), "Run tests"),
     (re.compile(r"^(?:sudo\s+(?:-n\s+)?)?systemctl\b"), "Manage a service"),
     (re.compile(r"^(?:python3?|python3\.\d+)\b"), "Run a Python script"),
     (re.compile(r"^(?:node|npx|npm)\b"), "Run a Node.js script"),
@@ -253,8 +258,10 @@ CLI_SECRET_RE = re.compile(
 
 def command_kind(cmd: Any) -> str:
     """Describe a shell command by its kind only; never return its arguments."""
+    if _CLASSIFIER_CORE is not None:
+        return _CLASSIFIER_CORE.command_kind(cmd)
     c = str(cmd or "").strip()
-    c = re.sub(r"^(?:cd\s+\S+\s*(?:&&|;)\s*)+", "", c)
+    c = re.sub(r"""^(?:cd\s+(?:--\s+)?(?:'[^']*'|"[^"]*"|[^\s;&]+)\s*(?:&&|;)\s*)+""", "", c)
     c = re.sub(r"^(?:[A-Z_][A-Z0-9_]*=\S*\s+)+", "", c)
     for pat, label in CMD_KIND:
         if pat.search(c):
@@ -1832,6 +1839,9 @@ def _load_activity_core():
             return _core
         except ImportError:
             return None
+
+
+_CLASSIFIER_CORE = _load_activity_core()
 
 
 def collect_remote_activity_payload(
