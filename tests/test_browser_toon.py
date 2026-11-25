@@ -108,10 +108,9 @@ class ToonInkBrowserTests(unittest.TestCase):
                     const f = getComputedStyle(e).filter; return f && f !== 'none' && e.textContent.trim() && !(e instanceof SVGPathElement); })
                     .map(e => e.tagName + '.' + e.getAttribute('class'));
                   const tab = getComputedStyle(document.querySelector('#activity-map .ap-tab.on'));
-                  const icon = getComputedStyle(document.querySelector('.section-nav .ns-icon'));
                   const node = document.querySelector('#activity-map .am-node .am-face');
                   return {outline: before.filter, border: before.borderTopWidth, shadow: before.boxShadow, textFiltered,
-                    tabShadow: tab.boxShadow, iconCap: icon.strokeLinecap, faceRx: node && node.getAttribute('rx'),
+                    tabShadow: tab.boxShadow, faceRx: node && node.getAttribute('rx'),
                     shade: !!document.querySelector('#activity-map .am-node .am-shade'),
                     sourcesRow: [...document.querySelectorAll('#activity-map .ap-sources li')].every(li => getComputedStyle(li).flexDirection === 'row')}; })()""")
                 self.assertIn("ns-ink", got["outline"], "the frame outline is drawn by the ink filter")
@@ -119,7 +118,6 @@ class ToonInkBrowserTests(unittest.TestCase):
                 self.assertRegex(got["shadow"], r"3px 3px 0px", "hard offset shadow")
                 self.assertEqual(got["textFiltered"], [], "text is never displaced")
                 self.assertRegex(got["tabShadow"], r"3px 3px 0px", "the selected tab keeps a copper offset")
-                self.assertEqual(got["iconCap"], "round")
                 self.assertEqual((got["faceRx"], got["shade"]), ("10", True))
                 self.assertTrue(got["sourcesRow"], "source stickers read left to right")
                 self.clean(pg)

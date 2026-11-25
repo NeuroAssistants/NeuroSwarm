@@ -323,13 +323,14 @@
    rounded sticker shapes, and the mark as a character in empty and loading states. Palette: ink, paper, mint, action;
    copper still marks only what is selected. Text is never filtered. No motion with reduced-motion. */
 :root {
-  --toon-ink: var(--sc-ink); --toon-w: 2.5px; --toon-r: 14px; --toon-r-sm: 9px;
-  --toon-pop: 3px 3px 0 var(--toon-ink); --toon-pop-hi: 5px 6px 0 var(--toon-ink); --toon-pop-lo: 2px 2px 0 var(--toon-ink);
+  /* Shares the console's Ink & Cel tokens (identity.css) when present; the fallbacks are the same values. */
+  --toon-ink: var(--sc-ink); --toon-w: 2.5px; --toon-r: var(--toon-r-lg, 14px); --toon-r-card: var(--toon-r-md, 10px);
+  --toon-pop: var(--toon-sh-sm, 3px 3px 0 var(--toon-ink)); --toon-pop-hi: 5px 6px 0 var(--toon-ink); --toon-pop-lo: var(--toon-sh-xs, 2px 2px 0 var(--toon-ink));
   --toon-pick: 4px 4px 0 var(--copper, var(--sc-action));
   --toon-shade: color-mix(in srgb, var(--sc-mint) 55%, var(--sc-action));
   --toon-tint: color-mix(in srgb, var(--sc-mint) 35%, var(--sc-surface));
   --toon-dots: radial-gradient(color-mix(in srgb, var(--sc-ink) 15%, transparent) 1px, transparent 1.5px) 0 0 / 8px 8px;
-  --toon-boing: cubic-bezier(.34, 1.56, .64, 1);
+  --toon-boing: var(--toon-spring, cubic-bezier(.34, 1.56, .64, 1));
 }
 
 /* frames: the outline and its shadow are drawn by a filtered layer, so the box wobbles and the text inside stays crisp */
@@ -481,36 +482,29 @@
 /* step detail: a big inked card that pops in with a little squash */
 #activity-map + dialog.am-detail { border: 2.5px solid var(--toon-ink); border-radius: 18px; box-shadow: 7px 8px 0 var(--toon-ink); }
 #activity-map + dialog.am-detail .am-survival { padding: 12px 14px; margin-right: 4px; }
-#activity-map + dialog.am-detail .am-term { border: 2px solid var(--toon-ink); border-radius: var(--toon-r-sm); box-shadow: 3px 3px 0 var(--toon-shade); }
-#activity-map + dialog.am-detail .am-shot, #activity-map + dialog.am-detail .am-text { border: 2px solid var(--toon-ink); border-radius: var(--toon-r-sm); }
+#activity-map + dialog.am-detail .am-term { border: 2px solid var(--toon-ink); border-radius: var(--toon-r-card); box-shadow: 3px 3px 0 var(--toon-shade); }
+#activity-map + dialog.am-detail .am-shot, #activity-map + dialog.am-detail .am-text { border: 2px solid var(--toon-ink); border-radius: var(--toon-r-card); }
 #activity-map + dialog.am-detail .am-survival-bar { height: 12px; border: 2px solid var(--toon-ink);
   background: repeating-linear-gradient(-45deg, var(--sc-critical-bg) 0 5px, color-mix(in srgb, var(--sc-critical-bg) 60%, var(--sc-surface)) 5px 10px); }
 #activity-map + dialog.am-detail .am-survival-bar span { border-right: 2px solid var(--toon-ink); }
 #activity-map + dialog.am-detail .am-line-range { border: 1.5px solid var(--toon-ink); border-radius: 999px; background: var(--sc-mint); color: var(--toon-ink); }
 #activity-map + dialog.am-detail .btn { border-width: 2px; border-color: var(--toon-ink); border-radius: 999px; box-shadow: var(--toon-pop-lo); }
 
-/* sidebar icons: rounded ink strokes; the current section sits on a mint sticker, a hover gives the icon a small wiggle */
-.section-nav .ns-icon { box-sizing: content-box; padding: 3px; border: 2px solid transparent; border-radius: 8px; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.section-nav a:hover .ns-icon, .section-nav a.is-active .ns-icon { transform: none; color: var(--toon-ink); }
-.section-nav a.is-active .ns-icon { background: var(--sc-mint); border-color: var(--toon-ink); box-shadow: var(--toon-pop-lo); }
-
 @keyframes toon-blink { 0%, 60% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--sc-action) 45%, transparent); } 100% { box-shadow: 0 0 0 7px transparent; } }
-@keyframes toon-wiggle { 0% { transform: rotate(0); } 30% { transform: rotate(-12deg) scale(1.08); } 60% { transform: rotate(8deg); } 100% { transform: rotate(0); } }
 @keyframes toon-look { 0%, 35% { transform: translateX(0); } 45%, 65% { transform: translateX(-3px); } 75%, 92% { transform: translateX(3px); } 100% { transform: translateX(0); } }
 @keyframes toon-bob { 0%, 100% { transform: translateY(0) rotate(0); } 50% { transform: translateY(-3px) rotate(-1.5deg); } }
 @keyframes toon-squash { 0% { opacity: 0; transform: translateY(14px) scale(.94, 1.04); } 60% { opacity: 1; transform: translateY(-2px) scale(1.02, .98); } 100% { transform: none; } }
 @media (prefers-reduced-motion: no-preference) {
-  .section-nav a:hover .ns-icon { animation: toon-wiggle 420ms var(--toon-boing); }
   .ap-mascot.is-looking .ap-mascot-eyes, .ap-mascot.is-looking .ap-mascot-lens { animation: toon-look 2.4s ease-in-out infinite; }
   #activity-map .ap-empty .ap-mascot { animation: toon-bob 3.2s ease-in-out infinite; }
   #activity-map + dialog.am-detail[open] { animation: toon-squash 320ms var(--toon-boing); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .section-nav a:hover .ns-icon, .ap-mascot, .ap-mascot * { animation: none !important; transition: none !important; }
+  .ap-mascot, .ap-mascot * { animation: none !important; transition: none !important; }
 }
 @media (forced-colors: active) {
   #activity-map :is(.ap-hosts > li, .am-session, .am-ws, .ap-empty, .am-stats)::before, #activity-map + dialog.am-detail .am-survival::before { filter: none; border-color: CanvasText; }
   #activity-map .am-link { filter: none; }
-  .ap-glyph, .section-nav a.is-active .ns-icon { border-color: CanvasText; }
+  .ap-glyph { border-color: CanvasText; }
 }
 #activity-map .ap-empty a { color: var(--sc-action); font-weight: 700; text-underline-offset: 3px; }
