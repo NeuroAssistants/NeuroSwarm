@@ -24,9 +24,11 @@ from activity_inspector import (
     CMD_KIND,
     NONTERMINAL,
     PROGRAM_RE,
+    TEST_LABEL,
     clean_url,
     evidence_text,
     is_sensitive_path,
+    recorded_command_kind,
     redact,
 )
 
@@ -46,7 +48,7 @@ CANONICAL_CATEGORY: dict[str, str] = {
     "visual_asset": "visual",
 }
 
-COMMANDS: set[str] = {label for _, label in CMD_KIND} | {"List or search files"}
+COMMANDS: set[str] = {label for _, label in CMD_KIND} | {TEST_LABEL, "List or search files"}
 
 COMMAND_FORMS: dict[str, tuple[str, ...]] = {
     "git": ("diff", "status", "log", "show", "add", "commit", "rev-parse"),
@@ -753,6 +755,11 @@ def project_rows(
                     evidence_by_key.setdefault(key, (step, shared_paths, ref))
             if evidence_reasons(context, step, category, step_scoped, all_files, harness):
                 final_metadata = json.dumps(context, sort_keys=True, ensure_ascii=False)
+            if category == "shell":
+                # Keep legacy deduplication keys stable when correcting labels from older observers.
+                raw_command = step.get("command_input") or step.get("command")
+                kind = recorded_command_kind(action, program or "", raw_command, step.get("files_reason"))
+                summary = kind + summary[len(action):]
             severity = step_severity(outcome)
             yield key, legacy, timestamp, (
                 host_id,
