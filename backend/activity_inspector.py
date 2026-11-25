@@ -938,6 +938,94 @@ def _codex_change(changes: Any, status: str, ts: Any, card: dict[str, Any]) -> d
     return action
 
 
+# --- where each runtime keeps its records -----------------------------------------------
+# The runtime's own environment variable wins (as the runtime itself does), then its documented default. The same
+# catalogue feeds the readers and `log_sources()`, which tells an operator what was found and why something was not.
+ANTIGRAVITY_DIRS = ("antigravity-acp", "antigravity", "antigravity-ide", "antigravity-cli")
+CODEX_COLUMNS = {"id", "cwd", "model", "tokens_used", "updated_at", "rollout_path"}
+
+
+def _env_dir(name: str) -> Path | None:
+    value = os.environ.get(name, "").strip()
+    return Path(value).expanduser() if value else None
+
+
+def codex_home() -> Path:
+    return _env_dir("CODEX_HOME") or HOME / ".codex"
+
+
+def claude_home() -> Path:
+    return _env_dir("CLAUDE_CONFIG_DIR") or HOME / ".claude"
+
+
+def opencode_db() -> Path:
+    return (_env_dir("XDG_DATA_HOME") or HOME / ".local/share") / "opencode/opencode.db"
+
+
+def antigravity_bases() -> list[Path]:
+    """Every Antigravity variant that keeps conversations in the known layout (brain/<id>/.system_generated)."""
+    return [b for b in (HOME / ".gemini" / name for name in ANTIGRAVITY_DIRS) if (b / "brain").is_dir()]
+
+
+def codex_state_db() -> tuple[Path | None, str]:
+    """The newest `state_N.sqlite` whose `threads` table has the columns the reader uses, and a status word."""
+    try:
+        found = sorted(((int(m[1]), p) for p in codex_home().glob("state_*.sqlite")
+                        if (m := re.fullmatch(r"state_(\d+)\.sqlite", p.name))), reverse=True)
+    except OSError:
+        return None, "no permission"
+    if not found:
+        return None, "not found"
+    for i, (_, db) in enumerate(found):
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+            try:
+                columns = {r[1] for r in conn.execute("PRAGMA table_info(threads)")}
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            columns = set()
+        if CODEX_COLUMNS <= columns:
+            return db, "found" if i == 0 else f"unsupported format ({found[0][1].name}); reading {db.name}"
+    return None, f"unsupported format ({found[0][1].name})"
+
+
+def _shown(path: Path, variable: str | None) -> str:
+    """A location an operator can recognise without revealing paths outside their home folder."""
+    try:
+        return "~/" + path.resolve().relative_to(HOME.resolve()).as_posix()
+    except (ValueError, OSError):
+        return f"set by {variable}" if variable else "custom location"
+
+
+def log_sources() -> list[dict[str, str]]:
+    """For each runtime: where its records were looked for, and found / not found / unsupported / no permission."""
+    out = []
+
+    def add(runtime: str, path: Path, variable: str | None, status: str) -> None:
+        out.append({"runtime": runtime, "location": _shown(path, variable if os.environ.get(variable or "") else None),
+                    "origin": variable if variable and os.environ.get(variable) else "default", "status": status})
+
+    db, status = codex_state_db()
+    add("Codex CLI", codex_home(), "CODEX_HOME", status)
+    projects = claude_home() / "projects"
+    try:
+        status = "found" if projects.is_dir() and any(projects.iterdir()) else "not found"
+    except PermissionError:
+        status = "no permission"
+    except OSError:
+        status = "not found"
+    add("Claude Code", projects, "CLAUDE_CONFIG_DIR", status)
+    db_oc = opencode_db()
+    add("OpenCode", db_oc.parent, "XDG_DATA_HOME", "found" if db_oc.is_file() else "not found")
+    bases = antigravity_bases()
+    for base in bases:
+        add("Gemini / Antigravity", base, None, "found")
+    if not bases:
+        add("Gemini / Antigravity", HOME / ".gemini", None, "not found")
+    return out
+
+
 # --- Codex ---------------------------------------------------------------------------
 CODE_TOOL = re.compile(r"tools\.([a-z_]+)\(")
 CODE_PLAN_STEP = re.compile(r"step\s*:\s*\"((?:[^\"\\]|\\.){2,200})\"\s*,\s*status\s*:\s*\"([a-z_]+)\"")
@@ -946,8 +1034,8 @@ CODE_PLAN_STEP = re.compile(r"step\s*:\s*\"((?:[^\"\\]|\\.){2,200})\"\s*,\s*stat
 def codex_sessions(limit: int = 8) -> list[dict[str, Any]]:
     if _CAPTURE is not None:
         limit = CAPTURE_SESSION_LIMIT
-    db = HOME / ".codex/state_5.sqlite"
-    if not db.is_file():
+    db, _ = codex_state_db()
+    if db is None:
         return []
     try:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.5)
@@ -1149,7 +1237,7 @@ def _claude_launch_cwd(path: Path) -> str:
 def claude_sessions(limit: int = 6) -> list[dict[str, Any]]:
     if _CAPTURE is not None:
         limit = CAPTURE_SESSION_LIMIT
-    root = HOME / ".claude/projects"
+    root = claude_home() / "projects"
     try:
         found = list(root.glob("*/*.jsonl")) + list(root.glob("*/*/subagents/*.jsonl"))  # Claude Code sub-agents too
         files = sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)[:limit * 6]
@@ -1253,7 +1341,7 @@ def claude_sessions(limit: int = 6) -> list[dict[str, Any]]:
                                 os.environ.get(key) == "1" for key in ("SWARMCONTROL_SHARE_COMMAND_OUTPUT", "SWARMCONTROL_SHARE_FILE_PREVIEWS")
                             ) or (name == "Bash" and line_survival_enabled()))):  # the commit ID is read from the result
                         recorded_calls[b["id"]] = (steps[-1], inp.get("command") if name == "Bash" else None)
-        tasks = HOME / ".claude/tasks" / jf.stem
+        tasks = claude_home() / "tasks" / jf.stem
         if tasks.is_dir():
             items = []
             for tf in sorted(tasks.glob("*.json"), key=lambda p: (len(p.stem), p.stem))[:15]:
@@ -1284,12 +1372,12 @@ AG_EDIT = {"write_file", "edit_file", "write_to_file", "replace_file_content", "
 AG_READ = {"read_file", "view_file", "view_image", "read_image", "list_dir"}
 
 
-def _antigravity_workspace(conv_id: str) -> tuple[str, str]:
+def _antigravity_workspace(conv_id: str, base: Path | None = None) -> tuple[str, str]:
     """Working folder = first workspace URI, in the conversation's own metadata, that lies in a root.
 
     Paths mentioned in transcript text never decide ownership (they may name someone else's folder)."""
     scope = _scope()
-    base = HOME / ".gemini/antigravity-acp"
+    base = base or HOME / ".gemini/antigravity-acp"
     db = base / "conversations" / f"{conv_id}.db"
     if db.is_file():
         try:
@@ -1320,17 +1408,19 @@ def _antigravity_workspace(conv_id: str) -> tuple[str, str]:
 def antigravity_sessions(limit: int = 8) -> list[dict[str, Any]]:
     if _CAPTURE is not None:
         limit = CAPTURE_SESSION_LIMIT
-    brain = HOME / ".gemini/antigravity-acp/brain"
-    try:
-        dirs = [(d / ".system_generated/logs/transcript.jsonl", d) for d in brain.iterdir() if d.is_dir()]
-        dirs = sorted(((t.stat().st_mtime, d) for t, d in dirs if t.is_file()), reverse=True)[:limit * 4]
-    except OSError:
-        return []
+    dirs = []
+    for base in antigravity_bases():  # every installed variant (ACP, IDE, CLI) keeps the same brain layout
+        try:
+            dirs += [(t.stat().st_mtime, d, base) for d in (base / "brain").iterdir() if d.is_dir()
+                     and (t := d / ".system_generated/logs/transcript.jsonl").is_file()]
+        except OSError:
+            continue
+    dirs = sorted(dirs, key=lambda x: x[0], reverse=True)[:limit * 4]
     out = []
-    for mtime, d in dirs:
+    for mtime, d, base in dirs:
         if _CAPTURE is not None and _CAPTURE.unchanged(d / ".system_generated/logs/transcript.jsonl"):
             continue
-        workspace, basis = _antigravity_workspace(d.name)
+        workspace, basis = _antigravity_workspace(d.name, base)
         card = _session("antigravity", "Gemini / Antigravity", d.name, workspace, mtime, "gemini", owner_basis=basis)
         if card is None:
             continue  # no workspace inside the operator's folders
@@ -1476,7 +1566,7 @@ def _opencode_activity(card: dict[str, Any], rows: list[sqlite3.Row], source: st
 def opencode_sessions(limit: int = 6) -> list[dict[str, Any]]:
     if _CAPTURE is not None:
         limit = CAPTURE_SESSION_LIMIT
-    db = HOME / ".local/share/opencode/opencode.db"
+    db = opencode_db()
     if not db.is_file():
         return []
     try:
@@ -1843,13 +1933,14 @@ def _collect(t0: float) -> dict[str, Any]:
         how.update(s["how"])
     hs = harnesses()
     now = time.time()
+    sources = log_sources() if scope.enabled else []
     return {
         "schema_version": SCHEMA_VERSION, "host": scope.host_id, "host_id": scope.host_id,
         "hostname": socket.gethostname(), "collected_at": now,
         "scan_ms": round((time.perf_counter() - t0) * 1000, 1),
-        "activity_enabled": scope.enabled, "activity_roots": [str(r) for r in scope.roots],
+        "activity_enabled": scope.enabled, "activity_roots": [str(r) for r in scope.roots], "sources": sources,
         "hosts": [{"host_id": scope.host_id, "hostname": socket.gethostname(), "updated_at": now,
-                   "activity_roots": [str(r) for r in scope.roots], "activity_enabled": scope.enabled}],
+                   "activity_roots": [str(r) for r in scope.roots], "activity_enabled": scope.enabled, "sources": sources}],
         "summary": {"harnesses_installed": len(hs), "harnesses_running": sum(h["status"] == "running" for h in hs),
                     "agents": len(agents), "agents_active": sum(a["status"] == "active" for a in agents.values()),
                     "sessions": len(sessions), "files_edited": len(editors), "workspaces": len(ws),

@@ -81,3 +81,22 @@ same rules, so local and remote actions are stored identically.
 | `line_survival[]` | Per recent commit and file in a shared folder: `sha`, `path` (absolute, projected like step files), `added`, `surviving` (lines `git blame -M HEAD` still assigns to the commit), `exists`, `commit_time`, `prev_time` (previous commit to the file), `head`, `measured_at`; since line ranges: `ranges` (`[[first, last], …]` HEAD line numbers whose `git blame -M` origin is `sha`, at most 100, must add up to `surviving` unless `ranges_truncated`), `repo_path` (path inside the repository, for the verification command) and `too_large` (file over 2 MB, not measured). Numbers only, at most 300 items |
 | Event metadata `line_keys` | `<shared folder label>/<path>` for each file of an edit, used to join measurements; `git_commit` on the commit's event |
 | `GET /api/v1/events/{id}/line-survival` | Members and read tokens of the event's organization. Takes no path. Returns per file a `status` (`attributed`, `no_commit`, `not_in_commit`, `earlier_commit`, `other_session`, `not_shared`, `not_tracked`, `too_large`), a plain reason, and counts only when `attributed`; then also `ranges`, `ranges_truncated`, `repo_path` and `head_commit` (null `ranges` from older observers) |
+
+### 6.3 Where records are read, and the `sources` report
+
+Each reader uses the runtime's own location setting when it is present in the collector's environment, then the
+runtime's default. Set the same variable on the observer (or journal) service when an agent keeps its records
+elsewhere; the observer does not read the variables of other processes.
+
+| Runtime | Setting | Default | Notes |
+|---|---|---|---|
+| Codex CLI | `CODEX_HOME` | `~/.codex` | The newest `state_N.sqlite` whose `threads` table has the columns the reader uses. A newer file in an unknown format is reported, not guessed. |
+| Claude Code | `CLAUDE_CONFIG_DIR` | `~/.claude` | `projects/` (including sub-agents) and `tasks/`. |
+| OpenCode | `XDG_DATA_HOME` | `~/.local/share` | `opencode/opencode.db`. |
+| Gemini / Antigravity | — | `~/.gemini/antigravity-acp`, `antigravity`, `antigravity-ide`, `antigravity-cli` | Every variant with the `brain/<id>/.system_generated` layout. |
+
+`sources` (top level and on `hosts[]`): one entry per location looked at, `{runtime, location, origin, status}`.
+`location` is `~/<path>` inside the home folder, otherwise `set by <VARIABLE>`; no other path is sent. `origin` is the
+variable that chose it or `default`. `status` is `found`, `not found`, `no permission`, or
+`unsupported format (<file>)` (optionally `; reading <older file>`). Remote ingest keeps at most 12 entries with these
+statuses and shows them on the map's machine card; they are never stored as events.

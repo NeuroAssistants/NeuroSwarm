@@ -308,3 +308,12 @@
 .section-nav a:hover .ns-icon, .section-nav a.is-active .ns-icon { transform: translateX(2px); color: var(--copper, var(--sc-action)); }
 @media (prefers-reduced-motion: reduce) { .section-nav .ns-icon { transition: none; } .section-nav a:hover .ns-icon { transform: none; } }
 @media (max-width: 560px) { #activity-map .ap-tab { padding: 9px 9px 10px; letter-spacing: .07em; } #activity-map .ap-tab::after { left: 9px; right: 9px; } }
+
+/* sources: where the observer looked for each runtime's records */
+#activity-map .ap-sources { list-style: none; display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 6px 0 0; padding: 6px 0 0; border-top: 1px dashed var(--rule, var(--sc-line)); }
+#activity-map .ap-sources li { display: inline-flex; align-items: center; gap: 5px; font: var(--ap-cap, 600 .68rem/1.3 var(--sc-mono)); letter-spacing: .04em; color: var(--sc-muted); cursor: help; }
+#activity-map .ap-sources i { width: 7px; height: 7px; border: 1.5px solid var(--sc-control); }
+#activity-map .ap-sources .is-found { color: var(--carbon, var(--sc-ink)); }
+#activity-map .ap-sources .is-found i { background: var(--sc-action); border-color: var(--sc-action); }
+#activity-map .ap-sources .is-warn { color: var(--sc-warn-fg); }
+#activity-map .ap-sources .is-warn i { border-color: var(--sc-warn-fg); transform: rotate(45deg); }

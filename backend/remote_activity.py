@@ -518,6 +518,20 @@ def sanitize_activity_payload(body: dict[str, Any]) -> dict[str, Any]:
         out["capture_legacy_until"] = capture_legacy_until
     if capture_metrics is not None:
         out["capture_metrics"] = capture_metrics
+    # Where the observer looked for each runtime's records (labels only; no path outside the home folder).
+    sources_raw = body.get("sources")
+    if isinstance(sources_raw, list):
+        sources = []
+        for item in sources_raw[:12]:
+            if not isinstance(item, dict):
+                continue
+            status = _redact_str(item.get("status"), 80)
+            if not re.fullmatch(r"found|not found|no permission|unsupported format \([\w.-]{1,40}\)(; reading [\w.-]{1,40})?", status):
+                continue
+            sources.append({"runtime": _redact_str(item.get("runtime"), 40, "runtime"),
+                            "location": _redact_str(item.get("location"), 120), "status": status,
+                            "origin": _redact_str(item.get("origin"), 40, "default")})
+        out["sources"] = sources
     if line_survival_items is not None:
         out["line_survival"] = line_survival_items
     return out
@@ -725,6 +739,7 @@ def build_tenant_activity_map(db: Any, local_fallback: dict[str, Any] | None = N
                 "activity_roots": snap.get("activity_roots") or [],
                 "activity_enabled": bool(snap.get("activity_enabled", bool(snap.get("activity_roots")))),
                 "capture_reader": snap.get("capture_reader") or "unknown",
+                "sources": snap.get("sources") if isinstance(snap.get("sources"), list) else [],
                 "updated_at": r["updated_at"],
             }
         )

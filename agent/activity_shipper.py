@@ -2084,6 +2084,7 @@ def chunk_activity_payload(payload: dict[str, Any], max_bytes: int = 320_000) ->
             "harnesses": list(payload.get("harnesses") or []),
             "sessions": map_sessions,
             "workspaces": list(payload.get("workspaces") or []),
+            **({"sources": payload["sources"]} if isinstance(payload.get("sources"), list) else {}),
             "map_update": True,
             **({"capture_reader": payload["capture_reader"]} if payload.get("capture_reader") else {}),
             **({"fallback_reason": payload["fallback_reason"]} if payload.get("fallback_reason") else {}),

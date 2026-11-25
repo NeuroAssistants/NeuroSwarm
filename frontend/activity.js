@@ -471,14 +471,26 @@
         <p>${hosts.length === 1 ? "It sends" : "They send"} health data only, because no folder was chosen. To show tasks, plans and files, reinstall with <code>SWARMCONTROL_ACTIVITY_ROOTS</code> set to the project folders.</p>${PRIVACY}</div>`;
     }
     return `<div class="ap-empty" role="status"><h3>No agent session found in the shared folders yet</h3>
-      <p>Shared folders are being read, but no Codex, Claude Code, Gemini/Antigravity or OpenCode session has worked inside them recently.</p></div>`;
+      <p>Shared folders are being read, but no supported agent session has worked inside them recently.</p>
+      <p class="muted small">Each machine lists where it looked for agent records. A hollow mark means no records there;
+        if an agent keeps them elsewhere, set its own variable (for example <code>CODEX_HOME</code> or <code>CLAUDE_CONFIG_DIR</code>) in the observer's environment.</p></div>`;
   }
   function hostStrip(d) {
     return `<ul class="ap-hosts" aria-label="Machines">${d.hosts.map(h => `<li class="${h.activity_enabled ? "on" : "off"}">
       <span class="ap-host-cap"><i class="ap-host-mark" aria-hidden="true"></i>${h.activity_enabled ? "Sharing activity" : "Health only"}</span>
       <strong>${H(machineLabel(h))}</strong><span class="muted small">${h.os_name ? H(h.os_name) + " · " : ""}seen <time data-ts="${h.updated_at || ""}">${H(ago(h.updated_at))}</time></span>
       <span class="ap-share ${h.activity_enabled ? "on" : ""}">${h.activity_enabled ? `Sharing ${h.activity_roots.length} folder${h.activity_roots.length === 1 ? "" : "s"}` : "Health only"}</span>
-      ${h.activity_enabled ? rootList(d, h) : ""}</li>`).join("")}</ul>`;
+      ${h.activity_enabled ? rootList(d, h) : ""}${sourceList(h)}</li>`).join("")}</ul>`;
+  }
+  /* Where the observer looked for each runtime's records, so an empty map explains itself. */
+  function sourceList(h) {
+    const list = Array.isArray(h.sources) ? h.sources.filter(x => x && x.runtime) : [];
+    if (!list.length) return "";
+    const kind = st => st === "found" ? "is-found" : st === "not found" ? "is-missing" : "is-warn";
+    const said = st => st === "found" ? "records found" : st === "not found" ? "no records here" : st;
+    return `<ul class="ap-sources" aria-label="Agent records on this machine">${list.map(x =>
+      `<li class="${kind(x.status)}" title="${H(`${x.runtime}: ${said(x.status)} · ${x.location}${x.origin && x.origin !== "default" ? ` (from ${x.origin})` : ""}`)}">
+        <i aria-hidden="true"></i>${H(x.runtime)}<span class="sr-only">: ${H(said(x.status))}, ${H(x.location)}</span></li>`).join("")}</ul>`;
   }
   function rootList(d, h) {
     const label = r => (d.workspaces.find(w => w.path === r && (!w.host_id || w.host_id === h.host_id)) || {}).label

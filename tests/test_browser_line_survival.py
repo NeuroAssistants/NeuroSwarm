@@ -89,6 +89,14 @@ class LineSurvivalBrowserTests(unittest.TestCase):
                 pg.click("#login-form button[type=submit]")
                 pg.wait("document.querySelector('#activity-map') && document.querySelector('#activity-map').innerText.includes('shop')",
                         what="sessions on the map")
+                # The machine card says where the observer looked for each agent's records.
+                pg.click("#activity-map .ap-tab[data-view='overview']")
+                found = pg.wait("[...document.querySelectorAll('#activity-map .ap-sources li.is-found')].map(li => li.textContent.trim().split(':')[0])",
+                                what="sources on the machine card")
+                self.assertEqual(found, ["Claude Code"])
+                missing = pg.eval("[...document.querySelectorAll('#activity-map .ap-sources li.is-missing')].length")
+                self.assertGreaterEqual(missing, 3, "Codex, OpenCode and Antigravity have no records on this machine")
+                self.assertNotIn(str(self.lab.home), pg.eval("document.querySelector('#activity-map .ap-sources').outerHTML"))
                 text = self.open_step(pg, "Edit app.py")
                 self.assertIn("1 of 3 lines remain", text)
                 self.assertIn("2 changed or removed since commit", text)
