@@ -453,7 +453,7 @@ body {
 }
 .section-nav a .ns-icon .ns-cel {
   fill: var(--toon-mint);
-  stroke: none;
+  stroke: currentColor;
 }
 .section-nav a:hover {
   background: var(--sc-surface);
