@@ -78,6 +78,7 @@
     scopeHost: "",
     scopeAgent: "",
     scopeWorkspace: "",
+    scopeProgram: "",
     scopeTask: "",
     scopeSession: "",
     scopeFile: "",
@@ -87,10 +88,14 @@
     linksByTask: {},
     linksBySession: {},
     windowSec: "all",
+    timeFrom: 0,
+    timeTo: 0,
     filterSev: "",
     filterKind: "",
     filterCat: "",
     filterStatus: "",
+    filterSource: "",
+    filterHttp: "",
     search: "",
     groupMode: "none",
     rowTint: true,
@@ -141,6 +146,13 @@
     toastEl.classList.remove("hidden");
     clearTimeout(toastEl._t);
     toastEl._t = setTimeout(() => toastEl.classList.add("hidden"), 3000);
+  }
+
+  function announceA11y(msg) {
+    const region = el("a11y-announce");
+    if (!region || !msg) return;
+    region.textContent = "";
+    requestAnimationFrame(() => { region.textContent = String(msg); });
   }
 
   function roleOf() { return String(state.user?.role || "viewer").toLowerCase(); }
@@ -206,25 +218,109 @@
     return s;
   }
 
+  const VALID_PERSPS = new Set(["all", "agent_work", "file_edits", "files_touched", "shell_cmds", "open_alerts", "crit_warn", "collab", "events", "audit"]);
+  const VALID_WINS = new Set(["all", "900", "3600", "86400"]);
+  const VALID_SEVS = new Set(["CRITICAL", "ERROR", "WARNING", "INFO", "NORMAL"]);
+  const VALID_KINDS = new Set(["Alert", "Agent Work", "Event", "Collaboration", "Audit"]);
+  const VALID_CATS = new Set(["file_edit", "shell", "file_read", "plan", "coordination", "web", "guardrail"]);
+  const VALID_STATUSES = new Set(["OPEN", "ACKED", "RESOLVED", "RECORDED"]);
+  const VALID_GROUPS = new Set(["none", "severity", "agent", "workspace"]);
+  const URL_SECRET_RE = /(?:^|\b)(?:bearer\s+[a-z0-9._~+/-]{8,}|(?:sk|pk|ghp|gho|glpat|xox[baprs])-[a-z0-9_-]{8,}|eyJ[a-z0-9_-]{10,}\.[a-z0-9_-]{10,}|(?:token|api_?key|secret|password|passwd|auth)\s*[:=]\s*\S+)/i;
+
+  function normalizeHttpFilter(raw) {
+    const s = String(raw || "").trim().toLowerCase();
+    if (!s) return "";
+    if (s === "errors" || s === "4xx" || s === "5xx") return s;
+    if (/^[1-5]\d{2}$/.test(s)) return s;
+    return "";
+  }
+
+  function formatHttpFilterLabel(val) {
+    if (!val) return "";
+    if (val === "errors") return "HTTP errors (4xx/5xx)";
+    if (val === "4xx") return "HTTP 4xx";
+    if (val === "5xx") return "HTTP 5xx";
+    return `HTTP ${val}`;
+  }
+
+  function ensureHttpFilterOption(val) {
+    const sel = el("http-filter");
+    if (!sel) return;
+    sel.querySelectorAll('option[data-custom-http="1"]').forEach((opt) => {
+      if (opt.value !== val) opt.remove();
+    });
+    if (val && ![...sel.options].some((o) => o.value === val)) {
+      const opt = document.createElement("option");
+      opt.value = val;
+      opt.textContent = formatHttpFilterLabel(val);
+      opt.dataset.customHttp = "1";
+      sel.appendChild(opt);
+    }
+    sel.value = val || "";
+  }
+
+  function sanitizeFilterToken(raw, maxLen = 128) {
+    const s = String(raw || "").trim();
+    if (!s || s.length > maxLen || /[\r\n\0<>]/.test(s)) return "";
+    if (URL_SECRET_RE.test(s)) return "";
+    return s;
+  }
+
+  function sanitizeSearchForUrl(raw) {
+    const s = String(raw || "").trim();
+    if (!s || s.length > 120 || /[\r\n\0]/.test(s)) return "";
+    if (URL_SECRET_RE.test(s)) return "";
+    return s;
+  }
+
+  function parseBoundTs(raw) {
+    const s = String(raw || "").trim();
+    if (!s || s.length > 40) return 0;
+    if (/^\d{9,13}(?:\.\d+)?$/.test(s)) {
+      let n = Number(s);
+      if (n > 1e12) n = Math.floor(n / 1000);
+      n = Math.floor(n);
+      return Number.isFinite(n) && n >= 946684800 && n <= 4102444800 ? n : 0;
+    }
+    const ms = Date.parse(s);
+    if (!Number.isFinite(ms)) return 0;
+    const sec = Math.floor(ms / 1000);
+    return sec >= 946684800 && sec <= 4102444800 ? sec : 0;
+  }
+
+  function sanitizeEventKey(raw) {
+    const s = String(raw || "").trim();
+    if (/^(?:event|alert):[1-9]\d{0,18}$/.test(s)) return s;
+    if (/^(?:work|collab|audit):[A-Za-z0-9._:@/-]{1,120}$/.test(s)) return s;
+    return "";
+  }
+
   function currentLiveUrl() {
     const qs = new URLSearchParams();
-    if (state.perspective && state.perspective !== "all") qs.set("persp", state.perspective);
+    if (state.perspective && state.perspective !== "all" && VALID_PERSPS.has(state.perspective)) qs.set("persp", state.perspective);
     if (state.scopeTask) qs.set("task", state.scopeTask);
     if (state.scopeSession) qs.set("session", state.scopeSession);
     if (state.scopeHost) qs.set("host", state.scopeHost);
     if (state.scopeAgent) qs.set("agent", state.scopeAgent);
     if (state.scopeRuntime) qs.set("runtime", state.scopeRuntime);
     if (state.scopeWorkspace) qs.set("ws", state.scopeWorkspace);
+    if (state.scopeProgram) qs.set("prog", state.scopeProgram);
     if (state.scopeFile) qs.set("file", state.scopeFile);
-    if (state.windowSec && state.windowSec !== "all") qs.set("win", state.windowSec);
-    if (state.filterSev) qs.set("sev", state.filterSev);
-    if (state.filterKind) qs.set("kind", state.filterKind);
-    if (state.filterCat) qs.set("cat", state.filterCat);
-    if (state.filterStatus) qs.set("status", state.filterStatus);
-    if (state.groupMode && state.groupMode !== "none") qs.set("group", state.groupMode);
-    if (state.search.trim()) qs.set("q", state.search.trim());
-    if (state.selectedKey) qs.set("event", state.selectedKey);
-    if (state.returnUrl) qs.set("from", state.returnUrl);
+    if (state.windowSec && state.windowSec !== "all" && VALID_WINS.has(state.windowSec)) qs.set("win", state.windowSec);
+    if (state.timeFrom > 0) qs.set("from_ts", String(Math.floor(state.timeFrom)));
+    if (state.timeTo > 0) qs.set("to_ts", String(Math.floor(state.timeTo)));
+    if (state.filterSev && VALID_SEVS.has(state.filterSev)) qs.set("sev", state.filterSev);
+    if (state.filterKind && VALID_KINDS.has(state.filterKind)) qs.set("kind", state.filterKind);
+    if (state.filterCat && VALID_CATS.has(state.filterCat)) qs.set("cat", state.filterCat);
+    if (state.filterStatus && VALID_STATUSES.has(state.filterStatus)) qs.set("status", state.filterStatus);
+    if (state.filterSource) qs.set("source", state.filterSource);
+    if (state.filterHttp) qs.set("http", state.filterHttp);
+    if (state.groupMode && state.groupMode !== "none" && VALID_GROUPS.has(state.groupMode)) qs.set("group", state.groupMode);
+    const safeQ = ""; // Free text may contain output or credentials; keep it local.
+    if (safeQ) qs.set("q", safeQ);
+    const safeEv = sanitizeEventKey(state.selectedKey || state.pendingEventKey);
+    if (safeEv) qs.set("event", safeEv);
+    // The return destination can contain arbitrary query text; keep it local.
     const str = qs.toString();
     return "/live" + (str ? `?${str}` : "");
   }
@@ -232,30 +328,68 @@
   function syncLiveUrl() {
     if (!window.history?.replaceState) return;
     const nextUrl = currentLiveUrl();
-    if (nextUrl === state.lastSyncedUrl) return;
+    if (nextUrl === state.lastSyncedUrl && (window.location.pathname + window.location.search) === nextUrl) return;
     state.lastSyncedUrl = nextUrl;
     window.history.replaceState(null, "", nextUrl);
   }
 
   function applyUrlParams() {
     const p = new URLSearchParams(window.location.search);
-    state.scopeTask = (p.get("task") || "").trim();
-    state.scopeSession = (p.get("session") || "").trim();
-    state.scopeHost = (p.get("host") || "").trim();
-    state.scopeAgent = (p.get("agent") || "").trim();
-    state.scopeRuntime = (p.get("runtime") || "").trim();
-    state.scopeWorkspace = (p.get("ws") || "").trim();
-    state.scopeFile = (p.get("file") || "").trim();
-    state.pendingEventKey = (p.get("event") || "").trim();
+    state.scopeTask = sanitizeFilterToken(p.get("task"), 96);
+    state.scopeSession = sanitizeFilterToken(p.get("session"), 128);
+    state.scopeHost = sanitizeFilterToken(p.get("host"), 128);
+    state.scopeAgent = sanitizeFilterToken(p.get("agent"), 96);
+    state.scopeRuntime = sanitizeFilterToken(p.get("runtime"), 64);
+    state.scopeWorkspace = sanitizeFilterToken(p.get("ws"), 128);
+    state.scopeProgram = sanitizeFilterToken(p.get("prog") || p.get("program"), 48);
+    state.scopeFile = sanitizeFilterToken(p.get("file"), 220);
+    state.filterSource = sanitizeFilterToken(p.get("source") || p.get("event_type"), 64);
+    state.pendingEventKey = sanitizeEventKey(p.get("event"));
     state.returnUrl = safeRelativeUrl(p.get("from"));
-    if (p.get("persp")) state.perspective = p.get("persp").trim();
-    if (p.get("win")) { state.windowSec = p.get("win").trim(); if (el("window")) el("window").value = state.windowSec; }
-    if (p.get("sev")) { state.filterSev = p.get("sev").trim().toUpperCase(); if (el("severity")) el("severity").value = state.filterSev; }
-    if (p.get("kind")) { state.filterKind = p.get("kind").trim(); if (el("kind")) el("kind").value = state.filterKind; }
-    if (p.get("cat")) { state.filterCat = p.get("cat").trim(); if (el("category")) el("category").value = state.filterCat; }
-    if (p.get("status")) { state.filterStatus = p.get("status").trim().toUpperCase(); if (el("status")) el("status").value = state.filterStatus; }
-    if (p.get("group")) { state.groupMode = p.get("group").trim(); if (el("group-mode")) el("group-mode").value = state.groupMode; }
-    if (p.get("q")) { state.search = p.get("q"); if (el("search")) el("search").value = state.search; }
+
+    const rawPersp = String(p.get("persp") || "").trim();
+    state.perspective = VALID_PERSPS.has(rawPersp) ? rawPersp : "all";
+
+    const rawWin = String(p.get("win") || "").trim();
+    state.windowSec = VALID_WINS.has(rawWin) ? rawWin : "all";
+    if (el("window")) el("window").value = state.windowSec;
+
+    const fromTs = parseBoundTs(p.get("from_ts"));
+    const toTs = parseBoundTs(p.get("to_ts"));
+    if (fromTs && toTs && fromTs > toTs) {
+      state.timeFrom = 0;
+      state.timeTo = 0;
+    } else {
+      state.timeFrom = fromTs;
+      state.timeTo = toTs;
+    }
+
+    const rawSev = String(p.get("sev") || "").trim().toUpperCase();
+    state.filterSev = VALID_SEVS.has(rawSev) ? rawSev : "";
+    if (el("severity")) el("severity").value = state.filterSev;
+
+    const rawKind = String(p.get("kind") || "").trim();
+    state.filterKind = VALID_KINDS.has(rawKind) ? rawKind : "";
+    if (el("kind")) el("kind").value = state.filterKind;
+
+    const rawCat = String(p.get("cat") || "").trim();
+    state.filterCat = VALID_CATS.has(rawCat) ? rawCat : "";
+    if (el("category")) el("category").value = state.filterCat;
+
+    const rawStatus = String(p.get("status") || "").trim().toUpperCase();
+    state.filterStatus = VALID_STATUSES.has(rawStatus) ? rawStatus : "";
+    if (el("status")) el("status").value = state.filterStatus;
+
+    state.filterHttp = normalizeHttpFilter(p.get("http"));
+    ensureHttpFilterOption(state.filterHttp);
+
+    const rawGroup = String(p.get("group") || "").trim();
+    state.groupMode = VALID_GROUPS.has(rawGroup) ? rawGroup : "none";
+    if (el("group-mode")) el("group-mode").value = state.groupMode;
+
+    state.search = ""; // Untrusted free-text URL parameters are intentionally ignored.
+    if (el("search")) el("search").value = state.search;
+
     const retEl = el("return-link");
     if (retEl) {
       if (state.returnUrl) {
@@ -287,6 +421,34 @@
   }
 
   /* ---------- Record Normalizers ---------- */
+  function extractHttpStatus(rawObj, details, cmdOut = "") {
+    const candidates = [
+      details?.web_resource?.status_code,
+      details?.http?.status_code,
+      details?.http_status,
+      rawObj?.web_resource?.status_code,
+      rawObj?.http?.status_code,
+      rawObj?.http_status,
+    ];
+    for (const cand of candidates) {
+      if (cand === null || cand === undefined || cand === "") continue;
+      const n = Number(cand);
+      if (Number.isInteger(n) && n >= 100 && n <= 599) return n;
+    }
+    if (typeof cmdOut === "string" && cmdOut) {
+      const normalized = cmdOut.replace(/\r\n/g, "\n");
+      const statusRe = /^(?:<\s*)?HTTP\/(?:\d+(?:\.\d+)?)\s+(\d{3})(?:[ \t]+[^\n]*)?$/gm;
+      let m;
+      let found = null;
+      while ((m = statusRe.exec(normalized)) !== null) {
+        const code = Number(m[1]);
+        if (code !== 100 && code >= 100 && code <= 599) found = code;
+      }
+      if (found !== null) return found;
+    }
+    return null;
+  }
+
   function normalizeFeedRecord(r) {
     const isAlert = String(r.kind || "").toLowerCase() === "alert";
     const src = String(r.source || r.rule_code || r.event_type || "");
@@ -294,6 +456,7 @@
     const rawDetails = r.details || r.evidence || r.metadata || {};
     const details = work ? { ...rawDetails, ...work, persisted_journal: true } : rawDetails;
     const isObservedWork = !isAlert && (src === "observed_step" || Boolean(work));
+    const httpStatus = extractHttpStatus(r, details);
 
     if (isObservedWork) {
       const cat = String(details.action || "other");
@@ -330,6 +493,7 @@
         agent: String(r.agent || details.agent || r.agent_name || r.detail || "agent"),
         harness: String(r.runtime || details.runtime || r.harness || "runtime"),
         source: String(details.tool || "observed_step"),
+        eventType: src,
         category: cat,
         categoryLabel: CAT_LABELS[cat] || cat,
         workspace: ws,
@@ -338,6 +502,7 @@
         program,
         command,
         currentFolder,
+        httpStatus,
         message: String(r.message || r.title || CAT_LABELS[cat] || "Agent work"),
         summary: command || (program ? `Program: ${program}${files.length ? " · Files: " + files.join(", ") : ""}` : files.length ? files.join(", ") : String(r.message || "")),
         ackedBy: "",
@@ -395,6 +560,7 @@
       where: files.length ? shortPath(files[0]) : shortPath(ws) || src,
       program: alertProgram,
       command: alertCommand,
+      httpStatus,
       message: String(r.title || r.message || src || "Record"),
       summary: String(r.summary || r.detail || r.message || ""),
       ackedBy: String(r.acked_by || ""),
@@ -466,6 +632,7 @@
           program: String(st.program || ""),
           command: String(st.command || ""),
           currentFolder: String(s.current_folder || st.current_folder || ""),
+          httpStatus: extractHttpStatus(st, st),
           message: String(st.label || "Agent action"),
           summary: stepFiles.length ? stepFiles.slice(0, 3).map(shortPath).join(", ") : String(st.program ? `Program: ${st.program}` : ""),
           sessionSummary: String(s.what_done || ""),
@@ -759,18 +926,35 @@
   }
 
   /* ---------- Filtering & Sorting ---------- */
+  function matchesHttpFilter(httpStatus, filterHttp) {
+    if (!filterHttp) return true;
+    if (typeof httpStatus !== "number" || !Number.isFinite(httpStatus)) return false;
+    if (filterHttp === "errors") return httpStatus >= 400 && httpStatus <= 599;
+    if (filterHttp === "4xx") return httpStatus >= 400 && httpStatus <= 499;
+    if (filterHttp === "5xx") return httpStatus >= 500 && httpStatus <= 599;
+    if (/^[1-5]\d{2}$/.test(filterHttp)) return httpStatus === Number(filterHttp);
+    return true;
+  }
+
   function buildFilterContext() {
     return {
       q: state.search.trim().toLowerCase(),
       nowSec: Date.now() / 1000,
       winSec: state.windowSec === "all" ? 0 : Number(state.windowSec) || 0,
+      timeFrom: state.timeFrom || 0,
+      timeTo: state.timeTo || 0,
       wantFile: state.scopeFile ? state.scopeFile.toLowerCase() : "",
+      wantProg: state.scopeProgram ? state.scopeProgram.toLowerCase() : "",
+      wantSource: state.filterSource ? state.filterSource.toLowerCase() : "",
+      filterHttp: state.filterHttp || "",
       linkedForTask: state.scopeTask ? state.linksByTask[state.scopeTask] : null,
     };
   }
 
   function recordMatchesFilter(r, ctx) {
     if (ctx.winSec > 0 && r.ts > 0 && ctx.nowSec - r.ts > ctx.winSec) return false;
+    if (ctx.timeFrom > 0 && (!r.ts || r.ts < ctx.timeFrom)) return false;
+    if (ctx.timeTo > 0 && (!r.ts || r.ts > ctx.timeTo)) return false;
     const persp = state.perspective;
     if (persp === "open_alerts" && !(r.kind === "Alert" && r.status === "OPEN")) return false;
     if (persp === "crit_warn" && r.severity !== "CRITICAL" && r.severity !== "ERROR" && r.severity !== "WARNING") return false;
@@ -785,6 +969,7 @@
     if (state.scopeHost && r.host_id !== state.scopeHost) return false;
     if (state.scopeAgent && r.agent !== state.scopeAgent) return false;
     if (state.scopeWorkspace && r.workspace !== state.scopeWorkspace) return false;
+    if (ctx.wantProg && String(r.program || "").toLowerCase() !== ctx.wantProg) return false;
     if (state.scopeTask) {
       const linkedForTask = ctx.linkedForTask;
       const explicitMatch = r.taskId === state.scopeTask || (r.kind === "Collaboration" && r.rawId === state.scopeTask);
@@ -815,6 +1000,8 @@
     if (state.filterKind && r.kind !== state.filterKind) return false;
     if (state.filterCat && r.category !== state.filterCat) return false;
     if (state.filterStatus && r.status !== state.filterStatus) return false;
+    if (ctx.wantSource && String(r.source || "").toLowerCase() !== ctx.wantSource && String(r.eventType || "").toLowerCase() !== ctx.wantSource) return false;
+    if (ctx.filterHttp && !matchesHttpFilter(r.httpStatus, ctx.filterHttp)) return false;
 
     if (ctx.q && !getSearchHay(r).includes(ctx.q)) return false;
     return true;
@@ -924,10 +1111,13 @@
 
     el("perspectives").innerHTML = persp
       .map(
-        (p) => `<li><button type="button" class="tree-btn${state.perspective === p.id && !state.scopeHost && !state.scopeAgent && !state.scopeWorkspace && !state.scopeFile ? " active" : ""}" data-persp="${esc(p.id)}">
+        (p) => {
+          const isActive = state.perspective === p.id && !state.scopeHost && !state.scopeAgent && !state.scopeWorkspace && !state.scopeFile;
+          return `<li><button type="button" class="tree-btn${isActive ? " active" : ""}" aria-pressed="${isActive ? "true" : "false"}" data-persp="${esc(p.id)}">
           <span class="tree-name"><i class="dot ${p.dot}" aria-hidden="true"></i>${esc(p.label)}</span>
           <span class="tree-cnt">${p.count}</span>
-        </button></li>`
+        </button></li>`;
+        }
       )
       .join("");
 
@@ -935,7 +1125,8 @@
       ? hosts
           .map((hid) => {
             const dot = hCrit.has(hid) ? "crit" : hWarn.has(hid) ? "warn" : "online";
-            return `<li><button type="button" class="tree-btn${state.scopeHost === hid ? " active" : ""}" data-scope-host="${esc(hid)}">
+            const isActive = state.scopeHost === hid;
+            return `<li><button type="button" class="tree-btn${isActive ? " active" : ""}" aria-pressed="${isActive ? "true" : "false"}" data-scope-host="${esc(hid)}">
               <span class="tree-name"><i class="dot ${dot}" aria-hidden="true"></i>${esc(hid)}</span>
               <span class="tree-cnt">${hCounts.get(hid) || 0}</span>
             </button></li>`;
@@ -946,10 +1137,13 @@
     el("agent-tree").innerHTML = agents.length
       ? agents
           .map(
-            ([ag, cnt]) => `<li><button type="button" class="tree-btn${state.scopeAgent === ag ? " active" : ""}" data-scope-agent="${esc(ag)}">
+            ([ag, cnt]) => {
+              const isActive = state.scopeAgent === ag;
+              return `<li><button type="button" class="tree-btn${isActive ? " active" : ""}" aria-pressed="${isActive ? "true" : "false"}" data-scope-agent="${esc(ag)}">
               <span class="tree-name"><i class="dot work" aria-hidden="true"></i>${esc(ag)}</span>
               <span class="tree-cnt">${cnt}</span>
-            </button></li>`
+            </button></li>`;
+            }
           )
           .join("")
       : '<li class="muted" style="padding:4px 8px;font-size:.76rem;">No agent activity yet</li>';
@@ -957,10 +1151,13 @@
     el("workspace-tree").innerHTML = wsList.length
       ? wsList
           .map(
-            ([ws, cnt]) => `<li><button type="button" class="tree-btn${state.scopeWorkspace === ws ? " active" : ""}" data-scope-ws="${esc(ws)}">
+            ([ws, cnt]) => {
+              const isActive = state.scopeWorkspace === ws;
+              return `<li><button type="button" class="tree-btn${isActive ? " active" : ""}" aria-pressed="${isActive ? "true" : "false"}" data-scope-ws="${esc(ws)}">
               <span class="tree-name"><i class="dot online" aria-hidden="true"></i>${esc(ws)}</span>
               <span class="tree-cnt">${cnt}</span>
-            </button></li>`
+            </button></li>`;
+            }
           )
           .join("")
       : '<li class="muted" style="padding:4px 8px;font-size:.76rem;">No shared workspaces</li>';
@@ -970,10 +1167,13 @@
       fileTree.innerHTML = fileList.length
         ? fileList
             .map(
-              ([fp, cnt]) => `<li><button type="button" class="tree-btn${state.scopeFile === fp ? " active" : ""}" data-scope-file="${esc(fp)}" title="${esc(fp)}">
+              ([fp, cnt]) => {
+                const isActive = state.scopeFile === fp;
+                return `<li><button type="button" class="tree-btn${isActive ? " active" : ""}" aria-pressed="${isActive ? "true" : "false"}" data-scope-file="${esc(fp)}" title="${esc(fp)}">
                 <span class="tree-name"><i class="dot online" aria-hidden="true"></i>${esc(shortPath(fp))}</span>
                 <span class="tree-cnt">${cnt}</span>
-              </button></li>`
+              </button></li>`;
+              }
             )
             .join("")
         : '<li class="muted" style="padding:4px 8px;font-size:.76rem;">No files recorded yet</li>';
@@ -1019,6 +1219,79 @@
       const parsed = redactDisplayUrl(match);
       return parsed ? parsed.display : match;
     });
+  }
+
+  function redactLocationValue(rawVal) {
+    const val = String(rawVal || "").trim();
+    if (!val) return null;
+    if (/^https?:/i.test(val)) return redactDisplayUrl(val);
+    if (val.startsWith("/")) {
+      try {
+        const u = new URL(val, window.location.origin);
+        let redactedParams = false;
+        const parts = [];
+        for (const [k, v] of u.searchParams.entries()) {
+          if (SENSITIVE_QUERY_RE.test(k)) {
+            parts.push(`${encodeURIComponent(k)}=[REDACTED]`);
+            redactedParams = true;
+          } else {
+            parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+          }
+        }
+        const qs = parts.join("&");
+        const display = `${u.pathname}${qs ? "?" + qs : ""}`;
+        return { display, short: u.pathname, href: "", host: "", redacted: redactedParams };
+      } catch {
+        // fall through to generic query masking
+      }
+    }
+    let redacted = false;
+    const masked = val.replace(/([?&])([^=&\s]+)=([^&\s]+)/g, (full, sep, k) => {
+      if (SENSITIVE_QUERY_RE.test(k)) {
+        redacted = true;
+        return `${sep}${k}=[REDACTED]`;
+      }
+      return full;
+    });
+    return { display: masked, short: masked, href: "", host: "", redacted };
+  }
+
+  const SENSITIVE_HEADER_RE = /^([<>]\s*)?(authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token)\s*:\s*(.+)$/i;
+  const LOCATION_HEADER_RE = /^([<>]\s*)?(location|content-location)\s*:\s*(.+)$/i;
+
+  function redactHeaderLine(line) {
+    const raw = String(line ?? "");
+    const locMatch = LOCATION_HEADER_RE.exec(raw);
+    if (locMatch) {
+      const prefix = locMatch[1] || "";
+      const hdrName = locMatch[2];
+      const locInfo = redactLocationValue(locMatch[3]);
+      return `${prefix}${hdrName}: ${locInfo ? locInfo.display : "[REDACTED]"}`;
+    }
+    const secMatch = SENSITIVE_HEADER_RE.exec(raw);
+    if (secMatch) {
+      return `${secMatch[1] || ""}${secMatch[2]}: [REDACTED]`;
+    }
+    return redactCommandForDisplay(raw);
+  }
+
+  function redactHeaderBlock(block) {
+    return String(block || "")
+      .replace(/\r\n/g, "\n")
+      .split("\n")
+      .map(redactHeaderLine)
+      .join("\n")
+      .trim();
+  }
+
+  function redactOutputForDisplay(rawOut) {
+    const text = String(rawOut || "");
+    if (!text) return "";
+    return text
+      .replace(/\r\n/g, "\n")
+      .split("\n")
+      .map((line) => (LOCATION_HEADER_RE.test(line) || SENSITIVE_HEADER_RE.test(line) ? redactHeaderLine(line) : redactCommandForDisplay(line)))
+      .join("\n");
   }
 
   function classifyBrowserStep(item, ev) {
@@ -1326,6 +1599,9 @@
     const catCls = safeCls(r.category, "other");
     const stCls = safeCls(r.status, "recorded");
     const progHtml = r.program ? `<span class="prog-badge" title="Program executed">${esc(r.program)}</span>` : "";
+    const httpBadgeHtml = typeof r.httpStatus === "number"
+      ? `<span class="http-pill row-http-pill ${r.httpStatus >= 400 ? "fail" : r.httpStatus >= 300 ? "warn" : "ok"}" data-row-http="${esc(r.httpStatus)}">HTTP ${esc(r.httpStatus)}</span>`
+      : "";
     const browserStep = classifyBrowserStep(r, null);
     const browserBadge = browserStep
       ? `<span class="browser-kind-pill bk-${safeCls(browserStep.kind, "web")}" title="${esc(browserStep.tool || browserStep.label)}">${esc(browserStep.label)}</span>`
@@ -1338,7 +1614,16 @@
             : (browserStep.tool || browserStep.label))
       : r.message;
     const rowWhere = browserStep?.urlInfo ? browserStep.urlInfo.host : (r.where || "—");
-    return `<tr class="row sev-${sevCls}${sel}${fresh}" data-key="${esc(r.key)}" tabindex="0" aria-selected="${r.key === state.selectedKey ? "true" : "false"}">
+    const rowAria = [
+      r.severity,
+      r.kind,
+      r.status,
+      typeof r.httpStatus === "number" ? `HTTP ${r.httpStatus}` : "",
+      r.host_id,
+      r.agent,
+      rowMsg,
+    ].filter(Boolean).join(", ");
+    return `<tr class="row sev-${sevCls}${sel}${fresh}" data-key="${esc(r.key)}" tabindex="0" aria-selected="${r.key === state.selectedKey ? "true" : "false"}" aria-label="${esc(rowAria)}">
       <td class="col-sev"><span class="sev-pill ${sevCls}">${esc(r.severity)}</span></td>
       <td class="col-kind"><span class="kind-pill ${kindCls}">${esc(r.kind)}</span></td>
       <td class="col-cat"><span class="cat-pill cat-${catCls}">${esc(r.categoryLabel)}</span></td>
@@ -1348,7 +1633,7 @@
       <td class="col-host" title="${esc(r.host_id)}">${esc(r.host_id)}</td>
       <td class="col-agent" title="${esc(r.agent)} · ${esc(r.harness)}">${esc(r.agent)}</td>
       <td class="col-where" title="${esc((r.files || []).join(", ") || browserStep?.urlInfo?.display || r.workspace)}"><code>${esc(rowWhere)}</code></td>
-      <td class="col-msg" title="${esc(rowMsg)}${r.command ? " · " + esc(r.command) : ""}">${progHtml}${browserBadge}<strong>${esc(rowMsg)}</strong>${r.summary && !String(rowMsg || "").includes(r.summary.slice(0, 24)) && !(browserStep && /^web request$/i.test(r.summary.trim())) ? ` <span class="muted">— ${esc(r.summary)}</span>` : ""}</td>
+      <td class="col-msg" title="${esc(rowMsg)}${r.command ? " · " + esc(r.command) : ""}">${progHtml}${httpBadgeHtml}${browserBadge}<strong>${esc(rowMsg)}</strong>${r.summary && !String(rowMsg || "").includes(r.summary.slice(0, 24)) && !(browserStep && /^web request$/i.test(r.summary.trim())) ? ` <span class="muted">— ${esc(r.summary)}</span>` : ""}</td>
     </tr>`;
   }
 
@@ -1361,11 +1646,18 @@
     if (state.scopeHost) chips.push({ id: "scopeHost", label: `Host: ${state.scopeHost}` });
     if (state.scopeAgent) chips.push({ id: "scopeAgent", label: `Agent: ${state.scopeAgent}` });
     if (state.scopeWorkspace) chips.push({ id: "scopeWorkspace", label: `Folder: ${state.scopeWorkspace}` });
+    if (state.scopeProgram) chips.push({ id: "scopeProgram", label: `Program: ${state.scopeProgram}` });
     if (state.windowSec !== "all") chips.push({ id: "windowSec", label: `Window: ${el("window")?.selectedOptions?.[0]?.textContent || state.windowSec}` });
+    if (state.timeFrom || state.timeTo) {
+      const bounds = `${state.timeFrom ? fmtTime(state.timeFrom) : "start"} → ${state.timeTo ? fmtTime(state.timeTo) : "now"}`;
+      chips.push({ id: "timeBounds", label: `Range: ${bounds}` });
+    }
     if (state.filterSev) chips.push({ id: "filterSev", label: `Severity: ${state.filterSev}` });
     if (state.filterKind) chips.push({ id: "filterKind", label: `Source: ${state.filterKind}` });
     if (state.filterCat) chips.push({ id: "filterCat", label: `Action: ${CAT_LABELS[state.filterCat] || state.filterCat}` });
     if (state.filterStatus) chips.push({ id: "filterStatus", label: `State: ${state.filterStatus}` });
+    if (state.filterSource) chips.push({ id: "filterSource", label: `Event type: ${state.filterSource}` });
+    if (state.filterHttp) chips.push({ id: "filterHttp", label: `HTTP: ${formatHttpFilterLabel(state.filterHttp)}` });
     if (state.search.trim()) chips.push({ id: "search", label: `Search: “${state.search.trim()}”` });
     const banner = el("scope-banner");
     const box = el("active-chips");
@@ -1377,7 +1669,7 @@
     if (box) {
       box.innerHTML =
         '<span class="muted" style="font-weight:700;font-size:.73rem;">Active filters:</span>' +
-        chips.map((c) => `<button type="button" class="filter-chip" data-clear-chip="${esc(c.id)}" title="Remove filter">${esc(c.label)} <span class="x" aria-hidden="true">×</span></button>`).join("");
+        chips.map((c) => `<button type="button" class="filter-chip" data-clear-chip="${esc(c.id)}" aria-label="Remove filter: ${esc(c.label)}" title="Remove filter">${esc(c.label)} <span class="x" aria-hidden="true">×</span></button>`).join("");
     }
     banner.classList.remove("hidden");
   }
@@ -1403,6 +1695,9 @@
     el("cnt-warning").textContent = String(warn);
     el("cnt-info").textContent = String(info);
     el("cnt-normal").textContent = String(norm);
+    document.querySelectorAll(".statusbar [data-quick-sev]").forEach((btn) => {
+      btn.setAttribute("aria-pressed", String(state.filterSev === btn.dataset.quickSev));
+    });
     el("open-alerts-cnt").textContent = `${openAlerts} open alert${openAlerts === 1 ? "" : "s"}`;
     el("work-steps-cnt").textContent = `${workCnt} agent action${workCnt === 1 ? "" : "s"}`;
     const rateEl = el("rate-badge");
@@ -1576,6 +1871,15 @@
 
     const sel = (state.selectedKey && getRecordByKey(state.selectedKey)) || visible[0] || null;
     el("ack-selected").classList.toggle("hidden", !(sel && sel.canAck));
+    document.querySelectorAll(".tbl thead th").forEach((th) => {
+      const btn = th.querySelector("[data-sort]");
+      if (!btn) return;
+      if (btn.dataset.sort === state.sortKey) {
+        th.setAttribute("aria-sort", state.sortDir === "asc" ? "ascending" : "descending");
+      } else {
+        th.setAttribute("aria-sort", "none");
+      }
+    });
     updateStatusBar(pool, filtered.length, visible.length);
 
     if (!opts.skipDetails && !(opts.skipDetailsIfSame && prevSelKey && prevSelKey === state.selectedKey)) {
@@ -1624,6 +1928,12 @@
         if (data && String(data.organization) === String(orgId) && String(data.event_id) === evId) {
           evidenceReadAt.set(data, performance.now());
           state.evidenceCache.set(cacheKey, data);
+          const inferredHttp = extractHttpStatus(data, data, data.command_output || "");
+          if (inferredHttp !== null) {
+            if (item && item.httpStatus == null) item.httpStatus = inferredHttp;
+            const liveRec = item?.key ? (state.feedMap.get(item.key) || state.historyMap.get(item.key)) : null;
+            if (liveRec && liveRec.httpStatus == null) liveRec.httpStatus = inferredHttp;
+          }
           return data;
         }
         return null;
@@ -1770,8 +2080,8 @@
               <span>Redacted execution capture</span>
               ${cmdIn ? `<button type="button" class="btn" data-act="copy-ev-cmd" data-ev-key="${esc(item.key)}">Copy command</button>` : ""}
             </div>
-            ${cmdIn ? `<pre class="ev-cmd-in">$ ${esc(redactCommandForDisplay(cmdIn))}</pre>` : ""}
-            ${cmdOut ? `<pre class="ev-cmd-out">${esc(cmdOut)}</pre>` : emptyOutHtml}
+            ${cmdIn ? `<pre class="ev-cmd-in" tabindex="0">$ ${esc(redactCommandForDisplay(cmdIn))}</pre>` : ""}
+            ${cmdOut ? `<pre class="ev-cmd-out" tabindex="0">${esc(redactOutputForDisplay(cmdOut))}</pre>` : emptyOutHtml}
           </div>
         </section>`);
     }
@@ -1955,31 +2265,38 @@
       eventDialog.close();
     }
     if (!opts.skipFocus) {
-      if (opener && opener.isConnected) {
+      if (opener && opener.isConnected && typeof opener.focus === "function") {
         opener.focus();
-      } else if (prevKey) {
-        tbody.querySelector(`tr[data-key="${CSS.escape(prevKey)}"]`)?.focus();
+      } else {
+        const targetKey = state.selectedKey || prevKey;
+        const row = targetKey ? tbody.querySelector(`tr[data-key="${CSS.escape(targetKey)}"]`) : null;
+        if (row) row.focus();
+        else el("table-wrap")?.focus();
       }
     }
   }
 
-  async function openVerificationTest(button) {
+  async function openVerificationTest(button, explicitId = null, explicitOrg = null) {
     const org = state.org?.id, gen = state.generation;
-    const id = button.dataset.verificationTest;
-    if (!org || !sameActiveOrg(button.dataset.org) || !/^[1-9]\d{0,18}$/.test(id)) return;
+    const id = String(explicitId || button?.dataset?.verificationTest || button?.dataset?.openOriginEvent || "");
+    const btnOrg = explicitOrg ?? button?.dataset?.org;
+    if (!org || !sameActiveOrg(btnOrg) || !/^[1-9]\d{0,18}$/.test(id)) return;
     const key = `event:${id}`;
     try {
-      // A linked test can be older than every loaded feed/history page.
+      // A linked test or triggering event can be older than every loaded feed/history page.
       const ev = await fetchEventEvidence({key, rawId: id}, org, true);
-      if (gen !== state.generation || !sameActiveOrg(org) || !button.isConnected) return;
-      if (!ev?.record) { toast("This test event is no longer available."); return; }
+      if (gen !== state.generation || !sameActiveOrg(org) || (button && button.isConnected === false)) return;
+      if (!ev?.record) { toast("This event is no longer available."); return; }
       const record = normalizeFeedRecord(ev.record);
+      const inferredHttp = extractHttpStatus(ev, ev, ev.command_output || "");
+      if (inferredHttp !== null && record.httpStatus == null) record.httpStatus = inferredHttp;
       state.historyMap.set(key, record);
       markPoolDirty();
-      const opener = eventDialog?.contains(button) ? state.eventModalOpener : button;
+      const opener = button && eventDialog?.contains(button) ? state.eventModalOpener : button;
       openEventPopup(key, opener, record);
+      announceA11y(`Opened original event #${id}: ${record.message}`);
     } catch (err) {
-      if (gen === state.generation) toast(err.message || "Could not open the test event.");
+      if (gen === state.generation) toast(err.message || "Could not open the event.");
     }
   }
 
@@ -2050,7 +2367,9 @@
       const active = btn.dataset.dtab === state.detailTab;
       btn.classList.toggle("active", active);
       btn.setAttribute("aria-selected", String(active));
+      btn.setAttribute("tabindex", active ? "0" : "-1");
     });
+    if (detailEl) detailEl.setAttribute("aria-labelledby", `dtab-${state.detailTab}`);
 
     if (!item) {
       detailQuick.innerHTML = "";
@@ -2402,10 +2721,16 @@
     state.scopeHost = "";
     state.scopeAgent = "";
     state.scopeWorkspace = "";
+    state.scopeProgram = "";
     state.scopeTask = "";
     state.scopeSession = "";
     state.scopeFile = "";
     state.scopeRuntime = "";
+    state.timeFrom = 0;
+    state.timeTo = 0;
+    state.filterSource = "";
+    state.filterHttp = "";
+    ensureHttpFilterOption("");
     state.pendingEventKey = "";
     state.linksByTask = {};
     state.linksBySession = {};
@@ -2858,22 +3183,34 @@
 
   function exportCsv() {
     const rows = getFiltered(allMergedRecords());
-    const cols = ["severity", "kind", "categoryLabel", "status", "ts", "host_id", "agent", "harness", "workspace", "where", "message", "summary"];
+    const cols = ["severity", "kind", "categoryLabel", "status", "http_status", "program", "ts", "host_id", "agent", "harness", "workspace", "where", "message", "summary"];
     const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const csv = [cols.join(","), ...rows.map((r) => cols.map((c) => q(c === "ts" && r.ts ? new Date(r.ts * 1000).toISOString() : r[c])).join(","))].join("\n");
+    const valOf = (r, c) => {
+      if (c === "ts") return r.ts ? new Date(r.ts * 1000).toISOString() : "";
+      if (c === "http_status") return r.httpStatus ?? "";
+      return r[c];
+    };
+    const csv = [cols.join(","), ...rows.map((r) => cols.map((c) => q(valOf(r, c))).join(","))].join("\n");
     downloadFile(csv, "text/csv;charset=utf-8", `swarmcontrol-live-${Date.now()}.csv`);
     toast(`Exported ${rows.length} rows to CSV.`);
   }
 
   function exportJson() {
     const rows = getFiltered(allMergedRecords());
-    downloadFile(JSON.stringify({ organization: state.org?.name, exported_at: new Date().toISOString(), count: rows.length, records: rows }, null, 2), "application/json;charset=utf-8", `swarmcontrol-live-${Date.now()}.json`);
-    toast(`Exported ${rows.length} rows to JSON.`);
+    const records = rows.map((r) => ({ ...r, http_status: r.httpStatus ?? null }));
+    downloadFile(JSON.stringify({ organization: state.org?.name, exported_at: new Date().toISOString(), count: records.length, filters: { http: state.filterHttp || null, host: state.scopeHost || null, program: state.scopeProgram || null, source: state.filterSource || null }, records }, null, 2), "application/json;charset=utf-8", `swarmcontrol-live-${Date.now()}.json`);
+    toast(`Exported ${records.length} rows to JSON.`);
   }
 
   /* ---------- Event Wiring ---------- */
-  el("sidebar-toggle").addEventListener("click", () => el("sidebar").classList.toggle("collapsed"));
-  el("mobile-tree-btn").addEventListener("click", () => el("sidebar").classList.toggle("mobile-open"));
+  el("sidebar-toggle").addEventListener("click", (e) => {
+    const collapsed = el("sidebar").classList.toggle("collapsed");
+    e.currentTarget.setAttribute("aria-expanded", String(!collapsed));
+  });
+  el("mobile-tree-btn").addEventListener("click", (e) => {
+    const opened = el("sidebar").classList.toggle("mobile-open");
+    e.currentTarget.setAttribute("aria-expanded", String(opened));
+  });
 
   el("sidebar").addEventListener("click", (e) => {
     const pBtn = e.target.closest("[data-persp]");
@@ -2940,7 +3277,7 @@
     eventDialog.addEventListener("click", (e) => {
       const originBtn = e.target.closest("[data-open-origin-event]");
       if (originBtn) {
-        openVerificationTest({ dataset: { verificationTest: originBtn.dataset.openOriginEvent, org: originBtn.dataset.org }, isConnected: true });
+        openVerificationTest(originBtn, originBtn.dataset.openOriginEvent, originBtn.dataset.org);
         return;
       }
       const test = e.target.closest("[data-verification-test]");
@@ -3008,10 +3345,37 @@
     renderDetails(getRecordByKey(state.selectedKey), pool);
   });
 
+  document.querySelector(".detail-tabs").addEventListener("keydown", (e) => {
+    const tabs = [...document.querySelectorAll('.detail-tabs [role="tab"]')];
+    const cur = tabs.indexOf(e.target.closest('[role="tab"]'));
+    if (cur < 0 || !tabs.length) return;
+    let next = -1;
+    if (e.key === "ArrowRight") next = (cur + 1) % tabs.length;
+    else if (e.key === "ArrowLeft") next = (cur - 1 + tabs.length) % tabs.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = tabs.length - 1;
+    if (next < 0) return;
+    e.preventDefault();
+    const targetTab = tabs[next];
+    state.detailTab = targetTab.dataset.dtab;
+    renderDetails(getRecordByKey(state.selectedKey), allMergedRecords());
+    targetTab.focus();
+  });
+
+  el("details").addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !state.zoomOverlay && !(eventDialog && eventDialog.open) && !caseDialog.open) {
+      e.preventDefault();
+      const row = state.selectedKey ? tbody.querySelector(`tr[data-key="${CSS.escape(state.selectedKey)}"]`) : tbody.querySelector("tr[data-key]");
+      if (row) row.focus();
+      else el("table-wrap")?.focus();
+      announceA11y("Returned focus to live event stream");
+    }
+  });
+
   el("details").addEventListener("click", (e) => {
     const originBtn = e.target.closest("[data-open-origin-event]");
     if (originBtn) {
-      openVerificationTest({ dataset: { verificationTest: originBtn.dataset.openOriginEvent, org: originBtn.dataset.org }, isConnected: true });
+      openVerificationTest(originBtn, originBtn.dataset.openOriginEvent, originBtn.dataset.org);
       return;
     }
     const gapBtn = e.target.closest("[data-gap-search]");
@@ -3088,7 +3452,24 @@
   el("kind").addEventListener("change", (e) => { state.filterKind = e.target.value; render({ skipExplorer: true }); });
   el("category").addEventListener("change", (e) => { state.filterCat = e.target.value; render({ skipExplorer: true }); });
   el("status").addEventListener("change", (e) => { state.filterStatus = e.target.value; render({ skipExplorer: true }); });
+  el("http-filter")?.addEventListener("change", (e) => {
+    state.filterHttp = normalizeHttpFilter(e.target.value);
+    render({ skipExplorer: true });
+    announceA11y(state.filterHttp ? `Filtered by ${formatHttpFilterLabel(state.filterHttp)}` : "Cleared HTTP status filter");
+  });
   el("group-mode").addEventListener("change", (e) => { state.groupMode = e.target.value; render({ skipExplorer: true }); });
+
+  el("copy-link")?.addEventListener("click", async () => {
+    syncLiveUrl();
+    const fullUrl = `${window.location.origin}${currentLiveUrl()}`;
+    try {
+      await navigator.clipboard.writeText(fullUrl);
+      toast("Diagnostic view link copied.");
+      announceA11y("Copied diagnostic view link to clipboard");
+    } catch {
+      toast("Copy unavailable. Copy the diagnostic link from your address bar.");
+    }
+  });
 
   el("tint-btn").addEventListener("click", (e) => {
     state.rowTint = !state.rowTint;
@@ -3119,13 +3500,16 @@
 
   function resetAllFilters() {
     state.perspective = "all"; state.scopeHost = ""; state.scopeAgent = ""; state.scopeWorkspace = "";
-    state.scopeTask = ""; state.scopeSession = ""; state.scopeFile = ""; state.scopeRuntime = "";
-    state.windowSec = "all"; state.filterSev = ""; state.filterKind = ""; state.filterCat = ""; state.filterStatus = "";
+    state.scopeProgram = ""; state.scopeTask = ""; state.scopeSession = ""; state.scopeFile = ""; state.scopeRuntime = "";
+    state.windowSec = "all"; state.timeFrom = 0; state.timeTo = 0;
+    state.filterSev = ""; state.filterKind = ""; state.filterCat = ""; state.filterStatus = "";
+    state.filterSource = ""; state.filterHttp = "";
     state.search = ""; state.groupMode = "none";
     el("search").value = ""; el("window").value = "all"; el("severity").value = ""; el("kind").value = "";
-    el("category").value = ""; el("status").value = ""; el("group-mode").value = "none";
+    el("category").value = ""; el("status").value = ""; ensureHttpFilterOption(""); el("group-mode").value = "none";
     syncLiveUrl();
     render();
+    announceA11y("All filters cleared");
   }
   el("reset-filters").addEventListener("click", resetAllFilters);
   el("clear-scope").addEventListener("click", resetAllFilters);
@@ -3141,11 +3525,15 @@
     else if (id === "scopeHost") state.scopeHost = "";
     else if (id === "scopeAgent") state.scopeAgent = "";
     else if (id === "scopeWorkspace") state.scopeWorkspace = "";
+    else if (id === "scopeProgram") state.scopeProgram = "";
     else if (id === "windowSec") { state.windowSec = "all"; el("window").value = "all"; }
+    else if (id === "timeBounds") { state.timeFrom = 0; state.timeTo = 0; }
     else if (id === "filterSev") { state.filterSev = ""; el("severity").value = ""; }
     else if (id === "filterKind") { state.filterKind = ""; el("kind").value = ""; }
     else if (id === "filterCat") { state.filterCat = ""; el("category").value = ""; }
     else if (id === "filterStatus") { state.filterStatus = ""; el("status").value = ""; }
+    else if (id === "filterSource") { state.filterSource = ""; }
+    else if (id === "filterHttp") { state.filterHttp = ""; ensureHttpFilterOption(""); }
     else if (id === "search") { state.search = ""; el("search").value = ""; }
     syncLiveUrl();
     render();
@@ -3205,6 +3593,9 @@
       { cat: "Group", label: "Flat Timeline", hint: "Grouping", run: () => { state.groupMode = "none"; el("group-mode").value = "none"; render({ skipExplorer: true }); } },
       { cat: "Action", label: state.paused ? "Resume Live Display" : "Pause Display (Buffer New)", hint: "P", run: () => togglePause() },
       { cat: "Action", label: state.comfortable ? "Switch to Compact Density" : "Switch to Comfortable Density", hint: "D", run: () => applyDensity(!state.comfortable) },
+      { cat: "Action", label: "Filter HTTP 4xx Errors", hint: "4xx", run: () => { state.filterHttp = "4xx"; ensureHttpFilterOption("4xx"); render({ skipExplorer: true }); } },
+      { cat: "Action", label: "Filter HTTP 5xx Errors", hint: "5xx", run: () => { state.filterHttp = "5xx"; ensureHttpFilterOption("5xx"); render({ skipExplorer: true }); } },
+      { cat: "Action", label: "Copy Diagnostic View Link", hint: "URL", run: () => el("copy-link")?.click() },
       { cat: "Action", label: "Export Filtered CSV", hint: "CSV", run: () => exportCsv() },
       { cat: "Action", label: "Export Filtered JSON", hint: "JSON", run: () => exportJson() },
       { cat: "Nav", label: "Back to Main Control Room", hint: "/", run: () => { window.location.href = "/"; } },
@@ -3354,6 +3745,8 @@
       return;
     }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      const inDetailsOrSidebar = Boolean(e.target.closest?.("#details, #sidebar"));
+      if (inDetailsOrSidebar) return;
       const visibleRows = [...tbody.querySelectorAll("tr[data-key]")];
       if (!visibleRows.length) return;
       e.preventDefault();

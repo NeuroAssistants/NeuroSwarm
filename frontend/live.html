@@ -61,12 +61,12 @@
       <aside id="sidebar" class="sidebar" aria-label="View Explorer">
         <div class="pane-head">
           <h2>View Explorer</h2>
-          <button type="button" id="sidebar-toggle" class="icon-btn" title="Collapse View Explorer" aria-label="Toggle View Explorer">⇄</button>
+          <button type="button" id="sidebar-toggle" class="icon-btn" title="Collapse View Explorer" aria-label="Toggle View Explorer" aria-expanded="true">⇄</button>
         </div>
         <div class="tree-scroll">
           <div class="tree-group">
             <div class="tree-heading">Perspectives</div>
-            <ul id="perspectives" class="tree-list" role="listbox" aria-label="Event perspectives"></ul>
+            <ul id="perspectives" class="tree-list" aria-label="Event perspectives"></ul>
           </div>
           <div class="tree-group">
             <div class="tree-heading">Hosts &amp; Nodes</div>
@@ -91,7 +91,7 @@
         <section class="browser-pane" aria-label="Real-time event and agent work browser">
           <div class="toolbar">
             <div class="toolbar-group">
-              <button type="button" id="mobile-tree-btn" class="btn small mobile-only">Explorer</button>
+              <button type="button" id="mobile-tree-btn" class="btn small mobile-only" aria-expanded="false" aria-controls="sidebar">Explorer</button>
               <label for="search" class="sr-only">Search events, files, commands, host or agent</label>
               <input id="search" class="search" type="search" placeholder="Search message, file, command, agent, host… ( / )" autocomplete="off">
 
@@ -143,6 +143,21 @@
                 <option value="RESOLVED">Resolved / Done</option>
                 <option value="RECORDED">Recorded</option>
               </select>
+
+              <label for="http-filter" class="sr-only">HTTP status filter</label>
+              <select id="http-filter" class="select" title="Filter by recorded HTTP status">
+                <option value="">All HTTP</option>
+                <option value="errors">HTTP errors (4xx/5xx)</option>
+                <option value="4xx">HTTP 4xx</option>
+                <option value="5xx">HTTP 5xx</option>
+                <option value="401">HTTP 401</option>
+                <option value="403">HTTP 403</option>
+                <option value="404">HTTP 404</option>
+                <option value="429">HTTP 429</option>
+                <option value="500">HTTP 500</option>
+                <option value="502">HTTP 502</option>
+                <option value="503">HTTP 503</option>
+              </select>
             </div>
 
             <div class="toolbar-group">
@@ -156,6 +171,7 @@
               <button type="button" id="tint-btn" class="btn small active" aria-pressed="true" title="Toggle OMi full-row severity color tint">Row colors</button>
               <button type="button" id="density-btn" class="btn small" aria-pressed="false" title="Toggle row density (Compact / Comfortable)">Compact</button>
               <button type="button" id="ack-selected" class="btn small primary hidden">Acknowledge (A)</button>
+              <button type="button" id="copy-link" class="btn small" title="Copy shareable diagnostic filter link">Copy link</button>
               <button type="button" id="export-csv" class="btn small">CSV</button>
               <button type="button" id="export-json" class="btn small">JSON</button>
               <button type="button" id="reset-filters" class="btn small">Reset</button>
@@ -167,20 +183,20 @@
             <button type="button" id="clear-scope" class="link-btn">Clear all</button>
           </div>
 
-          <div id="table-wrap" class="table-wrap" tabindex="0">
+          <div id="table-wrap" class="table-wrap" tabindex="0" aria-label="Live event stream table">
             <table class="tbl" aria-label="Real-time alerts, events and agent work stream">
               <thead>
                 <tr>
-                  <th class="col-sev"><button type="button" class="sort-btn" data-sort="severity">Sev</button></th>
-                  <th class="col-kind"><button type="button" class="sort-btn" data-sort="kind">Source</button></th>
-                  <th class="col-cat"><button type="button" class="sort-btn" data-sort="categoryLabel">Action</button></th>
-                  <th class="col-state"><button type="button" class="sort-btn" data-sort="status">State</button></th>
-                  <th class="col-time"><button type="button" class="sort-btn" data-sort="ts">Time</button></th>
-                  <th class="col-age">Age</th>
-                  <th class="col-host"><button type="button" class="sort-btn" data-sort="host_id">Host</button></th>
-                  <th class="col-agent"><button type="button" class="sort-btn" data-sort="agent">Agent / Harness</button></th>
-                  <th class="col-where"><button type="button" class="sort-btn" data-sort="where">Folder / File</button></th>
-                  <th class="col-msg"><button type="button" class="sort-btn" data-sort="message">Event / Command / Detail</button></th>
+                  <th scope="col" class="col-sev" aria-sort="none"><button type="button" class="sort-btn" data-sort="severity">Sev</button></th>
+                  <th scope="col" class="col-kind" aria-sort="none"><button type="button" class="sort-btn" data-sort="kind">Source</button></th>
+                  <th scope="col" class="col-cat" aria-sort="none"><button type="button" class="sort-btn" data-sort="categoryLabel">Action</button></th>
+                  <th scope="col" class="col-state" aria-sort="none"><button type="button" class="sort-btn" data-sort="status">State</button></th>
+                  <th scope="col" class="col-time" aria-sort="descending"><button type="button" class="sort-btn" data-sort="ts">Time</button></th>
+                  <th scope="col" class="col-age">Age</th>
+                  <th scope="col" class="col-host" aria-sort="none"><button type="button" class="sort-btn" data-sort="host_id">Host</button></th>
+                  <th scope="col" class="col-agent" aria-sort="none"><button type="button" class="sort-btn" data-sort="agent">Agent / Harness</button></th>
+                  <th scope="col" class="col-where" aria-sort="none"><button type="button" class="sort-btn" data-sort="where">Folder / File</button></th>
+                  <th scope="col" class="col-msg" aria-sort="none"><button type="button" class="sort-btn" data-sort="message">Event / Command / Detail</button></th>
                 </tr>
               </thead>
               <tbody id="rows"></tbody>
@@ -214,15 +230,15 @@
         <section id="details" class="detail-pane" aria-label="Selected event details and correlations">
           <div class="detail-head">
             <div class="detail-tabs" role="tablist" aria-label="Event detail tabs">
-              <button type="button" class="dtab active" role="tab" aria-selected="true" data-dtab="general">General</button>
-              <button type="button" class="dtab" role="tab" aria-selected="false" data-dtab="correlations">Correlations <span id="corr-count" class="tab-cnt">0</span></button>
-              <button type="button" class="dtab" role="tab" aria-selected="false" data-dtab="files">Files &amp; Workspace <span id="files-count" class="tab-cnt">0</span></button>
-              <button type="button" class="dtab" role="tab" aria-selected="false" data-dtab="evidence">Evidence &amp; JSON</button>
-              <button type="button" class="dtab" role="tab" aria-selected="false" data-dtab="actions">Actions &amp; Keys</button>
+              <button type="button" id="dtab-general" class="dtab active" role="tab" aria-selected="true" aria-controls="detail" tabindex="0" data-dtab="general">General</button>
+              <button type="button" id="dtab-correlations" class="dtab" role="tab" aria-selected="false" aria-controls="detail" tabindex="-1" data-dtab="correlations">Correlations <span id="corr-count" class="tab-cnt">0</span></button>
+              <button type="button" id="dtab-files" class="dtab" role="tab" aria-selected="false" aria-controls="detail" tabindex="-1" data-dtab="files">Files &amp; Workspace <span id="files-count" class="tab-cnt">0</span></button>
+              <button type="button" id="dtab-evidence" class="dtab" role="tab" aria-selected="false" aria-controls="detail" tabindex="-1" data-dtab="evidence">Evidence &amp; JSON</button>
+              <button type="button" id="dtab-actions" class="dtab" role="tab" aria-selected="false" aria-controls="detail" tabindex="-1" data-dtab="actions">Actions &amp; Keys</button>
             </div>
             <div id="detail-quick" class="detail-quick"></div>
           </div>
-          <div id="detail" class="detail-body">
+          <div id="detail" class="detail-body" role="tabpanel" aria-labelledby="dtab-general" tabindex="0">
             <p class="muted">Select any alert, event, file edit, or command row above to inspect its full details, correlations, and files touched.</p>
           </div>
         </section>
@@ -270,6 +286,7 @@
     <div id="event-dialog-body" class="event-dialog-body"></div>
   </dialog>
 
+  <div id="a11y-announce" class="sr-only" aria-live="polite" aria-atomic="true"></div>
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
   <script defer src="/live.js"></script>
 </body>

@@ -1287,6 +1287,60 @@ dialog.event-dialog::backdrop {
   color: var(--sc-muted);
 }
 
+.row-http-pill {
+  margin-right: 6px;
+  font-size: .64rem;
+  padding: 0 6px;
+  vertical-align: middle;
+}
+.tbl tbody tr.row.selected .row-http-pill.ok {
+  background: rgba(189, 242, 201, .2);
+  color: var(--sc-mint);
+  border-color: rgba(189, 242, 201, .5);
+}
+.tbl tbody tr.row.selected .row-http-pill.fail {
+  background: #7f1d1d;
+  color: #fecaca;
+  border-color: #fecaca;
+  box-shadow: none;
+}
+
+/* Keyboard & screen reader focus visibility (#7) */
+.skip-link:focus {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  width: auto;
+  height: auto;
+  clip: auto;
+  overflow: visible;
+  z-index: 2000;
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 2px solid var(--sc-mint);
+  background: var(--sc-ink);
+  color: var(--sc-mint);
+  font-weight: 700;
+  text-decoration: none;
+  box-shadow: 3px 3px 0 #0B1411;
+}
+.shell :focus-visible,
+dialog :focus-visible {
+  outline: 2.5px solid var(--copper, #A84423);
+  outline-offset: 2px;
+}
+.tbl tbody tr.row:focus-visible {
+  outline: 2.5px solid var(--copper, #A84423);
+  outline-offset: -2px;
+}
+@media (forced-colors: active) {
+  .shell :focus-visible,
+  dialog :focus-visible,
+  .tbl tbody tr.row:focus-visible {
+    outline: 2px solid Highlight;
+  }
+}
+
 .ev-origin-banner {
   background: #EEF8F1;
   border-top: 3px solid var(--sc-action);
@@ -1341,3 +1395,9 @@ dialog.event-dialog::backdrop {
 .ev-http-hops li::before { content: counter(hop); display: inline-grid; place-items: center; width: 20px; height: 20px; border: 1.5px solid currentColor; border-radius: 50%; font: 700 .7rem/1 var(--sc-mono, monospace); }
 .ev-http-hop-to { min-width: 0; overflow-wrap: anywhere; }
 .ev-http-hop-to code { font-size: .8rem; }
+
+/* Keep the event table reachable when mobile filters wrap onto several lines. */
+@media (max-width: 960px) {
+  .toolbar { max-height: 140px; overflow-y: auto; }
+  .table-wrap { min-height: 80px; }
+}
