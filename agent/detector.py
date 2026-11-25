@@ -99,6 +99,27 @@ HARNESS_SPECS = [
         "launchd_labels": [],
     },
     {
+        "id": "pi",
+        "name": "Pi Coding Agent",
+        "bins": [],
+        "proc_names": [],
+        "dirs": [],
+        "runtime_keys": [],
+        "systemd_prefixes": [],
+        "profile": ("PI_CODING_AGENT_DIR", "~/.pi/agent", "sessions", "directory", "pi"),
+    },
+    {
+        "id": "hermes",
+        "name": "Hermes Agent",
+        "bins": [],
+        "proc_names": [],
+        "dirs": [],
+        "runtime_keys": [],
+        "systemd_prefixes": [],
+        "profile": ("HERMES_HOME", "~/.hermes", "state.db", "file", "hermes"),
+        "systemd_unit": "hermes-gateway.service",
+    },
+    {
         "id": "cursor",
         "name": "Cursor Agent",
         "bins": ["cursor", "cursor-agent"],
@@ -509,6 +530,17 @@ def collect_host_snapshot(agent_version: str = "0.3.0", host_id: str | None = No
 
     for spec in HARNESS_SPECS:
         evidence: list[str] = sorted(set(managed.get(spec["id"], ())), reverse=True)[:4]
+        if "profile" in spec:
+            env_name, default_root, marker, kind, command = spec["profile"]
+            root = _safe_expand(os.environ.get(env_name) or default_root)
+            path = root / marker
+            present = path.is_dir() if kind == "directory" else path.is_file()
+            if present:
+                evidence.append(f"profile:{marker}")
+                if shutil.which(command):
+                    evidence.append(f"bin:{command}")
+        if spec.get("systemd_unit") in running_units:
+            evidence.append(f"service:{spec['systemd_unit']}")
         for b in spec["bins"]:
             found = shutil.which(b)
             if found:

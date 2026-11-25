@@ -58,9 +58,9 @@ PERMISSION_RESOLVED_OUTCOMES = {
     "denied",
 }
 
-TEST_PROGRAMS = {"pytest", "unittest", "jest", "vitest", "mocha", "rspec", "phpunit", "ctest"}
+TEST_PROGRAMS = {"pytest", "py.test", "unittest", "jest", "vitest", "mocha", "rspec", "phpunit", "ctest"}
 TEST_CMD_RE = re.compile(
-    r"(?i)\b(?:pytest|unittest|npm\s+(?:run\s+)?test|pnpm\s+test|yarn\s+test|"
+    r"(?i)\b(?:pytest|py\.test|unittest|npm\s+(?:run\s+)?test|pnpm\s+test|yarn\s+test|"
     r"go\s+test|cargo\s+test|vitest|jest|mocha|mvn\s+test|gradle\s+test|"
     r"dotnet\s+test|rspec|phpunit|ctest)\b"
 )
@@ -219,7 +219,7 @@ def _scope_key(ev: dict[str, Any]) -> tuple[str, ...]:
 def _is_test_command(ev: dict[str, Any]) -> bool:
     if ev["event_type"] in {"test_failed", "test_passed", "test_result"}:
         return True
-    if ev["program"] in TEST_PROGRAMS:
+    if ev["program"].removesuffix(".exe") in TEST_PROGRAMS:
         return True
     if ev["message"].lower().startswith("run tests"):
         return True

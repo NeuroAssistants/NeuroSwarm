@@ -6,7 +6,7 @@ Answers four questions per agent session, from the harness's own local records:
 
 Sources: Codex (state DB + rollout JSONL, incl. code-mode `exec`), Claude Code
 (project JSONL + task files), Gemini/Antigravity (brain transcripts + conversation
-metadata) and OpenCode (`session_v2`, read-only SQLite).
+metadata), OpenCode (`session_v2`, read-only SQLite) and Pi Coding Agent (v3 session JSONL).
 
 Privacy model (opt-in): nothing is read unless the operator lists folders in
 SWARMCONTROL_ACTIVITY_ROOTS. Sessions whose working folder is outside those roots are
@@ -36,7 +36,7 @@ import threading
 import time
 from collections import Counter
 from contextlib import ExitStack
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1367,6 +1367,570 @@ def claude_sessions(limit: int = 6) -> list[dict[str, Any]]:
     return out
 
 
+# --- Pi Coding Agent (v3 JSONL) -----------------------------------------------------
+def _epoch_ts(raw: Any) -> float | None:
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        val = float(raw)
+        if not (0 < val < 1e16):
+            return None
+        return val / 1000.0 if val > 1e12 else val
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return None
+        try:
+            num = float(s)
+            if 0 < num < 1e16:
+                return num / 1000.0 if num > 1e12 else num
+        except ValueError:
+            pass
+        try:
+            iso = s[:-1] + "+00:00" if s.endswith("Z") else s
+            dt = datetime.fromisoformat(iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _iso_ts(raw: Any) -> str:
+    if isinstance(raw, str):
+        s = raw.strip()
+        if len(s) >= 19 and s[4:5] == "-" and s[7:8] == "-" and s[10:11] in ("T", " "):
+            return s[:19].replace(" ", "T")
+    epoch = _epoch_ts(raw)
+    if epoch is not None and 0 < epoch < 1e10:
+        return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(epoch))
+    return ""
+
+
+# --- Hermes Agent ----------------------------------------------------------------------
+HERMES_EDIT = {"write_file", "patch", "edit_file", "apply_patch", "replace_in_file"}
+HERMES_READ = {"read_file", "search_files", "list_dir", "grep", "find_files"}
+HERMES_SHELL = {"terminal", "execute_code", "bash", "shell", "run_command"}
+HERMES_PLAN = {"todo", "todowrite", "update_plan"}
+
+
+def _hermes_dbs() -> list[tuple[Path, str]]:
+    """Return existing (state.db Path, profile_label) pairs for Hermes Agent, read-only."""
+    roots: list[Path] = []
+    env_home = os.environ.get("HERMES_HOME", "").strip()
+    if env_home:
+        roots.append(Path(os.path.expanduser(env_home)))
+    else:
+        roots.append(HOME / ".hermes")
+        local_app = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_app:
+            roots.append(Path(local_app) / "hermes")
+
+    seen: set[str] = set()
+    dbs: list[tuple[Path, str]] = []
+    for root in roots:
+        if is_sensitive_path(str(root)):
+            continue
+        main_db = root / "state.db"
+        if main_db.is_file() and str(main_db) not in seen:
+            seen.add(str(main_db))
+            dbs.append((main_db, ""))
+        prof_dir = root / "profiles"
+        if prof_dir.is_dir():
+            for p_db in sorted(prof_dir.glob("*/state.db"))[:16]:
+                if p_db.is_file() and not is_sensitive_path(str(p_db)) and str(p_db) not in seen:
+                    seen.add(str(p_db))
+                    dbs.append((p_db, p_db.parent.name))
+    return dbs
+
+
+def _hermes_parse_calls(raw: Any) -> list[tuple[str, str, dict[str, Any]]]:
+    """Decode both OpenAI function tool_calls and native Hermes tool_calls JSON."""
+    if isinstance(raw, str):
+        try:
+            items = json.loads(raw)
+        except ValueError:
+            return []
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        return []
+    if not isinstance(items, list):
+        return []
+    out: list[tuple[str, str, dict[str, Any]]] = []
+    for tc in items:
+        if not isinstance(tc, dict):
+            continue
+        cid = str(tc.get("id") or "")
+        fn = tc.get("function") if isinstance(tc.get("function"), dict) else None
+        if fn is not None:
+            name = str(fn.get("name") or "")
+            raw_args = fn.get("arguments")
+        else:
+            name = str(tc.get("name") or tc.get("tool") or "")
+            raw_args = tc.get("arguments", tc.get("input"))
+        if isinstance(raw_args, str):
+            try:
+                args = json.loads(raw_args) if raw_args.strip().startswith("{") else {}
+            except ValueError:
+                args = {}
+        elif isinstance(raw_args, dict):
+            args = raw_args
+        else:
+            args = {}
+        if name:
+            out.append((cid, name, args if isinstance(args, dict) else {}))
+    return out
+
+
+def _hermes_tool_result(raw_content: Any) -> tuple[str, int | None, bool]:
+    """Extract (output_text, exit_code, is_error) from a Hermes role='tool' message."""
+    if raw_content is None:
+        return "", None, False
+    if isinstance(raw_content, list):
+        raw_content = "\n".join(
+            str(b.get("text") or "") for b in raw_content if isinstance(b, dict) and isinstance(b.get("text"), str)
+        )
+    text = str(raw_content)
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(stripped)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            code = parsed.get("exit_code", parsed.get("returncode", parsed.get("exitCode")))
+            exit_code = code if type(code) is int and -(2**31) <= code < 2**31 else None
+            err_flag = bool(
+                parsed.get("error")
+                or parsed.get("success") is False
+                or str(parsed.get("status") or "").lower() in {"error", "failed"}
+                or (exit_code is not None and exit_code != 0)
+            )
+            out_val = parsed.get("output")
+            if isinstance(out_val, str):
+                return out_val, exit_code, err_flag
+            parts = [str(parsed[k]) for k in ("stdout", "stderr", "error", "message") if isinstance(parsed.get(k), str) and parsed.get(k)]
+            return ("\n".join(parts) if parts else text), exit_code, err_flag
+    return text, None, False
+
+
+def _hermes_infer_workspace(sess_row: dict[str, Any], model_cfg: dict[str, Any], msgs: list[sqlite3.Row]) -> tuple[str, str]:
+    """Attribute a Hermes session ONLY when explicitly inside an opted-in Scope root."""
+    scope = _scope()
+    for cand in (
+        sess_row.get("cwd"),
+        sess_row.get("workspace"),
+        sess_row.get("working_dir"),
+        model_cfg.get("cwd"),
+        model_cfg.get("workspace"),
+        model_cfg.get("working_dir"),
+    ):
+        if isinstance(cand, str) and cand.strip():
+            if scope.contains(cand.strip()):
+                return clean_path(cand.strip()), "workspace"
+            return "", "outside"
+
+    matched_roots: set[Path] = set()
+    first_path = ""
+    for m in msgs:
+        raw_tc = m["tool_calls"] if "tool_calls" in m.keys() else None
+        for _, name, args in _hermes_parse_calls(raw_tc):
+            if _tool_key(name) not in HERMES_EDIT | HERMES_READ | HERMES_SHELL:
+                continue
+            for key in ("path", "file_path", "target_file", "file", "directory", "cwd", "workdir"):
+                val = args.get(key)
+                if not isinstance(val, str) or not val.strip():
+                    continue
+                cleaned = clean_path(val.strip())
+                root = scope.root_of(cleaned) if cleaned else None
+                if Path(cleaned).is_absolute() and root is None:
+                    return "", "outside"
+                if root is not None:
+                    matched_roots.add(root)
+                    if not first_path:
+                        first_path = cleaned
+    if len(matched_roots) == 1:
+        root = next(iter(matched_roots))
+        return (first_path if first_path == str(root) else str(root)), "tool_path"
+    return "", "unknown"
+
+
+def hermes_sessions(limit: int = 6) -> list[dict[str, Any]]:
+    if _CAPTURE is not None:
+        limit = CAPTURE_SESSION_LIMIT
+    dbs = _hermes_dbs()
+    if not dbs:
+        return []
+    out: list[dict[str, Any]] = []
+    msg_limit = 400 if _CAPTURE is not None else 80
+    for db_path, profile_dir_name in dbs:
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.5)
+            conn.row_factory = sqlite3.Row
+        except sqlite3.Error:
+            continue
+        try:
+            sess_cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+            msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(messages)")}
+            if "id" not in sess_cols or not {"id", "session_id", "role"} <= msg_cols:
+                continue
+            wanted_sess = (
+                "id", "title", "source", "model", "model_config", "parent_session_id",
+                "started_at", "last_activity_at", "ended_at", "cwd", "workspace", "working_dir",
+                "input_tokens", "output_tokens", "billing_provider", "profile_name",
+            )
+            sess_proj = ", ".join(c for c in wanted_sess if c in sess_cols)
+            ts_cols = [c for c in ("last_activity_at", "ended_at", "started_at") if c in sess_cols]
+            order_expr = f"COALESCE({', '.join(ts_cols)}) DESC" if len(ts_cols) > 1 else ((ts_cols[0] + " DESC") if ts_cols else "rowid DESC")
+            sess_rows = conn.execute(f"SELECT {sess_proj} FROM sessions ORDER BY {order_expr} LIMIT ?", (limit * 6,)).fetchall()
+
+            wanted_msg = ("id", "session_id", "role", "content", "tool_calls", "tool_call_id", "tool_name", "timestamp")
+            msg_proj = ", ".join(c for c in wanted_msg if c in msg_cols)
+
+            for srow in sess_rows:
+                if len(out) >= limit:
+                    break
+                sdict = dict(srow)
+                sid = str(sdict["id"])
+                max_row = conn.execute("SELECT MAX(id) AS max_id FROM messages WHERE session_id = ?", (sid,)).fetchone()
+                max_msg_id = int(max_row["max_id"]) if max_row and max_row["max_id"] is not None else 0
+                src_key = _file_key(f"hermes:{db_path}:{sid}")
+                prev_state = _CAPTURE.offsets.get(src_key) if _CAPTURE is not None else None
+                if _CAPTURE is not None and prev_state is not None and int(prev_state.get("offset", -1)) == max_msg_id:
+                    continue
+
+                msgs = conn.execute(
+                    f"SELECT * FROM (SELECT {msg_proj} FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?) sub ORDER BY id ASC",
+                    (sid, msg_limit),
+                ).fetchall()
+                raw_cfg = sdict.get("model_config")
+                try:
+                    model_cfg = json.loads(raw_cfg) if isinstance(raw_cfg, str) and raw_cfg.strip().startswith("{") else {}
+                except ValueError:
+                    model_cfg = {}
+                if not isinstance(model_cfg, dict):
+                    model_cfg = {}
+
+                cwd, basis = _hermes_infer_workspace(sdict, model_cfg, msgs)
+                if not cwd and basis == "unknown" and sdict.get("parent_session_id"):
+                    prow = conn.execute(f"SELECT {sess_proj} FROM sessions WHERE id = ?", (str(sdict["parent_session_id"]),)).fetchone()
+                    if prow is not None:
+                        pdict = dict(prow)
+                        praw_cfg = pdict.get("model_config")
+                        try:
+                            pcfg = json.loads(praw_cfg) if isinstance(praw_cfg, str) and praw_cfg.strip().startswith("{") else {}
+                        except ValueError:
+                            pcfg = {}
+                        if not isinstance(pcfg, dict):
+                            pcfg = {}
+                        pcwd, _ = _hermes_infer_workspace(pdict, pcfg, [])
+                        if pcwd:
+                            cwd, basis = pcwd, "parent_session"
+                updated_at = (
+                    _epoch_ts(sdict.get("last_activity_at"))
+                    or _epoch_ts(sdict.get("ended_at"))
+                    or _epoch_ts(sdict.get("started_at"))
+                )
+                if updated_at is None:
+                    try:
+                        updated_at = db_path.stat().st_mtime
+                    except OSError:
+                        updated_at = time.time()
+                tokens = int(sdict.get("input_tokens") or 0) + int(sdict.get("output_tokens") or 0)
+                profile_name = str(sdict.get("profile_name") or profile_dir_name or "").strip()
+                prof_prefix = f"{profile_name}:" if profile_name and profile_name != "default" else ""
+                display_name = f"Hermes Agent · {profile_name}" if prof_prefix else "Hermes Agent"
+                card = _session(
+                    "hermes",
+                    display_name,
+                    f"{prof_prefix}{sid}",
+                    cwd,
+                    updated_at,
+                    str(sdict.get("model") or "hermes"),
+                    tokens,
+                    owner_basis=basis,
+                )
+                if card is None:
+                    continue
+                if sdict.get("parent_session_id"):
+                    card["parent_session"] = f"hermes:{prof_prefix}{sdict['parent_session_id']}"[:96]
+                _provider(card, sdict.get("billing_provider"))
+                if sdict.get("title"):
+                    card["what_done"] = redact(str(sdict["title"]), 240)
+
+                global _POS, _POS_N
+                steps: list[dict[str, Any]] = []
+                edited: list[str] = []
+                read: list[str] = []
+                plan: list[dict[str, Any]] = []
+                pending_by_id: dict[str, tuple[dict[str, Any], str, str, str | None]] = {}
+                pending_by_name: dict[str, list[tuple[dict[str, Any], str, str, str | None]]] = {}
+
+                try:
+                    for m in msgs:
+                        mdict = dict(m)
+                        mid = int(mdict["id"])
+                        role = str(mdict.get("role") or "").lower()
+                        stamp = _iso_ts(mdict.get("timestamp"))
+                        if role == "assistant":
+                            txt = str(mdict.get("content") or "").strip()
+                            if txt:
+                                card["what_done"] = redact(txt, 260)
+                                plan = _checklist(txt) or plan
+                            calls = _hermes_parse_calls(mdict.get("tool_calls"))
+                            for idx, (cid, name, args) in enumerate(calls):
+                                _POS, _POS_N = (src_key, mid * 10_000 + idx), 0
+                                tkey = _tool_key(name)
+                                raw_file = args.get("path") or args.get("file_path") or args.get("target_file") or args.get("file") or args.get("directory")
+                                fp = _recorded_file(raw_file, card) if raw_file else ""
+                                label = (
+                                    (_file_label(name, fp or raw_file) if raw_file else "")
+                                    or args.get("query")
+                                    or FRIENDLY.get(tkey)
+                                    or tkey.replace("_", " ")
+                                )
+                                step = _step(name, label, stamp)
+                                cmd_val: str | None = None
+                                kind = "other"
+                                if tkey in HERMES_EDIT:
+                                    kind = "edit"
+                                    step["category"] = "file_edit"
+                                    if fp:
+                                        step["files"] = [fp]
+                                elif tkey in HERMES_READ:
+                                    kind = "read"
+                                    step["category"] = "file_read"
+                                    if fp:
+                                        read.append(fp)
+                                        step["files"] = [fp]
+                                elif tkey in HERMES_SHELL:
+                                    kind = "shell"
+                                    step["category"] = "shell"
+                                    raw_cmd = args.get("command") or args.get("cmd")
+                                    if isinstance(raw_cmd, str) and raw_cmd.strip():
+                                        cmd_val = raw_cmd
+                                        step["label"] = command_kind(cmd_val)
+                                        step.update(execution_detail(cmd_val, None, None))
+                                elif tkey in HERMES_PLAN:
+                                    items = args.get("todos") if isinstance(args.get("todos"), list) else args.get("plan")
+                                    if isinstance(items, list):
+                                        plan = [_plan_item(it.get("status"), it.get("content") or it.get("step")) for it in items if isinstance(it, dict)] or plan
+                                if cid and tkey not in HERMES_PLAN:
+                                    step["status"] = "running"
+                                steps.append(step)
+                                entry = (step, kind, fp, cmd_val)
+                                if cid:
+                                    pending_by_id[cid] = entry
+                                pending_by_name.setdefault(tkey, []).append(entry)
+                        elif role == "tool":
+                            t_cid = str(mdict.get("tool_call_id") or "")
+                            t_name = _tool_key(str(mdict.get("tool_name") or ""))
+                            matched = pending_by_id.pop(t_cid, None) if t_cid else None
+                            if not t_cid and t_name and len(pending_by_name.get(t_name, [])) == 1:
+                                matched = pending_by_name[t_name].pop(0)
+                            if matched is None:
+                                continue
+                            queue = pending_by_name.get(_tool_key(matched[0]["tool"]), [])
+                            if matched in queue:
+                                queue.remove(matched)
+                            step, kind, fp, cmd_val = matched
+                            out_text, exit_code, is_err = _hermes_tool_result(mdict.get("content"))
+                            step["status"] = "error" if is_err else "completed"
+                            if kind == "shell" and cmd_val:
+                                step.update(execution_detail(cmd_val, out_text, exit_code))
+                                if _CAPTURE is not None and line_survival_enabled():
+                                    commit = recorded_commit(cmd_val, out_text, exit_code)
+                                    if commit:
+                                        step["git_commit"] = commit
+                            elif kind == "edit" and fp and not is_err:
+                                edited.append(fp)
+                            elif kind == "read" and fp and not is_err:
+                                snippets = _tool_result_text(out_text, fp)
+                                if snippets:
+                                    step["text_previews"] = snippets
+                finally:
+                    _POS = None
+
+                if _CAPTURE is not None:
+                    _CAPTURE.note(
+                        src_key,
+                        {
+                            "inode": 0,
+                            "offset": max_msg_id,
+                            "legacy_until": 0,
+                        },
+                    )
+                card["plan"] = plan[:12]
+                out.append(_finish(card, steps, edited, read))
+        except sqlite3.Error:
+            continue
+        finally:
+            conn.close()
+    return out
+
+
+def _pi_result(name, argument, message, timestamp, card):
+    failed = message["isError"]
+    if name == "bash":
+        step = _step(name, command_kind(argument), timestamp)
+        output = None
+        blocks = message.get("content")
+        if os.environ.get("SWARMCONTROL_SHARE_COMMAND_OUTPUT") == "1" and isinstance(blocks, list):
+            # Bound the copy before joining. execution_detail redacts and caps the displayed excerpt.
+            parts = []
+            remaining = 10_300
+            for block in blocks:
+                if not isinstance(block, dict) or block.get("type") != "text" or not isinstance(block.get("text"), str):
+                    continue
+                part = block["text"][:remaining]
+                parts.append(part)
+                remaining -= len(part) + 1
+                if remaining <= 0:
+                    break
+            if parts:
+                output = "\n".join(parts)
+        details = message.get("details")
+        code = details.get("exitCode") if isinstance(details, dict) else None
+        step.update(execution_detail(argument, output, code))
+    else:
+        # Pi expands @file and Unicode spaces before resolving a tool path against its working folder.
+        target = re.sub(r"[\u00a0\u2000-\u200a\u202f\u205f\u3000]", " ", argument).removeprefix("@")
+        # Only attribute literal paths we can faithfully represent. Never reinterpret user URI/quoting as a file.
+        path = ""
+        if (target and target == target.strip() and target[0] not in "~\"'" and target[-1] not in "\"'"
+                and not re.match(r"^[a-zA-Z]+://", target) and not any(ord(c) < 32 for c in target)):
+            path = _recorded_file(target, card)
+        step = _step(name, _file_label(name, path) if path else "File path unavailable", timestamp)
+        if path:
+            step["files"] = [path]
+            if name == "read" and not failed:
+                image = _tool_result_image({"result": message.get("content")}, path)
+                if image:
+                    step["image_previews"] = image
+                else:
+                    excerpts = _tool_result_text(message.get("content"), path)
+                    if excerpts:
+                        step["text_previews"] = excerpts
+    step["status"] = "error" if failed else "completed"
+    return step
+
+
+def _pi_session(path: Path, updated: float) -> dict[str, Any] | None:
+    try:
+        with path.open("rb") as stream:
+            initial = os.fstat(stream.fileno())
+            header = json.loads(stream.readline(16_384))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(header, dict) or header.get("type") != "session" or header.get("version") != 3:
+        return None
+    cwd, sid = header.get("cwd"), header.get("id")
+    if (not isinstance(cwd, str) or not Path(cwd).is_absolute() or "\x00" in cwd
+            or not isinstance(sid, str) or not sid):
+        return None
+    # Pi allows arbitrary custom session IDs. Keep standard UUIDs and avoid sending user text.
+    if not re.fullmatch(r"[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}", sid):
+        sid = hashlib.sha256(sid.encode("utf-8", errors="replace")).hexdigest()
+    card = _session("pi", "Pi Coding Agent", sid, cwd, updated)
+    if card is None:
+        return None
+    # Each entry inherits unresolved calls from its own parent. A result in one fork never
+    # consumes its sibling's calls, even when both forks have the same tool-call id.
+    branches = {}
+    steps, edited, read = [], [], []
+    for line in _lines(path):
+        try:
+            entry = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            continue
+        if entry.get("type") == "session":
+            if entry != header:
+                return None
+            continue
+        parent = entry.get("parentId")
+        calls = branches.get(parent, {}) if isinstance(parent, str) else {}
+        message = entry.get("message") if entry.get("type") == "message" else None
+        if isinstance(message, dict):
+            role = message.get("role")
+            if role == "assistant":
+                calls = {}
+                if isinstance(message.get("model"), str):
+                    card["model"] = _model(message["model"])
+                    _provider(card, message.get("provider"))
+                blocks = message.get("content")
+                for block in blocks if isinstance(blocks, list) else ():
+                    if not isinstance(block, dict) or block.get("type") != "toolCall" or block.get("namespace"):
+                        continue
+                    name, key, args = block.get("name"), block.get("id"), block.get("arguments")
+                    if (name not in ("read", "write", "edit", "bash") or not isinstance(key, str)
+                            or not key or not isinstance(args, dict)):
+                        continue
+                    argument = args.get("command" if name == "bash" else "path")
+                    if isinstance(argument, str) and 0 < len(argument) <= 8192:
+                        calls[key] = None if key in calls else (name, argument)
+            elif role == "toolResult":
+                key = message.get("toolCallId")
+                pair = calls.get(key) if isinstance(key, str) else None
+                if pair and pair[0] == message.get("toolName") and isinstance(message.get("isError"), bool):
+                    calls = calls.copy()
+                    del calls[key]
+                    name, argument = pair
+                    step = _pi_result(name, argument, message, entry.get("timestamp"), card)
+                    steps.append(step)
+                    if step["status"] == "completed" and step.get("files"):
+                        (read if name == "read" else edited).extend(step["files"])
+            else:
+                calls = {}
+        if calls:
+            branches[entry["id"]] = calls
+    # Header and tail are separate reads. A replacement log can belong to another project.
+    # Drop its cursor along with the snapshot so the next scan checks its own header.
+    try:
+        current = path.lstat()
+        same_log = os.path.samestat(initial, current) and current.st_size >= initial.st_size
+        if same_log and initial.st_ctime_ns != current.st_ctime_ns:
+            with path.open("rb") as stream:
+                same_log = os.path.samestat(initial, os.fstat(stream.fileno())) and json.loads(stream.readline(16_384)) == header
+    except (OSError, ValueError, RecursionError):
+        same_log = False
+    if not same_log:
+        if _CAPTURE is not None:
+            _CAPTURE.read.pop(_file_key(path), None)
+        return None
+    if steps:
+        card["what_done"] = steps[-1]["label"]
+    return _finish(card, steps, edited, read)
+
+
+def pi_sessions(limit: int = 6) -> list[dict[str, Any]]:
+    profile = Path(os.environ.get("PI_CODING_AGENT_DIR") or HOME / ".pi/agent").expanduser()
+    directory = Path(os.environ.get("PI_CODING_AGENT_SESSION_DIR") or profile / "sessions").expanduser()
+    # Default layout has one directory per project; a custom session directory may be flat.
+    files = []
+    for pattern in ("*.jsonl", "*/*.jsonl"):
+        for path in directory.glob(pattern):
+            try:
+                meta = path.lstat()
+                if stat.S_ISREG(meta.st_mode) and not path.parent.is_symlink():
+                    files.append((meta.st_mtime, path))
+            except OSError:
+                continue
+    out = []
+    for updated, path in sorted(files, reverse=True):
+        if _CAPTURE is not None and _CAPTURE.unchanged(path):
+            continue
+        session = _pi_session(path, updated)
+        if session is not None:
+            out.append(session)
+            if len(out) >= (CAPTURE_SESSION_LIMIT if _CAPTURE is not None else limit):
+                break
+    return out
+
+
 # --- Gemini / Antigravity -------------------------------------------------------------
 AG_EDIT = {"write_file", "edit_file", "write_to_file", "replace_file_content", "multi_replace_file_content"}
 AG_READ = {"read_file", "view_file", "view_image", "read_image", "list_dir"}
@@ -1889,7 +2453,7 @@ def collect_activity(scope: Scope | None = None, capture: "Capture | None" = Non
 def _collect(t0: float) -> dict[str, Any]:
     scope = _scope()
     sessions: list[dict[str, Any]] = []
-    for reader in ((codex_sessions, claude_sessions, antigravity_sessions, opencode_sessions) if scope.enabled else ()):
+    for reader in ((codex_sessions, claude_sessions, antigravity_sessions, opencode_sessions, hermes_sessions, pi_sessions) if scope.enabled else ()):
         if _CAPTURE is not None:
             _CAPTURE.reader = reader.__name__
         try:

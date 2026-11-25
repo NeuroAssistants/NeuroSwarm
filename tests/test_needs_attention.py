@@ -298,6 +298,41 @@ class NeedsAttentionAPITests(unittest.TestCase):
         self.assertIn("Tests passed", na["resolved"][0]["resolution_reason"])
         self.assertIn("event=event%3A", na["resolved"][0]["resolved_link"])
 
+    def test_windows_test_executable_without_shared_command(self):
+        token = self._create_token(self.admin, "windows-tests")
+        steps = []
+        session = {
+            "session_id": "codex:windows-tests",
+            "harness": "codex",
+            "agent_name": "qa-agent",
+            "workspace": "/work/repo",
+            "steps": steps,
+            "capture_steps": steps,
+        }
+        payload = {
+            "host_id": "windows-tests",
+            "activity_enabled": True,
+            "activity_roots": ["/work/repo"],
+            "sessions": [session],
+        }
+        for exit_code, age in ((1, 60), (0, 5)):
+            steps.append({
+                "tool": "exec_command",
+                "category": "shell",
+                "label": "Run command",
+                "program": "py.test.exe",
+                "status": "failed" if exit_code else "completed",
+                "time": _iso_offset(age),
+                "exit_code": exit_code,
+            })
+            status, _, body = self.admin.json("POST", "/api/v1/ingest/activity", payload,
+                                              headers=self._ingest_headers(token))
+            self.assertIn(status, (200, 201), body)
+            status, _, attention = self.admin.json("GET", "/api/v1/needs-attention")
+            self.assertEqual(status, 200)
+            self.assertEqual(attention["counts"]["failed_test"], exit_code)
+        self.assertEqual(attention["resolved"][0]["program"], "py.test.exe")
+
     def test_quota_exhausted_and_resolution(self):
         tok = self._create_token(self.admin, "host-quota")
         hdr = self._ingest_headers(tok)
