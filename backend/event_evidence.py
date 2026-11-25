@@ -10,7 +10,7 @@ import zlib
 
 import edit_verification
 
-from activity_inspector import clean_url, evidence_text, is_sensitive_path, protected_command
+from activity_inspector import clean_location, clean_url, evidence_text, is_sensitive_path, protected_command
 
 MAX_IMAGE_BYTES = 160 * 1024
 WORK_FIELDS = ("session", "parent_session", "workspace", "tool", "action", "basis", "outcome",
@@ -47,6 +47,18 @@ def _safe_web_resource(raw):
     code = raw.get("status_code")
     if type(code) is int and 100 <= code <= 599:
         out["status_code"] = code
+    hops = []
+    for hop in raw.get("hops") if isinstance(raw.get("hops"), list) else []:
+        if isinstance(hop, dict) and type(hop.get("status_code")) is int and 100 <= hop["status_code"] <= 599:
+            clean = {"status_code": hop["status_code"]}
+            text, _ = evidence_text(hop.get("status_text"), 80)
+            if text and text.strip():
+                clean["status_text"] = text.strip()
+            if where := clean_location(hop.get("location")):  # masks each secret value, keeps the other parameters
+                clean["location"] = where
+            hops.append(clean)
+    if len(hops) > 1:
+        out["hops"] = hops[:10]
     return out or None
 
 

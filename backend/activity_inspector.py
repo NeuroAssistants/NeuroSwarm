@@ -549,7 +549,8 @@ def protected_command(command):
         return False
     if "[protected file]" in command or re.search(r"(?i)(?:^|[;&|\s])(?:env|set|printenv|export)(?:$|[;&|\s])", command):
         return True
-    for field in _PATH_FIELDS.finditer(command):
+    # A web address is not a file: its secret query values are masked where it is shown, not the whole response.
+    for field in _PATH_FIELDS.finditer(re.sub(r"(?i)https?://[^\s'\"<>|;&]*(?:&[^\s'\"<>|;&]*)*", " ", command)):
         token = field.group().rstrip(".,:")
         if token and not token.startswith("-") and is_sensitive_path(token):
             return True
@@ -667,6 +668,19 @@ def clean_url(raw: Any) -> str:
     return out[:512]
 
 
+def clean_location(raw: Any, base: Any = "") -> str:
+    """A redirect target without credentials or secret query values; a relative target keeps only its cleaned path."""
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    raw = raw.strip()
+    if re.match(r"^https?://", raw, re.I):
+        return clean_url(raw)
+    if raw.startswith("/") and not raw.startswith("//"):
+        cleaned = clean_url("http://relative.invalid" + raw)
+        return cleaned.removeprefix("http://relative.invalid") if cleaned else ""
+    return ""
+
+
 _HTTP_STATUS = re.compile(r"^(?:<\s*)?HTTP/[\d.]+\s+(\d{3})(?:[ \t]+([^\r\n]*))?", re.M)
 _DATA_FLAGS = {"-d", "--data", "--data-raw", "--data-binary", "--data-urlencode", "--json", "-F", "--form", "--form-string"}
 
@@ -714,7 +728,20 @@ def http_resource(command: Any, output: Any, share_url: bool) -> dict[str, Any] 
             out["url"] = clean
         if isinstance(output, str) and output.strip():
             body = output
-            statuses = list(_HTTP_STATUS.finditer(output))
+            statuses = [m for m in _HTTP_STATUS.finditer(output) if m[1] != "100"]  # 100 Continue is not a response
+            if len(statuses) > 1:
+                hops = []
+                for i, m in enumerate(statuses[:10]):
+                    hop: dict[str, Any] = {"status_code": int(m[1])}
+                    if m[2] and m[2].strip():
+                        hop["status_text"] = redact(m[2].strip(), 80)
+                    block = output[m.end():statuses[i + 1].start() if i + 1 < len(statuses) else len(output)]
+                    head = re.split(r"\r?\n\r?\n", block, maxsplit=1)[0]
+                    loc = re.search(r"(?im)^(?:<\s*)?location:\s*(\S+)", head)
+                    if loc and share_url and (where := clean_location(loc[1], url)):
+                        hop["location"] = where
+                    hops.append(hop)
+                out["hops"] = hops  # every response in order: 302 -> 401
             if statuses:
                 last = statuses[-1]
                 out["status_code"] = int(last[1])

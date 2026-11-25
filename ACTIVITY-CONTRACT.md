@@ -118,6 +118,21 @@ Events recorded before these fields existed have neither; Live shows them as "no
 
 `web_resource` describes curl/wget calls and browser or web tools: `kind` (`http`, `visit`, `search`, `snapshot`, `interact`, `credential`), `method`, `url` (http/https only, without user, password, fragment or the values of secret-looking query parameters), `query`, `status_code`, `status_text` and `response_excerpt` (redacted, at most 1,200 characters). The address and the query need `SWARMCONTROL_SHARE_COMMANDS=1`; the status and the excerpt need `SWARMCONTROL_SHARE_COMMAND_OUTPUT=1`. A command outside the shared folders keeps only `kind` and `method`, and a credential step keeps only `kind`. The status comes from the response headers (`-i`, `-I`, `-v`) or from `-w '%{http_code}'`; a 401 is visible even when curl exits 0.
 
+With `curl -L` (or `wget` following redirects), `hops` lists every recorded response in order, each with `status_code`, `status_text` and, with command sharing, its `location` (cleaned like `url`; a relative target keeps only its cleaned path). `status_code` and `response_excerpt` belong to the final response.
+
+HTTP fields per agent runtime (verified by `tests/test_http_all_adapters.py` with a real `curl` against a local 302 → 401 fixture):
+
+| Runtime | Method, address, hops, status, excerpt | Process exit code |
+|---|---|---|
+| Codex CLI | ✓ | ✓ |
+| Claude Code | ✓ | — (its Bash result has no exit code) |
+| OpenCode | ✓ | ✓ (`state.metadata.exit`) |
+| Antigravity | ✓ when the transcript records the command output | ✓ when recorded |
+| Hermes Agent | ✓ | ✓ when the tool result includes `exit_code` |
+| Pi Coding Agent | ✓ | ✓ (`details.exitCode`) |
+
+Web tools other than shell commands (browser visits, searches, page captures) carry `kind` for every runtime; their address and query are extracted for Codex and Claude Code only.
+
 Which commands lose evidence most often:
 
 ```sql
