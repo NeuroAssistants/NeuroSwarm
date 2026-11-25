@@ -43,13 +43,13 @@
 
   function categoryGlyph(kind) {
     const shapes = {
-      permission: '<polygon points="6,1.2 10.8,6 6,10.8 1.2,6"/><path d="M6 4v2.4M6 8.3h.01"/>',
-      failed_test: '<rect x="1.5" y="1.5" width="9" height="9"/><path d="M4 4l4 4M8 4l-4 4"/>',
-      quota_exhausted: '<path d="M2 10.5V7.2M6 10.5V4.4M10 10.5V1.8"/>',
-      no_signal: '<rect x="2" y="2" width="8" height="8" stroke-dasharray="2 2"/>',
-      resolved: '<rect x="1.5" y="1.5" width="9" height="9"/><path d="M3.5 6.3l1.7 1.7 3.3-3.6"/>',
+      permission: '<polygon class="na-glyph-cel" points="6,1.1 10.9,6 6,10.9 1.1,6"/><path d="M6 3.7v2.4M6 8.3h.01"/>',
+      failed_test: '<rect class="na-glyph-cel" x="1.4" y="1.4" width="9.2" height="9.2" rx="2"/><path d="M4.1 4.1l3.8 3.8M7.9 4.1l-3.8 3.8"/>',
+      quota_exhausted: '<rect class="na-glyph-cel" x="1.5" y="6.6" width="2.2" height="4" rx=".6"/><rect class="na-glyph-cel" x="4.9" y="4.2" width="2.2" height="6.4" rx=".6"/><rect class="na-glyph-cel" x="8.3" y="1.6" width="2.2" height="9" rx=".6"/>',
+      no_signal: '<rect class="na-glyph-cel" x="1.8" y="1.8" width="8.4" height="8.4" rx="2" stroke-dasharray="2.1 1.7"/>',
+      resolved: '<rect class="na-glyph-cel" x="1.4" y="1.4" width="9.2" height="9.2" rx="2"/><path d="M3.5 6.2l1.7 1.7 3.3-3.5"/>',
     };
-    const inner = shapes[kind] || '<rect x="2" y="2" width="8" height="8"/>';
+    const inner = shapes[kind] || '<rect class="na-glyph-cel" x="1.8" y="1.8" width="8.4" height="8.4" rx="2"/>';
     return `<svg class="na-glyph" viewBox="0 0 12 12" aria-hidden="true">${inner}</svg>`;
   }
 

@@ -173,3 +173,531 @@
   .trace-spread, .install-spread { gap: 1.5rem; }
   .trace-sheet summary { grid-template-columns: 4.5rem minmax(0,1fr) 1em; }
 }
+
+/* ===== NeuroSwarm Ink & Cel — Ligne Claire cartoon visual language =====
+   Strict brand palette: #192823 ink, #F5F2E8 paper, #166548 emerald, #BDF2C9 mint, #A84423 copper spot. */
+:root {
+  --toon-ink: var(--sc-ink, #192823);
+  --toon-paper: var(--sc-paper, #F5F2E8);
+  --toon-emerald: var(--sc-action, #166548);
+  --toon-mint: var(--sc-mint, #BDF2C9);
+  --toon-copper: var(--copper, #A84423);
+  --toon-r-sm: 6px;
+  --toon-r-md: 10px;
+  --toon-r-lg: 14px;
+  --toon-spring: cubic-bezier(.34, 1.45, .64, 1);
+  --toon-sh-xs: 2px 2px 0 var(--toon-ink);
+  --toon-sh-sm: 3px 3px 0 var(--toon-ink);
+  --toon-sh-md: 4px 4px 0 var(--toon-ink);
+  --toon-sh-lg: 6px 6px 0 var(--toon-ink);
+}
+
+/* Subtle archival risograph halftone dot texture on paper & dark hero bands */
+body {
+  background-color: var(--toon-paper);
+  background-image: radial-gradient(rgba(25, 40, 35, .055) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+
+/* Public field guide — Ligne Claire editorial cartoon framing */
+.folio-nav {
+  border-bottom: 2px solid var(--toon-mint);
+}
+.folio-brand .foil-mark,
+.topbar .foil-mark {
+  filter: drop-shadow(2px 2px 0 rgba(10, 18, 15, .65));
+}
+.folio-enter {
+  border: 2px solid var(--toon-mint);
+  border-radius: 999px;
+  background: rgba(189, 242, 201, .12);
+  color: var(--toon-paper);
+  box-shadow: 3px 3px 0 var(--toon-emerald);
+}
+.folio-hero {
+  background-color: var(--toon-ink);
+  background-image: radial-gradient(rgba(189, 242, 201, .09) 1.2px, transparent 1.2px);
+  background-size: 20px 20px;
+  border-bottom: 3px solid var(--toon-ink);
+}
+.folio-copy .folio-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border: 1.5px solid var(--toon-mint);
+  border-radius: 999px;
+  background: rgba(189, 242, 201, .12);
+  box-shadow: 2px 2px 0 var(--toon-emerald);
+}
+.folio-copy .folio-cta {
+  background: var(--toon-mint);
+  color: var(--toon-ink);
+  border: 2px solid var(--toon-ink);
+  border-radius: 999px;
+  box-shadow: 4px 4px 0 var(--toon-emerald);
+}
+.folio-art {
+  position: relative;
+  overflow: hidden;
+  aspect-ratio: 1.06;
+  background: var(--toon-paper);
+  border: 3px solid var(--toon-mint);
+  border-radius: 36px 36px 14px 14px;
+  box-shadow: 7px 7px 0 var(--toon-emerald);
+}
+.folio-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: var(--toon-paper);
+}
+
+/* Session walkthrough & Install spreads */
+.trace-spread {
+  background-color: var(--toon-paper);
+  background-image: radial-gradient(rgba(25, 40, 35, .055) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+.trace-spread .folio-label,
+.install-spread .folio-label,
+.access-heading .folio-label {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  width: fit-content;
+  padding: 3px 10px;
+  border: 1.5px solid var(--toon-ink);
+  border-radius: 999px;
+  background: var(--toon-mint);
+  color: var(--toon-ink);
+  box-shadow: var(--toon-sh-xs);
+}
+.trace-sheet {
+  border: 2px solid var(--toon-ink);
+  border-top: 5px solid var(--toon-emerald);
+  border-radius: var(--toon-r-lg);
+  box-shadow: var(--toon-sh-lg);
+  overflow: hidden;
+}
+.record-header {
+  border-bottom: 2px solid var(--toon-ink);
+  background: var(--sc-inset);
+  font-weight: 700;
+}
+.trace-sheet details {
+  border-top: 1.5px solid var(--toon-ink);
+}
+.trace-sheet details:first-of-type {
+  border-top: 0;
+}
+.trace-sheet summary span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 7px;
+  border: 1.5px solid var(--toon-ink);
+  border-radius: var(--toon-r-sm);
+  background: var(--toon-mint);
+  color: var(--toon-ink);
+  font-weight: 700;
+  box-shadow: 2px 2px 0 var(--toon-ink);
+}
+.record-body pre {
+  border: 1.5px solid var(--toon-ink);
+  border-radius: var(--toon-r-sm);
+  box-shadow: inset 2px 2px 0 rgba(25, 40, 35, .06);
+}
+
+.install-spread {
+  border-top: 2px solid var(--toon-ink);
+  background: var(--sc-surface);
+}
+.install-intro {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+.install-intro h2 {
+  margin-bottom: 0;
+}
+.install-art {
+  margin: 6px 0 0;
+  max-width: 420px;
+  overflow: hidden;
+  border: 2px solid var(--toon-ink);
+  border-radius: var(--toon-r-lg);
+  background: var(--toon-paper);
+  box-shadow: var(--toon-sh-lg);
+}
+.install-art img {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: var(--toon-paper);
+}
+.install-spread pre {
+  border: 2px solid var(--toon-ink);
+  border-radius: var(--toon-r-md);
+  box-shadow: 5px 5px 0 var(--toon-copper);
+}
+.install-spread .folio-cta {
+  background: var(--toon-emerald);
+  color: var(--sc-surface);
+  border: 2px solid var(--toon-ink);
+  border-radius: 999px;
+  box-shadow: var(--toon-sh-md);
+}
+
+/* Sign-in panel */
+.login-shell .signin-panel {
+  border-top: 2px solid var(--toon-ink);
+  background-color: var(--sc-inset);
+  background-image: radial-gradient(rgba(25, 40, 35, .06) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+.login-shell .login-card {
+  background: var(--sc-surface);
+  border: 2px solid var(--toon-ink);
+  border-radius: var(--toon-r-lg);
+  padding: clamp(18px, 2.4vw, 28px);
+  box-shadow: var(--toon-sh-lg);
+}
+.login-shell .auth-tabs {
+  border: 1.5px solid var(--toon-ink);
+  border-radius: var(--toon-r-md);
+  background: var(--toon-paper);
+}
+.login-shell .auth-tab.active {
+  background: var(--toon-mint);
+  color: var(--toon-ink);
+  border: 1.5px solid var(--toon-ink);
+  border-radius: var(--toon-r-sm);
+  box-shadow: var(--toon-sh-xs);
+}
+
+/* Control room dashboard — Ink & Cel cards, buttons, pills, nav & KPIs */
+.topbar {
+  background: var(--toon-ink);
+  border-bottom: 3px solid var(--toon-mint);
+  box-shadow: 0 3px 0 var(--toon-emerald);
+}
+.app-shell .card,
+.gate-card {
+  border: 2px solid var(--toon-ink);
+  border-top: 4px solid var(--toon-ink);
+  border-radius: var(--toon-r-lg);
+  box-shadow: 5px 5px 0 var(--toon-ink);
+  background-color: var(--sc-surface);
+  background-image: linear-gradient(135deg, var(--toon-copper) 0 7px, transparent 7.5px);
+  background-repeat: no-repeat;
+  background-size: 14px 14px;
+}
+.app-shell .card:hover {
+  border-color: var(--toon-ink);
+  box-shadow: 5px 5px 0 var(--toon-ink);
+}
+.app-shell .onboarding-card {
+  border: 2px solid var(--toon-ink);
+  border-top: 4px solid var(--toon-emerald);
+  border-radius: var(--toon-r-lg);
+  box-shadow: 5px 5px 0 var(--toon-ink);
+}
+.app-shell .onboarding-steps li {
+  border: 1.5px solid var(--toon-ink);
+  border-radius: var(--toon-r-md);
+  box-shadow: var(--toon-sh-xs);
+}
+.app-shell .step-num {
+  border: 1.5px solid var(--toon-ink);
+  box-shadow: 1.5px 1.5px 0 var(--toon-ink);
+}
+.app-shell .overview-head {
+  border-top: 3px solid var(--toon-ink);
+}
+.app-shell .kpi-grid {
+  display: grid;
+  gap: 10px;
+  background: transparent;
+  border: 0;
+}
+.app-shell .kpi {
+  border: 2px solid var(--toon-ink);
+  border-top: 4px solid var(--toon-emerald);
+  border-radius: var(--toon-r-md);
+  background: var(--sc-surface);
+  box-shadow: var(--toon-sh-sm);
+  padding: 13px 14px;
+}
+.app-shell .kpi + .kpi {
+  border-left: 2px solid var(--toon-ink);
+}
+.app-shell .kpi::after {
+  display: none;
+}
+.app-shell .kpi:hover {
+  background: var(--sc-surface);
+  border-top-color: var(--toon-copper);
+}
+
+/* Sidebar navigation with cel-shaded duo-tone SVG icons */
+.section-nav {
+  border-top: 2px solid var(--toon-ink);
+  gap: 4px;
+  padding-top: 6px;
+}
+.section-nav a {
+  border: 1.5px solid transparent;
+  border-radius: var(--toon-r-md);
+  padding: 7px 9px;
+}
+.section-nav a .ns-icon .ns-cel {
+  fill: var(--toon-mint);
+  stroke: none;
+}
+.section-nav a:hover {
+  background: var(--sc-surface);
+  border-color: var(--toon-ink);
+  box-shadow: var(--toon-sh-xs);
+  color: var(--toon-ink);
+}
+.app-shell .section-nav a.is-active {
+  background: var(--toon-mint);
+  color: var(--toon-ink);
+  border: 1.5px solid var(--toon-ink);
+  box-shadow: var(--toon-sh-sm);
+}
+.app-shell .section-nav a.is-active .ns-icon .ns-cel {
+  fill: var(--sc-surface);
+}
+
+/* Tactile comic-cel buttons, inputs & badges across Dashboard + Login */
+.app-shell .btn,
+.login-shell .btn,
+.gate-card .btn {
+  border: 1.5px solid var(--toon-ink);
+  border-radius: var(--toon-r-md);
+  box-shadow: var(--toon-sh-xs);
+}
+.app-shell .btn.primary,
+.login-shell .btn.primary,
+.gate-card .btn.primary {
+  background: var(--toon-emerald);
+  color: var(--sc-surface);
+  border-color: var(--toon-ink);
+  box-shadow: var(--toon-sh-sm);
+}
+.app-shell .btn.bar-btn {
+  border: 1.5px solid rgba(189, 242, 201, .55);
+  border-radius: var(--toon-r-sm);
+  box-shadow: 2px 2px 0 #0B1411;
+}
+.app-shell .live-cta-btn {
+  background: var(--toon-mint);
+  color: var(--toon-ink);
+  border: 1.5px solid var(--toon-ink);
+  box-shadow: 2.5px 2.5px 0 var(--toon-emerald);
+}
+.app-shell .live-cta-btn .live-dot {
+  background: var(--toon-emerald);
+}
+.app-shell .live-cta-btn:hover {
+  background: var(--sc-surface);
+  color: var(--toon-ink);
+  border-color: var(--toon-mint);
+}
+.app-shell input,
+.app-shell .select,
+.login-shell input,
+.login-shell .select {
+  border: 1.5px solid var(--toon-ink);
+  border-radius: var(--toon-r-md);
+  box-shadow: inset 2px 2px 0 rgba(25, 40, 35, .05);
+}
+.app-shell input:focus,
+.app-shell .select:focus,
+.login-shell input:focus,
+.login-shell .select:focus {
+  border-color: var(--toon-emerald);
+  box-shadow: 0 0 0 3px rgba(189, 242, 201, .65), var(--toon-sh-xs);
+}
+.app-shell .pill,
+.app-shell .section-fold-cue {
+  border: 1.5px solid var(--toon-ink);
+  border-radius: 999px;
+  box-shadow: 1.5px 1.5px 0 var(--toon-ink);
+}
+.app-shell .topbar .pill,
+.app-shell .topbar .org-pill {
+  border: 1.5px solid rgba(189, 242, 201, .65);
+  border-radius: 999px;
+  box-shadow: 2px 2px 0 #0B1411;
+}
+.app-shell .host-card,
+.app-shell .collab-change,
+.app-shell .report-card,
+.app-shell .install-box,
+.app-shell .notice-box,
+.app-shell .runtime-proof {
+  border: 1.5px solid var(--toon-ink);
+  border-radius: var(--toon-r-md);
+  box-shadow: var(--toon-sh-sm);
+}
+.app-shell .collab-task-card,
+.app-shell .host-meters,
+.app-shell .harness-tag {
+  border: 1.5px solid var(--toon-ink);
+  border-radius: var(--toon-r-sm);
+}
+.app-shell .meter-bar {
+  border: 1.5px solid var(--toon-ink);
+  height: 9px;
+}
+.app-shell .sub-tab {
+  border: 1.5px solid var(--toon-ink);
+  border-radius: var(--toon-r-sm);
+  box-shadow: 1.5px 1.5px 0 var(--toon-ink);
+}
+.app-shell .sub-tab.active {
+  background: var(--toon-ink);
+  color: var(--toon-mint);
+}
+.app-shell .cmdk-card,
+.shell .cmdk-card,
+.event-dialog,
+#incident-dialog {
+  border: 2px solid var(--toon-ink);
+  border-top: 5px solid var(--toon-copper);
+  border-radius: var(--toon-r-lg);
+  box-shadow: var(--toon-sh-lg);
+}
+.app-shell .toast,
+.shell .toast {
+  border: 2px solid var(--toon-mint);
+  border-radius: var(--toon-r-md);
+  box-shadow: 4px 4px 0 var(--toon-emerald);
+}
+
+/* Springy cartoon micro-interactions (disabled under prefers-reduced-motion) */
+@media (prefers-reduced-motion: no-preference) {
+  .folio-cta,
+  .folio-enter,
+  .app-shell .btn,
+  .login-shell .btn,
+  .app-shell .kpi,
+  .app-shell .host-card,
+  .section-nav a {
+    transition: transform 160ms var(--toon-spring), box-shadow 160ms var(--toon-spring), background 140ms ease, color 140ms ease, border-color 140ms ease;
+  }
+  .folio-copy .folio-cta:hover {
+    background: var(--sc-surface);
+    color: var(--toon-ink);
+    transform: translate(-2px, -2px);
+    box-shadow: 6px 6px 0 var(--toon-emerald);
+  }
+  .folio-copy .folio-cta:active {
+    transform: translate(2px, 2px);
+    box-shadow: 1px 1px 0 var(--toon-emerald);
+  }
+  .folio-enter:hover {
+    background: var(--toon-mint);
+    color: var(--toon-ink);
+    border-color: var(--toon-ink);
+    transform: translate(-1.5px, -1.5px);
+    box-shadow: 4.5px 4.5px 0 var(--toon-emerald);
+  }
+  .folio-enter:active {
+    transform: translate(2px, 2px);
+    box-shadow: 0 0 0 var(--toon-emerald);
+  }
+  .install-spread .folio-cta:hover {
+    background: var(--sc-action-hover);
+    color: var(--sc-surface);
+    transform: translate(-2px, -2px);
+    box-shadow: 6px 6px 0 var(--toon-ink);
+  }
+  .install-spread .folio-cta:active {
+    transform: translate(2px, 2px);
+    box-shadow: 1px 1px 0 var(--toon-ink);
+  }
+  .app-shell .btn:hover:not(:disabled),
+  .login-shell .btn:hover:not(:disabled) {
+    transform: translate(-1.5px, -1.5px);
+    box-shadow: 3.5px 3.5px 0 var(--toon-ink);
+  }
+  .app-shell .btn:active:not(:disabled),
+  .login-shell .btn:active:not(:disabled) {
+    transform: translate(1.5px, 1.5px);
+    box-shadow: 0 0 0 var(--toon-ink);
+  }
+  .app-shell .btn.bar-btn:hover:not(:disabled) {
+    transform: translate(-1px, -1px);
+    box-shadow: 3px 3px 0 #0B1411;
+  }
+  .app-shell .btn.bar-btn:active:not(:disabled) {
+    transform: translate(1px, 1px);
+    box-shadow: 0 0 0 #0B1411;
+  }
+  .app-shell .kpi:hover,
+  .app-shell .host-card:hover {
+    transform: translate(-1.5px, -1.5px);
+    box-shadow: 4.5px 4.5px 0 var(--toon-ink);
+  }
+  .folio-art img {
+    animation: toon-settle .75s var(--toon-spring) both;
+  }
+  @keyframes toon-settle {
+    from { opacity: .4; transform: translateY(10px) scale(.97); }
+    to { opacity: 1; transform: none; }
+  }
+}
+
+@media (max-width: 700px) {
+  .folio-art {
+    aspect-ratio: 1.08;
+    border-radius: 24px 24px 10px 10px;
+    box-shadow: 5px 5px 0 var(--toon-emerald);
+  }
+  .install-art {
+    max-width: 100%;
+    box-shadow: 4px 4px 0 var(--toon-ink);
+  }
+  .app-shell .card,
+  .login-shell .login-card,
+  .trace-sheet {
+    box-shadow: 4px 4px 0 var(--toon-ink);
+  }
+  .app-shell .kpi-grid {
+    gap: 8px;
+  }
+  .app-shell .kpi:nth-child(4) {
+    border-left: 2px solid var(--toon-ink);
+  }
+  .app-shell .kpi:nth-child(n+4) {
+    border-top: 4px solid var(--toon-emerald);
+  }
+  .app-shell .section-nav a.is-active {
+    padding: 6px 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .folio-art img,
+  .install-art img {
+    animation: none !important;
+  }
+  .folio-cta, .folio-enter, .app-shell .btn, .login-shell .btn, .app-shell .kpi, .app-shell .host-card {
+    transition: none !important;
+    transform: none !important;
+  }
+}
+
+@media (forced-colors: active) {
+  .folio-art, .install-art, .trace-sheet, .login-card, .app-shell .card, .app-shell .kpi, .app-shell .pill {
+    box-shadow: none;
+    border: 2px solid CanvasText;
+  }
+  .section-nav a .ns-icon .ns-cel {
+    fill: none;
+  }
+}

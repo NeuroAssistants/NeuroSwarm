@@ -1019,3 +1019,160 @@ dialog.event-dialog::backdrop {
 @media (forced-colors: active) {
   .shell .dtab.active { border-bottom: 2px solid CanvasText; }
 }
+
+/* ===== NeuroSwarm Ink & Cel polish for Live NOC (crisp outlines + tactile controls, flat high-density table) ===== */
+.shell {
+  --lv-spring: cubic-bezier(.34, 1.45, .64, 1);
+}
+.shell .topbar {
+  border-bottom: 3px solid var(--sc-mint);
+}
+.shell .btn,
+.shell .search,
+.shell .select,
+.shell .org-select,
+.shell .top-select,
+.shell .icon-btn,
+.shell .corr-btn,
+.shell .key-item,
+.shell .cmd-wrap,
+.shell .pre {
+  border-radius: 6px;
+}
+.shell .btn {
+  border: 1.5px solid var(--sc-ink);
+  box-shadow: 2px 2px 0 var(--sc-ink);
+}
+.shell .btn.bar-btn {
+  border: 1.5px solid rgba(189, 242, 201, .55);
+  box-shadow: 2px 2px 0 #0B1411;
+}
+.shell .btn.primary {
+  border-color: var(--sc-ink);
+  box-shadow: 2px 2px 0 var(--sc-ink);
+}
+.shell .btn.active {
+  background: var(--sc-mint);
+  color: var(--sc-ink);
+  border-color: var(--sc-ink);
+  box-shadow: 2px 2px 0 var(--sc-ink);
+}
+.shell .search,
+.shell .select {
+  border: 1.5px solid var(--sc-ink);
+}
+.shell .live-pill,
+.shell .title-chip,
+.shell .org-pill,
+.shell .role-pill,
+.shell .sev-pill,
+.shell .state-pill,
+.shell .kind-pill,
+.shell .cat-pill,
+.shell .rate-chip,
+.shell .filter-chip {
+  border-radius: 999px;
+}
+.shell .live-pill {
+  border: 1.5px solid var(--sc-mint);
+  box-shadow: 2px 2px 0 #0B1411;
+}
+.shell .live-pill i,
+.shell .dot {
+  border-radius: 50%;
+}
+.shell .col-sev {
+  width: 92px;
+}
+.shell .sev-pill,
+.shell .kind-pill,
+.shell .cat-pill,
+.shell .state-pill {
+  border: 1.5px solid var(--sc-ink);
+  padding: 1px 6px;
+}
+.shell .tree-btn {
+  border-radius: 7px;
+  border: 1.5px solid transparent;
+}
+.shell .tree-btn:hover {
+  background: var(--sc-surface);
+  border-color: var(--sc-ink);
+  box-shadow: 2px 2px 0 var(--sc-ink);
+}
+.shell .tree-btn.active {
+  background: var(--sc-ink);
+  color: var(--sc-mint);
+  border: 1.5px solid var(--sc-ink);
+  box-shadow: 2px 2px 0 var(--copper, var(--sc-action));
+}
+.shell .tree-cnt {
+  border-radius: 999px;
+  border: 1.5px solid var(--sc-ink);
+}
+.shell .sidebar {
+  border-inline-end: 2px solid var(--sc-ink);
+}
+.shell .pane-head,
+.shell .toolbar,
+.shell .detail-head {
+  border-bottom: 1.5px solid var(--sc-ink);
+}
+.shell .statusbar {
+  border-top: 1.5px solid var(--sc-ink);
+}
+.shell .dtab::after {
+  height: 3px;
+  border-radius: 2px;
+}
+.shell .tab-cnt {
+  border-radius: 999px;
+  border: 1.5px solid var(--sc-ink);
+}
+.shell .detail-msg {
+  border: 1.5px solid var(--sc-ink);
+  border-top: 3px solid var(--sc-action);
+  border-radius: 8px;
+  box-shadow: 2.5px 2.5px 0 var(--sc-ink);
+}
+.shell .corr-btn {
+  border: 1.5px solid var(--sc-ink);
+  box-shadow: 2px 2px 0 var(--sc-ink);
+}
+.shell .corr-btn:hover {
+  background: var(--sc-surface);
+  border-color: var(--sc-ink);
+  box-shadow: 3px 3px 0 var(--copper, var(--sc-action));
+}
+.shell .ev-section {
+  border: 1.5px solid var(--sc-ink);
+  border-radius: 10px;
+  box-shadow: 2.5px 2.5px 0 var(--sc-ink);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .shell .btn:hover:not(:disabled) {
+    transform: translate(-1px, -1px);
+    box-shadow: 3px 3px 0 var(--sc-ink);
+  }
+  .shell .btn:active:not(:disabled) {
+    transform: translate(1px, 1px);
+    box-shadow: 0 0 0 var(--sc-ink);
+  }
+  .shell .btn.bar-btn:hover:not(:disabled) {
+    transform: translate(-1px, -1px);
+    box-shadow: 3px 3px 0 #0B1411;
+  }
+  .shell .btn.bar-btn:active:not(:disabled) {
+    transform: translate(1px, 1px);
+    box-shadow: 0 0 0 #0B1411;
+  }
+}
+@media (forced-colors: active) {
+  .shell .btn,
+  .shell .tree-btn.active,
+  .shell .detail-msg,
+  .shell .corr-btn {
+    box-shadow: none;
+    border: 2px solid CanvasText;
+  }
+}

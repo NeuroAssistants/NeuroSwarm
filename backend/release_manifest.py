@@ -14,6 +14,7 @@ ASSETS = {
     "/instrument-serif.ttf": "font/ttf",
     "/identity.css": "text/css",
     "/swarm-fold.webp": "image/webp",
+    "/toon-workshop.webp": "image/webp",
     "/app.js": "application/javascript",
     "/activity.js": "application/javascript",
     "/needs-attention.js": "application/javascript",

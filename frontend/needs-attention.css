@@ -379,3 +379,127 @@
   .na-filter-btn { padding: 7px 8px 8px; letter-spacing: .06em; }
   .na-filter-btn::after { left: 8px; right: 8px; }
 }
+
+/* ===== NeuroSwarm Ink & Cel polish for Needs attention (204px reserved height preserved) ===== */
+#needs-attention {
+  --na-spring: cubic-bezier(.34, 1.45, .64, 1);
+}
+#needs-attention-body {
+  height: 204px;
+  padding: 2px 6px 4px 2px;
+}
+#needs-attention-body.is-expanded {
+  height: auto;
+  padding: 2px 4px 4px 2px;
+}
+#needs-attention .na-summary-bar {
+  border-bottom: 1.5px solid var(--carbon, var(--sc-ink));
+  padding-bottom: 6px;
+}
+#needs-attention .na-filters {
+  gap: 6px;
+  margin-bottom: 0;
+}
+#needs-attention .na-filter-btn {
+  padding: 5px 10px;
+  border: 1.5px solid transparent;
+  border-radius: 999px;
+  transition: transform 150ms var(--na-spring), box-shadow 150ms var(--na-spring), background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+#needs-attention .na-filter-btn::after {
+  display: none;
+}
+#needs-attention .na-filter-btn:hover {
+  background: var(--sc-surface);
+  border-color: var(--carbon, var(--sc-ink));
+  box-shadow: 2px 2px 0 var(--carbon, var(--sc-ink));
+}
+#needs-attention .na-filter-btn.active {
+  background: var(--sc-mint);
+  color: var(--carbon, var(--sc-ink));
+  border-color: var(--carbon, var(--sc-ink));
+  box-shadow: 2px 2px 0 var(--carbon, var(--sc-ink));
+}
+#needs-attention .na-filter-cnt {
+  border-radius: 999px;
+  border: 1.5px solid var(--carbon, var(--sc-ink));
+}
+#needs-attention .na-expand-btn {
+  border: 1.5px solid var(--carbon, var(--sc-ink));
+  border-radius: 8px;
+  box-shadow: 2px 2px 0 var(--carbon, var(--sc-ink));
+}
+#needs-attention .na-block {
+  border: 1.5px solid var(--carbon, var(--sc-ink));
+  border-top: 3px solid var(--carbon, var(--sc-ink));
+  border-radius: 10px;
+  box-shadow: 3px 3px 0 var(--carbon, var(--sc-ink));
+}
+#needs-attention .na-no-signal-block {
+  border: 1.5px dashed var(--carbon, var(--sc-ink));
+  border-top: 3px dashed var(--sc-control);
+  box-shadow: 3px 3px 0 rgba(25, 40, 35, .28);
+}
+#needs-attention .na-item {
+  border: 1.5px solid var(--carbon, var(--sc-ink));
+  border-top: 3px solid var(--sc-action);
+  border-radius: 9px;
+  box-shadow: 2.5px 2.5px 0 var(--carbon, var(--sc-ink));
+  transition: transform 150ms var(--na-spring), box-shadow 150ms var(--na-spring);
+}
+#needs-attention .na-item:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 3.5px 3.5px 0 var(--carbon, var(--sc-ink));
+  border-color: var(--carbon, var(--sc-ink));
+}
+#needs-attention .na-item.cat-permission { border-top-color: #B56A0D; }
+#needs-attention .na-item.cat-failed_test { border-top-color: var(--sc-critical-fg); }
+#needs-attention .na-item.cat-quota_exhausted { border-top-color: #8B4513; }
+#needs-attention .na-item.cat-no_signal { border-top-color: #5F6F69; }
+#needs-attention .na-item.is-resolved { border-top-color: var(--sc-ok-fg); }
+#needs-attention .na-glyph {
+  width: 12px;
+  height: 12px;
+  stroke-width: 1.65;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+#needs-attention .na-glyph-cel {
+  fill: rgba(255, 253, 247, .72);
+}
+#needs-attention .na-cat-pill {
+  border: 1.5px solid var(--carbon, var(--sc-ink));
+  border-radius: 999px;
+  box-shadow: 1.5px 1.5px 0 var(--carbon, var(--sc-ink));
+}
+#needs-attention .na-cause-tag,
+#needs-attention .na-chip {
+  border: 1.5px solid var(--carbon, var(--sc-ink));
+  border-radius: 6px;
+}
+#needs-attention .na-actions .btn {
+  border-radius: 7px;
+}
+#needs-attention .na-resolved-fold {
+  border: 1.5px solid var(--carbon, var(--sc-ink));
+  border-radius: 10px;
+  box-shadow: 2.5px 2.5px 0 var(--carbon, var(--sc-ink));
+}
+@media (prefers-reduced-motion: reduce) {
+  #needs-attention .na-item:hover,
+  #needs-attention .na-filter-btn:hover {
+    transform: none;
+  }
+}
+@media (forced-colors: active) {
+  #needs-attention .na-block,
+  #needs-attention .na-item,
+  #needs-attention .na-cat-pill,
+  #needs-attention .na-filter-btn.active {
+    box-shadow: none;
+    border: 2px solid CanvasText;
+  }
+  #needs-attention .na-glyph-cel {
+    fill: none;
+  }
+}

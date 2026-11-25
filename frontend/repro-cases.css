@@ -502,3 +502,89 @@
 @media (forced-colors: active) {
   #repro-cases .rc-case-item.is-selected { border: 2px solid CanvasText; }
 }
+
+/* ===== NeuroSwarm Ink & Cel polish for Reproducible cases ===== */
+#repro-cases {
+  --rc-spring: cubic-bezier(.34, 1.45, .64, 1);
+}
+#repro-cases .rc-safety-note {
+  border: 1.5px solid var(--carbon, var(--sc-ink));
+  border-top: 3px solid var(--sc-action);
+  border-radius: 10px;
+  box-shadow: 3px 3px 0 var(--carbon, var(--sc-ink));
+}
+#repro-cases .rc-summary-bar {
+  border-top: 2px solid var(--carbon, var(--sc-ink));
+  border-bottom: 1.5px solid var(--carbon, var(--sc-ink));
+}
+#repro-cases .rc-panel {
+  border: 1.5px solid var(--carbon, var(--sc-ink));
+  border-top: 3px solid var(--carbon, var(--sc-ink));
+  border-radius: 10px;
+  box-shadow: 3px 3px 0 var(--carbon, var(--sc-ink));
+}
+#repro-cases .rc-item {
+  border: 1.5px solid var(--carbon, var(--sc-ink));
+  border-top: 3px solid var(--sc-critical-fg);
+  border-radius: 9px;
+  box-shadow: 2.5px 2.5px 0 var(--carbon, var(--sc-ink));
+  transition: transform 150ms var(--rc-spring), box-shadow 150ms var(--rc-spring);
+}
+#repro-cases .rc-item:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 3.5px 3.5px 0 var(--carbon, var(--sc-ink));
+  border-color: var(--carbon, var(--sc-ink));
+}
+#repro-cases .rc-case-item {
+  border-top-color: var(--sc-action);
+}
+#repro-cases .rc-case-item.is-selected {
+  border: 2px solid var(--carbon, var(--sc-ink));
+  border-top: 3px solid var(--copper, var(--sc-action));
+  background-color: #F4FBF6;
+  box-shadow: 3.5px 3.5px 0 var(--copper, var(--sc-action));
+}
+#repro-cases .rc-chip {
+  border: 1.5px solid var(--carbon, var(--sc-ink));
+  border-radius: 6px;
+}
+#repro-cases .rc-verdict {
+  border: 1.5px solid var(--carbon, var(--sc-ink));
+  border-radius: 999px;
+  box-shadow: 1.5px 1.5px 0 var(--carbon, var(--sc-ink));
+}
+#repro-cases .rc-detail {
+  border: 2px solid var(--carbon, var(--sc-ink));
+  border-top-width: 4px;
+  border-radius: 12px;
+  box-shadow: 4px 4px 0 var(--carbon, var(--sc-ink));
+}
+#repro-cases .rc-meta-grid,
+#repro-cases .rc-form,
+#repro-cases .rc-compare-box,
+#repro-cases .rc-pre,
+#repro-cases .rc-diff,
+#repro-cases .rc-feedback {
+  border: 1.5px solid var(--carbon, var(--sc-ink));
+  border-radius: 8px;
+}
+#repro-cases .rc-pre-cmd {
+  box-shadow: 3px 3px 0 var(--copper, var(--sc-action));
+}
+#repro-cases .rc-actions .btn {
+  border-radius: 7px;
+}
+@media (prefers-reduced-motion: reduce) {
+  #repro-cases .rc-item:hover {
+    transform: none;
+  }
+}
+@media (forced-colors: active) {
+  #repro-cases .rc-panel,
+  #repro-cases .rc-item,
+  #repro-cases .rc-detail,
+  #repro-cases .rc-verdict {
+    box-shadow: none;
+    border: 2px solid CanvasText;
+  }
+}
