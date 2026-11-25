@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from datetime import datetime, timezone
+from itertools import product
 from pathlib import Path
 from unittest.mock import patch
 
@@ -34,8 +35,9 @@ class CommandClassificationTests(unittest.TestCase):
             project = Path(tmp) / "test project"
             project.mkdir()
             stamp = datetime.now(timezone.utc).isoformat()
-            for prefix in ("", f"cd {shlex.quote(str(project))} && "):
-                with self.subTest(prefix=prefix), closing(Database(":memory:")) as db:
+            prefixes = ("", f"cd {shlex.quote(str(project))} && ")
+            for prefix, native_reads in product(prefixes, (False, True)):
+                with self.subTest(prefix=prefix, native_reads=native_reads), closing(Database(":memory:")) as db:
                     sessions = []
                     for index, (cmd, program, expected) in enumerate(CASES):
                         recorded = prefix + cmd
@@ -47,6 +49,8 @@ class CommandClassificationTests(unittest.TestCase):
                         step = {"tool": "exec_command", "category": "shell", "label": "Run tests",
                                 "program": program, "command_input": recorded, "exit_code": 1,
                                 "status": "failed", "time": stamp}
+                        if native_reads and program in ("sed", "rg"):
+                            step.update(category="file_read", label="Read test_parser.py" if program == "sed" else "List or search files")
                         sessions.append({"session_id": f"codex:case-{index}", "harness": "codex",
                                          "agent_name": "qa", "workspace": str(project),
                                          "steps": [step], "capture_steps": [step]})
