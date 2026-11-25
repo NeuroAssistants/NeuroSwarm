@@ -112,6 +112,15 @@ class StepScopeTests(unittest.TestCase):
         blob = json.dumps(self.dbo.query_all("SELECT metadata_json, message FROM events"), default=str)
         self.assertNotIn("private-notes", blob)
 
+    def test_mixed_journal_roots_withhold_combined_output(self):
+        private = self.agent_dir / "private-notes.txt"
+        self.command(f"tail logs/app.log {private}", self.copy, "ready\nmine")
+        self.scan([self.copy])
+        meta, ev = self.events()["tail"]
+        self.assertEqual(meta["files"], ["product-feature/logs/app.log"])
+        self.assertIsNone(ev["command_output"])
+        self.assertIsNone(ev["command_input"])
+
     def test_files_outside_the_journal_roots_stay_out(self):
         """Journal roots narrower than the copy (only the project): the copy's files and output are not stored."""
         self.command("tail -n 2 logs/app.log", self.copy, "started\nready\n")

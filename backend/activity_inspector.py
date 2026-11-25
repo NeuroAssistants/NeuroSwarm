@@ -39,6 +39,8 @@ from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
 SCHEMA_VERSION = "1.0"
 HOME = Path(os.environ.get("SWARMCONTROL_ACTIVITY_HOME") or Path.home())
@@ -308,10 +310,16 @@ def _step(tool: str, label: Any, ts: Any = None) -> dict[str, Any]:
     return step
 
 
+_PYTHON_EXE = r"(?:\S*[/\\])?python(?:\d+(?:\.\d+)?)?(?:\.exe)?"
+_PYTHON_FLAGS = rf"^{_PYTHON_EXE}\s+(?:-[bBdEiIOPqRsSuvx]+\s+)*"
 CMD_KIND = [
-    (re.compile(r"\b(unittest|pytest|npm (?:run )?test|go test|cargo test)\b"), "Run tests"),
+    (re.compile(r"^(?:\S*[/\\])?(?:unittest|pytest|py\.test|npm (?:run )?test|go test|cargo test)(?=\s|$)"
+                rf"|{_PYTHON_FLAGS}-m\s*(?:unittest|pytest)(?=\s|$)"), "Run tests"),
     (re.compile(r"^(?:sudo\s+(?:-n\s+)?)?systemctl\b"), "Manage a service"),
-    (re.compile(r"^(?:python3?|python3\.\d+)\b"), "Run a Python script"),
+    (re.compile(_PYTHON_FLAGS + r"-c"), "Run inline Python"),
+    (re.compile(_PYTHON_FLAGS + r"-m"), "Run a Python module"),
+    (re.compile(_PYTHON_FLAGS + r"-(?=\s|$)"), "Run Python from standard input"),
+    (re.compile(rf"^{_PYTHON_EXE}(?=\s|$)"), "Run a Python script"),
     (re.compile(r"^(?:node|npx|npm)\b"), "Run a Node.js script"),
     (re.compile(r"^curl\b|^wget\b"), "Call a web address"),
     (re.compile(r"^git\b"), "Use Git"),
@@ -897,6 +905,11 @@ def _finish(card: dict[str, Any], steps: list[dict[str, Any]], edited: list[str]
     for step in steps:
         raw = step.pop("_shell", None)
         here = step.pop("_cwd", None)
+        # Recognize the effective directory only for an unambiguous single read.
+        if isinstance(raw, str) and here:
+            scoped_read = re.fullmatch(r"cd (/[-./\w]+) && cat ([-./\w]+)", raw.strip())
+            if scoped_read and not scoped_read[2].startswith("-") and ".." not in Path(scoped_read[2]).parts:
+                here = scoped_read[1]
         if here and _CAPTURE is not None and scope.contains(clean_path(here)):
             step["cwd"] = clean_path(here)  # read by the journal to resolve relative paths and the command's folder
         if raw and not step.get("files") and step.get("category") in ("shell", "file_read", "file_edit"):
@@ -982,7 +995,7 @@ def _recorded_file(raw: Any, card: dict[str, Any]) -> str:
     return safe if _scope().contains(safe) else ""
 
 
-def _codex_change(changes: Any, status: str, ts: Any, card: dict[str, Any]) -> dict[str, Any]:
+def _codex_change(changes: Any, status: str, ts: Any, cwd: str) -> dict[str, Any]:
     # Completed FileChange records (and older patch_apply_end events) supply paths
     # and the outcome separately from the patch/diff. A proposed patch is not an edit.
     paths = []
@@ -992,7 +1005,7 @@ def _codex_change(changes: Any, status: str, ts: Any, card: dict[str, Any]) -> d
             if not isinstance(entry, dict):
                 continue
             for target in (raw, entry.get("move_path")):
-                safe = _recorded_file(target, card)
+                safe = _codex_target(target, cwd)
                 if safe and safe not in paths:
                     paths.append(safe)
                     verbs.add("move" if entry.get("move_path") else str(entry.get("type")).lower())
@@ -1103,6 +1116,177 @@ def log_sources() -> list[dict[str, str]]:
 # --- Codex ---------------------------------------------------------------------------
 CODE_TOOL = re.compile(r"tools\.([a-z_]+)\(")
 CODE_PLAN_STEP = re.compile(r"step\s*:\s*\"((?:[^\"\\]|\\.){2,200})\"\s*,\s*status\s*:\s*\"([a-z_]+)\"")
+_CODEX_EDIT_TOOLS = {"edit", "edit_file", "write", "write_file", "multiedit", "notebookedit"}
+_CODEX_READ_TOOLS = {"read", "read_file", "view_image", "read_image"}
+_CODEX_FILE_TOOLS = _CODEX_EDIT_TOOLS | _CODEX_READ_TOOLS
+
+
+def _literal_shell_words(command: str) -> list[str]:
+    # Only a simple command. Guessing after cd, expansion, substitution, a pipe,
+    # redirection or a shell comment can associate an entirely different file.
+    if len(command) > 8192 or re.search(r"""[^\w \t.,/@%+:="'-]""", command):
+        return []
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return []
+
+
+def _codex_command_parts(raw, parsed) -> tuple[str, list[str]]:
+    """The full recorded input for evidence and literal argv, when available, for file attribution."""
+    if isinstance(raw, list) and raw and all(isinstance(arg, str) for arg in raw):
+        words = raw
+        command = shlex.join(words)
+    else:
+        command = raw if isinstance(raw, str) else ""
+        if not command and len(parsed) == 1 and isinstance(parsed[0].get("cmd"), str):
+            command = parsed[0]["cmd"]
+        words = _literal_shell_words(command)
+    if (len(words) >= 3 and Path(words[0]).name in {"sh", "bash", "dash", "zsh", "ksh"}
+            and words[1] in {"-c", "-lc", "-cl"}):
+        command = words[2]
+        words = _literal_shell_words(command)
+    return command, words
+
+
+def _command_file_operands(words: list[str]) -> list[str]:
+    """Filenames explicitly passed to tail or to the Python interpreter, never script arguments."""
+    if not words:
+        return []
+    program = Path(words[0]).name.lower().removesuffix(".exe")
+    args = iter(words[1:])
+    if re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", program):
+        for arg in args:
+            if arg in {"-W", "-X", "--check-hash-based-pycs"}:
+                next(args, None)
+            elif arg == "--" or not arg.startswith("-"):
+                script = next(args, "") if arg == "--" else arg
+                return [script] if script and script != "-" else []
+            elif not re.fullmatch(r"-(?:[bBdEiIOPqRsSuvx]+|[WX].+)", arg):
+                return []  # includes stdin, -c, -m, help and version
+        return []
+    if program != "tail":
+        return []
+
+    files = []
+    for arg in args:
+        if arg == "--":
+            files.extend(path for path in args if path and path != "-")
+            break
+        if arg in {"-n", "-c", "--lines", "--bytes"}:
+            if not re.fullmatch(r"[+-]?\d+[a-zA-Z]*", next(args, "")):
+                return []
+        elif arg.startswith("-") and arg != "-":
+            if not (re.fullmatch(r"-(?:[qvfF]+|\d+|[nc][+-]?\d+[a-zA-Z]*)", arg)
+                    or re.fullmatch(r"--(?:lines|bytes)=[+-]?\d+[a-zA-Z]*", arg)
+                    or arg in {"--quiet", "--silent", "--verbose", "--follow", "--follow=name",
+                               "--follow=descriptor", "--retry"}):
+                return []
+        elif arg and arg != "-":
+            files.append(arg)
+    return files
+
+
+def _codex_local_path(raw) -> str:
+    if not isinstance(raw, str) or len(raw) > 4096 or any(ord(c) < 32 for c in raw):
+        return ""
+    if not raw.startswith("file://"):
+        return raw
+    try:
+        uri = urlsplit(raw)
+        if uri.netloc not in ("", "localhost") or uri.query or uri.fragment:
+            return ""
+        path = url2pathname(uri.path)
+        return path if Path(path).is_absolute() and not any(ord(c) < 32 for c in path) else ""
+    except (ValueError, OSError):
+        return ""
+
+
+def _codex_target(raw, cwd) -> str:
+    """Use the call's directory and the same root-relative visibility rule as Files & Workspace."""
+    raw = _codex_local_path(raw)
+    cwd = _codex_local_path(cwd)
+    if not raw or (not Path(raw).is_absolute() and not _scope().contains(cwd)):
+        return ""
+    target = _recorded_file(raw, {"workspace": cwd})
+    if not target:
+        return ""
+    path = Path(target)
+    root = _scope().root_of(path)
+    if root is None:
+        return ""
+    try:
+        for spelling in (path, path.resolve()):
+            parts = spelling.relative_to(root).parts
+            if not parts or any(part.startswith(".") for part in parts):
+                return ""
+    except (ValueError, RuntimeError, OSError):
+        return ""
+    return target
+
+
+def _codex_command_step(item, cwd, stamp, read):
+    parsed = [p for p in item.get("parsed_cmd") or [] if isinstance(p, dict)]
+    kinds = {p.get("type") for p in parsed}
+    command, words = _codex_command_parts(item.get("command"), parsed)
+    # Each descriptor may record its own directory. A relative path after a cd
+    # in a compound shell command cannot safely use the launcher directory.
+    moved = re.search(r"(?:^|[\s(;|&])(?:cd|pushd|popd)(?=\s|$)", command)
+    withheld = False
+    files = []
+    native_operands = set()
+    for entry in parsed:
+        operand = entry.get("path")
+        if entry.get("type") != "read" or not isinstance(operand, str) or not operand:
+            continue
+        native_operands.add(operand)
+        if moved and not entry.get("cwd") and not Path(operand.removeprefix("file://")).is_absolute():
+            withheld = True
+            continue
+        target = _codex_target(operand, entry.get("cwd") or cwd)
+        if not target:
+            withheld = True
+        elif len(files) < 12 and target not in files:
+            files.append(target)
+    read.extend(files)
+    confirmed = len(files)
+    operands = _command_file_operands(words)
+    if len(operands) > 64:
+        withheld = True  # the public file list is bounded; do not ship output from unchecked operands
+    for operand in operands[:64]:
+        # argv contains native path spellings, not quoted/URI-encoded path metadata.
+        if operand in native_operands:
+            continue  # the descriptor supplied the directory for this operand
+        if operand.startswith("file://") or operand.strip(" \t'\"") != operand:
+            withheld = True
+            continue
+        target = _codex_target(operand, cwd)
+        if not target:
+            withheld = True
+        elif len(files) < 12 and target not in files:
+            files.append(target)
+
+    category = "file_read" if kinds and kinds <= {"read", "list_files", "search"} else "shell"
+    if kinds == {"read"}:
+        label = "Read " + (", ".join(Path(p).name for p in files)[:100] or "files")
+    elif category == "file_read":
+        label = "List or search files"
+    else:
+        label = command_kind(command or (parsed[0].get("cmd") if parsed else ""))
+    step = _step("exec_command", label, stamp)
+    step.update(category=category, files=files)
+    if len(files) > confirmed:
+        step["file_basis"] = "recorded"  # an argv operand alone does not prove a successful read or edit
+    evidence = execution_detail(command, None if withheld else item.get("aggregated_output"), item.get("exit_code"))
+    if withheld:
+        evidence.pop("command", None)
+        evidence.pop("command_input", None)
+    if cwd:
+        step["_cwd"] = cwd
+    if withheld or (words and Path(words[0]).name.lower().startswith(("python", "tail"))):
+        evidence.pop("_shell", None)  # explicit operand parser already handled these
+    step.update(evidence)
+    return step
 
 
 def codex_sessions(limit: int = 8) -> list[dict[str, Any]]:
@@ -1136,7 +1320,8 @@ def codex_sessions(limit: int = 8) -> list[dict[str, Any]]:
         read: list[str] = []
         delivered: list[str] = []
         legacy: list[dict[str, Any]] = []
-        change_slots: dict[str, int] = {}
+        change_slots: dict[str, tuple[int, str]] = {}
+        session_cwd = card.get("current_folder") or card["workspace"]
         path = Path(str(rollout or ""))
         if _CAPTURE is not None and (not rollout or _CAPTURE.unchanged(path)):
             continue  # nothing appended since the last scan
@@ -1158,16 +1343,18 @@ def codex_sessions(limit: int = 8) -> list[dict[str, Any]]:
                         change, status, key = item, str(item.get("status") or "unreported"), item.get("id")
                     normalized = {"failed": "error", "declined": "error", "error": "error", "completed": "completed",
                                   "in_progress": "running", "pending": "pending"}.get(status, "unreported")
-                    step = _codex_change(change.get("changes"), normalized, stamp, card)
                     slot = change_slots.get(key) if isinstance(key, str) else None
+                    directory = change.get("cwd") or change.get("workdir") or (slot[1] if slot else session_cwd)
+                    step = _codex_change(change.get("changes"), normalized, stamp, directory)
                     if slot is None:
                         if isinstance(key, str) and key:
-                            change_slots[key] = len(steps)
+                            change_slots[key] = len(steps), directory
                         steps.append(step)
                     elif kind == "item_completed" and normalized != "unreported":
-                        if steps[slot].get("src"):
-                            step["src"] = steps[slot]["src"]  # same edit, now final: keep its original identity
-                        steps[slot] = step
+                        index, _ = slot
+                        if steps[index].get("src"):
+                            step["src"] = steps[index]["src"]  # same edit, now final: keep its original identity
+                        steps[index] = step
                     continue
                 if kind == "item_completed" and isinstance(p.get("item"), dict):
                     # Structured items: readable intent, classified commands, tool calls.
@@ -1179,59 +1366,54 @@ def codex_sessions(limit: int = 8) -> list[dict[str, Any]]:
                             steps.append(_step("reasoning", heads[-1], stamp))
                             steps[-1]["category"] = "think"
                     elif t == "CommandExecution":
-                        parsed = [c for c in it.get("parsed_cmd") or [] if isinstance(c, dict)]
-                        kinds = {c.get("type") for c in parsed}
-                        read_start = len(read)
-                        for c in parsed:
-                            if c.get("type") == "read" and c.get("path"):
-                                directory = it.get("cwd") or card.get("current_folder") or card["workspace"]
-                                if path := _recorded_file(c["path"], {"workspace": directory}):
-                                    read.append(path)
-                        linked_reads = [p for raw in read[read_start:] if (p := _recorded_file(raw, card))][:12]
-                        label = ("Read " + (", ".join(Path(p).name for p in linked_reads)[:100] or "files")
-                                 if kinds == {"read"} else "List or search files" if kinds <= {"list_files", "search"}
-                                 and kinds else command_kind((parsed[0].get("cmd") if parsed else "") or
-                                                             (it.get("command") or ["", "", ""])[-1]))
-                        steps.append(_step("exec_command", label, stamp))
-                        raw_command = it.get("command")
-                        command = raw_command[-1] if isinstance(raw_command, list) and raw_command else raw_command
-                        command = str((parsed[0].get("cmd") if parsed else None) or command or "").strip()
-                        if isinstance(raw_command, list) and all(isinstance(arg, str) for arg in raw_command):
-                            if len(raw_command) > 2 and raw_command[1] in ("-c", "-lc", "-cl"):
-                                actual = raw_command[2]
-                            else:
-                                actual = shlex.join(raw_command)
-                        else:
-                            actual = raw_command or command
-                        steps[-1].update(execution_detail(actual or command, it.get("aggregated_output"), it.get("exit_code")))
-                        if isinstance(it.get("cwd"), str) and it["cwd"]:
-                            steps[-1]["_cwd"] = it["cwd"]
-                        steps[-1]["files"] = linked_reads
-                        steps[-1]["category"] = "file_read" if kinds and kinds <= {"read", "list_files", "search"} else "shell"
+                        steps.append(_codex_command_step(it, it.get("cwd") or it.get("workdir") or session_cwd, stamp, read))
                     elif t == "DynamicToolCall":
                         tool, args = str(it.get("tool") or "tool"), it.get("arguments") or {}
-                        if tool == "tool_call" and isinstance(args, dict) and args.get("name"):
+                        if _tool_key(tool) == "tool_call" and isinstance(args, dict) and args.get("name"):
                             tool, args = str(args["name"]), args.get("arguments") or {}
+                        key = _tool_key(tool)
+                        if isinstance(args, str) and key in _CODEX_FILE_TOOLS:
+                            try:
+                                args = json.loads(args)
+                            except ValueError:
+                                args = {}
                         if tool.endswith("attach_files_to_response") and isinstance(args, dict):
                             delivered += [str(x) for x in args.get("paths") or []]
-                        steps.append(_step(tool, tool.replace("_", " "), stamp))
-                        if _tool_key(tool) in {"view_image", "read_image", "read_file"} and isinstance(args, dict):
-                            path = _recorded_file(args.get("path") or args.get("file_path"), card)
-                            if path:
-                                read.append(path)
-                                steps[-1].update(category="file_read", files=[path], label="Read " + Path(path).name)
-                                if it.get("success") is True:
-                                    steps[-1]["status"] = "completed"
-                                if it.get("success") is False:
-                                    steps[-1]["status"] = "error"
-                                else:
-                                    previews = _tool_result_image(it, path)
-                                    if previews:
-                                        steps[-1]["image_previews"] = previews
-                                    elif _tool_key(tool) == "read_file":
-                                        snippets = _tool_result_text(it.get("result", it.get("content_items", it.get("output"))), path)
-                                        if snippets:
-                                            steps[-1]["text_previews"] = snippets
+                        step = _step(tool, tool.replace("_", " "), stamp)
+                        steps.append(step)
+                        if key not in _CODEX_FILE_TOOLS or not isinstance(args, dict):
+                            continue
+                        editing = key in _CODEX_EDIT_TOOLS
+                        step["category"] = "file_edit" if editing else "file_read"
+                        result = it.get("result")
+                        if (it.get("success") is False or it.get("status") in ("failed", "error", "declined", "cancelled")
+                                or isinstance(result, dict) and result.get("isError") is True):
+                            step["status"] = "error"
+                        elif it.get("success") is True or it.get("status") == "completed":
+                            step["status"] = "completed"
+                        if editing and step.get("status") != "completed":
+                            continue  # a write request alone is not a modification
+                        directory = args.get("workdir") or args.get("cwd") or it.get("cwd") or session_cwd
+                        raw = (args.get("file_path") or args.get("path") or args.get("Path") or
+                               args.get("target_file") or args.get("notebook_path"))
+                        target = _codex_target(raw, directory)
+                        if not target:
+                            continue
+                        if editing and (args.get("dryRun") is True or args.get("dry_run") is True):
+                            step.update(category="file_read", files=[target], file_basis="recorded",
+                                        label=f"Preview edit to {Path(target).name}")
+                            continue
+                        verb = "Write" if key in {"write", "write_file"} else "Edit" if editing else "Read"
+                        step.update(files=[target], label=f"{verb} {Path(target).name}")
+                        if not editing and step.get("status") != "error":
+                            read.append(target)
+                            previews = _tool_result_image(it, target)
+                            if previews:
+                                step["image_previews"] = previews
+                            elif key in {"read", "read_file"}:
+                                snippets = _tool_result_text(it.get("result", it.get("content_items", it.get("output"))), target)
+                                if snippets:
+                                    step["text_previews"] = snippets
                     elif t == "Extension" and it.get("query"):
                         steps.append(_step("web_search", f"Search: {it['query']}", stamp))
                     elif t == "AgentMessage":
@@ -1279,8 +1461,8 @@ def codex_sessions(limit: int = 8) -> list[dict[str, Any]]:
                     text = " ".join(b.get("text", "") for b in p.get("content") or [] if isinstance(b, dict))
                     if text.strip():
                         card["what_done"] = redact(text, 260)
-        edited = [path for step in steps if step["tool"] == "apply_patch" and step.get("status") == "completed"
-                  for path in step["files"]]
+        edited = [path for step in steps if step["category"] == "file_edit" and step.get("status") == "completed"
+                  for path in step.get("files", [])]
         out.append(_finish(card, steps or legacy, edited, read, delivered))
     return out
 

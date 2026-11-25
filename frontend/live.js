@@ -339,7 +339,7 @@
         command,
         currentFolder,
         message: String(r.message || r.title || CAT_LABELS[cat] || "Agent work"),
-        summary: program ? `Program: ${program}${files.length ? " · Files: " + files.join(", ") : ""}` : files.length ? files.join(", ") : String(r.message || ""),
+        summary: command || (program ? `Program: ${program}${files.length ? " · Files: " + files.join(", ") : ""}` : files.length ? files.join(", ") : String(r.message || "")),
         ackedBy: "",
         ackedAt: 0,
         sessionId: String(details.session || ""),
@@ -1226,6 +1226,9 @@
 
   /* ---------- On-Demand Event Evidence & Popup Investigation Modal ---------- */
   const evidenceInFlight = new Map();
+  const evidenceSlots = new WeakMap();
+  const evidenceReadAt = new WeakMap();
+  const EXECUTION_RECHECK_MS = 5000;
 
   function isSafeRasterImage(img) {
     if (!img || typeof img !== "object") return false;
@@ -1246,16 +1249,17 @@
     const evId = getEvidenceEventId(item);
     if (!evId || !orgId) return Promise.resolve(null);
     const cacheKey = `${orgId}:${evId}`;
-    if (!fresh && state.evidenceCache.has(cacheKey) && item.category !== "file_edit") {
-      return Promise.resolve(state.evidenceCache.get(cacheKey));
-    }
     if (evidenceInFlight.has(cacheKey)) {
       return evidenceInFlight.get(cacheKey);
+    }
+    if (!fresh && state.evidenceCache.has(cacheKey) && item.category !== "file_edit") {
+      return Promise.resolve(state.evidenceCache.get(cacheKey));
     }
     const qs = new URLSearchParams({ organization_id: String(orgId) });
     const req = api(`/api/v1/events/${encodeURIComponent(evId)}/evidence?${qs.toString()}`)
       .then((data) => {
         if (data && String(data.organization) === String(orgId) && String(data.event_id) === evId) {
+          evidenceReadAt.set(data, performance.now());
           state.evidenceCache.set(cacheKey, data);
           return data;
         }
@@ -1287,11 +1291,11 @@
                        : '<p class="muted">No verification recorded</p>'}</section>`);
     }
     const cmdIn = (ev && ev.command_input) || item.command || "";
-    const cmdOut = (ev && ev.command_output) || "";
+    const cmdOut = ev?.command_output;
     const hasExit = ev && ev.exit_code !== null && ev.exit_code !== undefined;
     const truncated = Boolean(ev && ev.output_truncated);
 
-    if (!opts.filesTab && (cmdIn || cmdOut || hasExit)) {
+    if (!opts.filesTab && (cmdIn || typeof cmdOut === "string" || hasExit)) {
       const exitBadge = hasExit
         ? `<span class="exit-pill ${Number(ev.exit_code) === 0 ? "ok" : "fail"}">Exit ${esc(ev.exit_code)}</span>`
         : "";
@@ -1309,7 +1313,7 @@
               ${cmdIn ? `<button type="button" class="btn" data-act="copy-ev-cmd" data-ev-key="${esc(item.key)}">Copy command</button>` : ""}
             </div>
             ${cmdIn ? `<pre class="ev-cmd-in">$ ${esc(cmdIn)}</pre>` : ""}
-            ${cmdOut ? `<pre class="ev-cmd-out">${esc(cmdOut)}</pre>` : '<pre class="ev-cmd-out muted">(no command output captured)</pre>'}
+            ${cmdOut ? `<pre class="ev-cmd-out">${esc(cmdOut)}</pre>` : `<pre class="ev-cmd-out muted">${cmdOut === "" ? "(captured output is empty)" : "(no command output captured)"}</pre>`}
           </div>
         </section>`);
     }
@@ -1382,34 +1386,61 @@
       el("files-count").textContent = String(mergedFiles.length);
       if (!mergedFiles.length) sections.unshift('<p class="muted">No file path was recorded for this event.</p>');
     }
+    if (!sections.length && ev && ["shell", "web"].includes(item.category)) {
+      const missing = item.category === "web"
+        ? "This event contains no captured request URL or response."
+        : "This event contains no captured command input, output or exit code.";
+      return `<p class="muted">${missing}</p>`;
+    }
     if (!sections.length && !opts.compact) {
       return '<p class="muted" style="margin:0;">No captured command output, images, or file previews recorded for this event.</p>';
     }
     return sections.join("");
   }
 
-  async function hydrateEvidenceSlot(item, slotEl, opts = {}) {
+  function refreshOpenCommandEvidence(force) {
+    for (const id of ["detail-evidence-slot", "event-dialog-evidence"]) {
+      const slot = el(id);
+      const binding = evidenceSlots.get(slot);
+      if (!binding || binding.opts.filesTab || (binding.opts.dialog && !eventDialog?.open)) continue;
+      const { item, opts } = binding;
+      if (!item.program || !["shell", "file_read"].includes(item.category)) continue;
+      const key = `${state.org?.id}:${getEvidenceEventId(item)}`;
+      const cached = state.evidenceCache.get(key);
+      if (!cached || (cached.command_output != null && cached.exit_code != null)) continue;
+      const now = performance.now();
+      if (!force && !evidenceInFlight.has(key) && now - evidenceReadAt.get(cached) < EXECUTION_RECHECK_MS) continue;
+      // A reply can enrich the existing event without advancing the feed cursor.
+      evidenceReadAt.set(cached, now);
+      hydrateEvidenceSlot(item, slot, opts, true);
+    }
+  }
+
+  async function hydrateEvidenceSlot(item, slotEl, opts = {}, refresh = false) {
     const evId = getEvidenceEventId(item);
     if (!slotEl || !evId || !state.org) return;
     const orgId = String(state.org.id);
     const cacheKey = `${orgId}:${evId}`;
     const expectedKey = item.key;
     const gen = state.generation;
-    if (state.evidenceCache.has(cacheKey) && item.category !== "file_edit") {
-      slotEl.innerHTML = renderEvidenceHtml(state.evidenceCache.get(cacheKey), item, opts);
-      return;
-    }
-    if (!opts.compact) {
+    evidenceSlots.set(slotEl, { item, opts });
+    const cached = state.evidenceCache.get(cacheKey);
+    if (!refresh && cached && item.category !== "file_edit") {
+      slotEl.innerHTML = renderEvidenceHtml(cached, item, opts);
+      if (!evidenceInFlight.has(cacheKey)) return;
+    } else if (!refresh && !opts.compact) {
       slotEl.innerHTML = '<p class="ev-loading">Loading captured command output, images &amp; previews…</p>';
     }
     try {
-      const ev = await fetchEventEvidence(item, orgId);
+      const ev = await fetchEventEvidence(item, orgId, refresh);
       if (gen !== state.generation || !slotEl.isConnected || slotEl.dataset.evKey !== expectedKey) return;
       if (opts.dialog && (state.eventModalKey !== expectedKey || state.eventModalOrg !== orgId)) return;
+      if (ev && JSON.stringify(ev) === JSON.stringify(cached) && item.category !== "file_edit") return;
       slotEl.innerHTML = renderEvidenceHtml(ev, item, opts);
     } catch (err) {
+      if (cached && item.category !== "file_edit") return;
       if (gen !== state.generation || !slotEl.isConnected || slotEl.dataset.evKey !== expectedKey) return;
-      if (!opts.compact) {
+      {
         slotEl.innerHTML = (opts.filesTab ? renderEvidenceHtml(null, item, opts) : "") + `<p class="ev-error">Could not load detailed evidence (${esc(err.message || "request failed")}).</p>`;
       }
     }
@@ -1542,7 +1573,7 @@
     if (!eventDialog.open) eventDialog.showModal();
     el("event-dialog-close")?.focus();
 
-    if (canFetchEv && !cachedEv) {
+    if (canFetchEv) {
       hydrateEvidenceSlot(item, el("event-dialog-evidence"), { includeFiles: true, dialog: true });
     }
   }
@@ -2217,6 +2248,7 @@
         : `Connected · Synced ${new Date().toLocaleTimeString()}`;
 
       if (!state.paused) {
+        refreshOpenCommandEvidence(forceAll);
         const canIncremental =
           feedRes.used &&
           !forceAll &&

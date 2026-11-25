@@ -648,7 +648,17 @@ def project_rows(
 
             # A session started in an agent's own folder can still run a command inside a shared folder: that command's
             # evidence is shared when it ran there, or when the files it named resolve inside the shared folders.
-            step_scoped = scoped or bool(all_files) or _step_in_scope(step.get("cwd"), project, extra_scope, root_index)
+            step_scoped = scoped
+            if project is not None:
+                if step.get("cwd"):
+                    step_scoped = _step_in_scope(step["cwd"], project, extra_scope, root_index)
+                # The inspector can see more than the journal may share. A mixed read's
+                # output cannot be partitioned by file, even if one operand is visible.
+                for path in step.get("files") or []:
+                    primary, extra, _ = journal_files([path], project, extra_scope, step_cwd)
+                    if not (primary or extra):
+                        step_scoped = False
+                        break
             if step_scoped and evidence_by_key is not None:
                 ref = event_evidence.step_reference(host_id, session_id, step)
                 shared_paths = []
