@@ -1140,6 +1140,17 @@
       formattedBody = formattedBody.slice(0, 2400) + "\n… (excerpt truncated)";
     }
 
+    // Every recorded response in order (302 -> 401). The recorded hops win; otherwise read the status lines.
+    let hops = Array.isArray(wr?.hops)
+      ? wr.hops.filter(h => h && Number.isInteger(h.status_code)).slice(0, 10)
+          .map(h => ({ code: h.status_code, text: String(h.status_text || ""), location: redactDisplayUrl(String(h.location || ""))?.display || (String(h.location || "").startsWith("/") ? String(h.location) : "") }))
+      : [];
+    if (!hops.length && cmdOut) {
+      const lines = [...cmdOut.replace(/\r\n/g, "\n").matchAll(/^HTTP\/(?:\d+(?:\.\d+)?)\s+(\d{3})(?:[ \t]+([^\n]*))?$/gm)]
+        .filter(m => m[1] !== "100");
+      if (lines.length > 1) hops = lines.slice(0, 10).map(m => ({ code: Number(m[1]), text: (m[2] || "").trim(), location: "" }));
+    }
+    if (hops.length < 2) hops = [];
     const exitCode = ev && ev.exit_code !== null && ev.exit_code !== undefined ? Number(ev.exit_code) : null;
     const isHttpError = statusCode !== null && statusCode >= 400;
     const exitZeroHttpError = isHttpError && exitCode === 0;
@@ -1154,6 +1165,7 @@
       formattedBody,
       isJson,
       exitCode,
+      hops,
     };
   }
 
@@ -1672,6 +1684,13 @@
       const headersHtml = httpTrace.responseHeaders
         ? `<details class="ev-http-headers"><summary>Response headers</summary><pre class="ev-text-pre">${esc(httpTrace.responseHeaders)}</pre></details>`
         : "";
+      const hopClass = code => code >= 400 ? "fail" : code >= 300 ? "warn" : "ok";
+      const hopsHtml = httpTrace.hops.length
+        ? `<ol class="ev-http-hops" aria-label="Redirect chain">${httpTrace.hops.map((h, i) => `<li data-hop="${i + 1}">
+            <span class="http-pill ${hopClass(h.code)}">HTTP ${esc(h.code)}${h.text ? " " + esc(h.text) : ""}</span>
+            ${h.location ? `<span class="ev-http-hop-to">→ <code>${esc(h.location)}</code></span>` : i < httpTrace.hops.length - 1 ? '<span class="muted">→ next response</span>' : '<span class="muted">final response</span>'}
+          </li>`).join("")}</ol>`
+        : "";
       const bodyHtml = httpTrace.formattedBody
         ? `<div class="ev-http-body-wrap"><div class="ev-text-head"><span>Response excerpt${httpTrace.isJson ? " (JSON)" : ""}</span>${ev?.output_truncated ? '<span class="trunc-pill">Truncated</span>' : ""}</div><pre class="ev-text-pre">${esc(httpTrace.formattedBody)}</pre></div>`
         : "";
@@ -1686,6 +1705,7 @@
           </h3>
           ${mismatchCallout}
           ${urlHtml}
+          ${hopsHtml}
           ${bodyHtml}
           ${headersHtml}
         </section>`);

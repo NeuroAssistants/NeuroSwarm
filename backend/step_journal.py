@@ -24,6 +24,7 @@ from activity_inspector import (
     CMD_KIND,
     NONTERMINAL,
     PROGRAM_RE,
+    clean_location,
     clean_url,
     evidence_text,
     is_sensitive_path,
@@ -404,6 +405,20 @@ def _web_resource(raw: Any) -> dict[str, Any] | None:
     code = raw.get("status_code")
     if type(code) is int and 100 <= code <= 599:
         out["status_code"] = code
+    hops = []
+    for hop in raw.get("hops") or [] if isinstance(raw.get("hops"), list) else []:
+        if not isinstance(hop, dict) or type(hop.get("status_code")) is not int or not 100 <= hop["status_code"] <= 599:
+            continue
+        clean: dict[str, Any] = {"status_code": hop["status_code"]}
+        if isinstance(hop.get("status_text"), str) and hop["status_text"].strip():
+            clean["status_text"] = redact(hop["status_text"], 80)
+        if where := clean_location(hop.get("location")):
+            clean["location"] = where
+        hops.append(clean)
+        if len(hops) >= 10:
+            break
+    if len(hops) > 1:
+        out["hops"] = hops
     if out.get("kind") == "credential":
         out = {"kind": "credential"}  # nothing of a credential step is kept
     return out

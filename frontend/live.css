@@ -1334,3 +1334,10 @@ dialog.event-dialog::backdrop {
     border: 2px solid CanvasText;
   }
 }
+
+/* HTTP redirect chain: each recorded response in order, the final one carries the response excerpt */
+.ev-http-hops { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 6px; counter-reset: hop; }
+.ev-http-hops li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; counter-increment: hop; }
+.ev-http-hops li::before { content: counter(hop); display: inline-grid; place-items: center; width: 20px; height: 20px; border: 1.5px solid currentColor; border-radius: 50%; font: 700 .7rem/1 var(--sc-mono, monospace); }
+.ev-http-hop-to { min-width: 0; overflow-wrap: anywhere; }
+.ev-http-hop-to code { font-size: .8rem; }
