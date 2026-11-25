@@ -609,8 +609,8 @@ def execution_detail(command, output, code):
             info["output_reason"] = "not_recorded"  # the runtime did not report an output for this call
         else:
             info.update(command_output=text, output_truncated=cut)
-            if not text.strip():
-                info["output_reason"] = "empty_output"
+            # A result that arrives after its call (Claude Code, Hermes) replaces the call's earlier "not_recorded".
+            info["output_reason"] = None if text.strip() else "empty_output"
     if names_no_file(command):
         info["files_reason"] = "no_file_target"
     web = http_resource(command, None if (protected or not share_output) else output, share_commands)

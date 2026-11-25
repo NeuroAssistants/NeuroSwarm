@@ -188,6 +188,7 @@ class HttpAcrossRuntimes(unittest.TestCase):
         self.assertEqual(json.loads(web["response_excerpt"]), {"error": "unauthorized", "hint": "sign in"}, runtime)
         detail = event_evidence.detail(self.dbo, 1, event_id)
         self.assertEqual(detail["exit_code"], 0 if exit_code_recorded else None, runtime)
+        self.assertNotIn("output_reason", meta, f"{runtime}: the output was recorded, so no missing-output reason")
         blob = json.dumps([meta, detail])
         for secret in ("bot:pw", "QUERY_SECRET_42", "REDIRECT_SECRET_77"):
             self.assertNotIn(secret, json.dumps(meta), f"{runtime}: {secret}")
