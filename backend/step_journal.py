@@ -367,6 +367,19 @@ def resolve_step_files(
     return primary, additional, extra_roots, base_label
 
 
+def _step_in_scope(cwd: Any, project: Any, extra_scope: Any, root_index: Any) -> bool:
+    """True when a step's own working folder is the project, one of the extra roots, or an approved root."""
+    if not isinstance(cwd, str) or not cwd.strip():
+        return False
+    try:
+        if project is not None:
+            resolved = Path(norm_abs_path(cwd) or cwd).resolve()
+            return resolved.is_relative_to(project) or bool(extra_scope and extra_scope.contains(str(resolved)))
+        return bool(root_index and _match_root(norm_abs_path(cwd), root_index))
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
 def ensure_journal_tables(db: Any) -> None:
     """Create unified journal tables and migrate legacy remote dedup digests if present."""
     event_evidence.ensure_tables(db)
@@ -633,7 +646,10 @@ def project_rows(
             else:
                 legacy = [r_v1_key]
 
-            if scoped and evidence_by_key is not None:
+            # A session started in an agent's own folder can still run a command inside a shared folder: that command's
+            # evidence is shared when it ran there, or when the files it named resolve inside the shared folders.
+            step_scoped = scoped or bool(all_files) or _step_in_scope(step.get("cwd"), project, extra_scope, root_index)
+            if step_scoped and evidence_by_key is not None:
                 ref = event_evidence.step_reference(host_id, session_id, step)
                 shared_paths = []
                 previews = [(field, item) for field in ("image_previews", "text_previews")

@@ -374,6 +374,67 @@ def command_info(cmd: Any) -> dict[str, str]:
     return out
 
 
+FILE_OPERAND_PROGRAMS = {
+    "cat", "head", "tail", "less", "more", "nl", "wc", "sed", "awk", "grep", "egrep", "rg", "diff", "cmp", "sort", "uniq",
+    "cut", "jq", "yq", "python", "python3", "node", "deno", "bun", "bash", "sh", "zsh", "ruby", "perl", "php", "pytest",
+    "black", "ruff", "mypy", "eslint", "tsc", "shellcheck", "cp", "mv", "tee", "touch", "rm", "chmod", "stat", "file",
+    "xxd", "hexdump", "md5sum", "sha256sum", "sqlite3", "pdftotext", "pdftoppm", "identify", "convert", "magick",
+}
+
+
+def command_files(command: Any, cwd: Any, limit: int = 6) -> list[str]:
+    """Existing files a shell command names as operands (`tail -n 20 app.log`, `python3 tools/run.py`, `cd x && cat y`).
+
+    Only programs that take files are considered, only arguments that resolve to an existing regular file count, and
+    the caller keeps only paths inside the shared folders. Nothing is read; the file is only checked to exist."""
+    c = str(command or "").strip()
+    unwrapped = re.match(r"""^(?:/\S*/)?(?:ba|z)?sh\s+-l?c\s+(['"])(.*)\1\s*$""", c, re.S)
+    if unwrapped:
+        c = unwrapped.group(2).strip()
+    here = clean_path(cwd) if cwd else ""
+    found: list[str] = []
+    for segment in re.split(r"\n|;|&&|\|\||\|", c)[:24]:
+        try:
+            tokens = shlex.split(segment, posix=True)
+        except ValueError:
+            tokens = segment.split()
+        while tokens and (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", tokens[0]) or tokens[0].rsplit("/", 1)[-1] in WRAPPERS
+                          or tokens[0] in KEYWORD_PREFIX):
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+        program = tokens[0].rsplit("/", 1)[-1]
+        if program == "cd":
+            target = tokens[1] if len(tokens) > 1 else ""
+            if target and not target.startswith(("~", "$", "-")):
+                base = Path(target) if Path(target).is_absolute() else (Path(here) / target if here else None)
+                here = clean_path(base) if base is not None else ""
+            continue
+        if re.fullmatch(r"python3?(?:\.\d+)?", program):
+            program = "python3"
+        if program not in FILE_OPERAND_PROGRAMS:
+            continue
+        for tok in tokens[1:]:
+            tok = tok.lstrip("<")
+            if (not tok or tok.startswith("-") or len(tok) > 400 or any(ch in tok for ch in "*?$`>{}")
+                    or re.match(r"^(?:[A-Za-z][\w+.-]*:|~)", tok)):
+                continue
+            candidate = Path(tok) if Path(tok).is_absolute() else (Path(here) / tok if here else None)
+            if candidate is None or ".." in candidate.parts:
+                continue
+            try:
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+            except OSError:
+                continue
+            path = clean_path(candidate)
+            if path and path not in found and redact(path, 401) == path:
+                found.append(path)
+                if len(found) >= limit:
+                    return found
+    return found
+
+
 _SECRET_ARGS = re.compile(r"""(?ix)(?<![\w.-])(-[upH]|--(?:password|passwd|pass|secret|token|user|api[-_]?key|header|auth))(?:=|\s+)(?:"[^"]*"|'[^']*'|[^\s]+)""")
 _SECRET_VALUE = re.compile(r"""(?ix)(\b(?:authorization|cookie|set-cookie|password|passwd|secret|access[_-]?token|api[_-]?key|token)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\r\n,;]+)""")
 _CONTROL_SEQ = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
@@ -438,6 +499,8 @@ def evidence_text(value, limit):
 
 def execution_detail(command, output, code):
     info = command_info(command)
+    if isinstance(command, str) and command.strip():
+        info["_shell"] = command[:4000]  # private: read for file operands in _finish, then removed
     if _CAPTURE is None:
         return info
     if type(code) is int:
@@ -830,6 +893,17 @@ def _finish(card: dict[str, Any], steps: list[dict[str, Any]], edited: list[str]
         card["capture_steps"] = steps  # every step read in this scan, not only the last ten shown on the map
 
     scope = _scope()
+    base = card.get("current_folder") or card.get("workspace")
+    for step in steps:
+        raw = step.pop("_shell", None)
+        here = step.pop("_cwd", None)
+        if here and _CAPTURE is not None and scope.contains(clean_path(here)):
+            step["cwd"] = clean_path(here)  # read by the journal to resolve relative paths and the command's folder
+        if raw and not step.get("files") and step.get("category") in ("shell", "file_read", "file_edit"):
+            operands = [p for p in command_files(raw, here or base) if scope.contains(p)]
+            if operands:
+                step["files"] = operands
+                step["file_basis"] = "recorded"  # named by the command; the command itself may not have used it
     for step in steps:
         if "files" in step:
             step["files"] = [p for p in step["files"] if scope.contains(p)]
@@ -1130,6 +1204,8 @@ def codex_sessions(limit: int = 8) -> list[dict[str, Any]]:
                         else:
                             actual = raw_command or command
                         steps[-1].update(execution_detail(actual or command, it.get("aggregated_output"), it.get("exit_code")))
+                        if isinstance(it.get("cwd"), str) and it["cwd"]:
+                            steps[-1]["_cwd"] = it["cwd"]
                         steps[-1]["files"] = linked_reads
                         steps[-1]["category"] = "file_read" if kinds and kinds <= {"read", "list_files", "search"} else "shell"
                     elif t == "DynamicToolCall":
@@ -1332,6 +1408,7 @@ def claude_sessions(limit: int = 6) -> list[dict[str, Any]]:
                             steps[-1]["native_call_ref"] = ref
                     if name == "Bash" and inp.get("command"):
                         steps[-1].update(execution_detail(inp["command"], None, None))
+                        steps[-1]["_cwd"] = cwd
                         if not inp.get("description"):
                             steps[-1]["label"] = command_kind(inp["command"])
                     if (name in CLAUDE_EDIT or name in CLAUDE_READ) and fp:
@@ -2462,6 +2539,10 @@ def _collect(t0: float) -> dict[str, Any]:
             if _CAPTURE is not None:
                 _CAPTURE.fail_reader(reader.__name__)  # keep its offsets: the next scan re-reads the same bytes
             continue
+    for s in sessions:
+        for step in (s.get("steps") or []) + (s.get("capture_steps") or []):
+            step.pop("_shell", None)
+            step.pop("_cwd", None)
     sessions.sort(key=lambda s: s["updated_at"], reverse=True)
     if _CAPTURE is None:
         sessions = sessions[:20]  # the map shows the most recent; the journal needs every changed session

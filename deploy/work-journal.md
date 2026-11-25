@@ -10,6 +10,10 @@ The journal keeps observed actions for up to seven days, subject to the instance
 
 To include linked files from another shared project in the persisted history, explicitly set `SWARMCONTROL_JOURNAL_ROOTS` on the journal service. List absolute folders separated by the platform path separator (`:` on Linux). The inspector must also be configured to observe them. Secondary files display as `project-name/relative/path`; the primary project keeps its existing relative paths. Changes apply to newly recorded actions.
 
+Agents often start their session in their own folder and run commands inside a working copy of the project (for example a Git worktree next to it). The journal decides per command: a command's files, input and output are kept when the command ran inside the project or a journal root, or when the files it names resolve there. A command that only ran and read inside an agent's own folder keeps neither. If working copies live next to the project, list their parent folder in `SWARMCONTROL_JOURNAL_ROOTS`; otherwise their files and output are not kept and Live shows "No file path was recorded".
+
+For shell commands, the files a command names as operands (`tail -n 20 logs/app.log`, `python3 tools/run.py`, `cd copy && cat notes.txt`) are listed with the event when they exist as regular files inside the shared folders. Nothing is read to find them; links and `..` paths are never followed.
+
 With `SWARMCONTROL_SHARE_COMMANDS=1`, the list can show a short operation such as `git diff`. Open the event to see its recorded command input with common secrets masked. The settings and limits for each kind of detail are listed below.
 
 ## Incremental capture
