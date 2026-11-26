@@ -506,3 +506,26 @@
   .ap-glyph { border-color: CanvasText; }
 }
 #activity-map .ap-empty a { color: var(--sc-action); font-weight: 700; text-underline-offset: 3px; }
+
+/* Team: who replied to whom, from recorded messages only */
+#activity-map .tm-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin: 0 0 12px; }
+#activity-map .tm-pick { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; max-width: 100%; }
+#activity-map .tm-pick select { max-width: min(520px, 70vw); font: inherit; padding: 6px 10px; border: 2px solid var(--toon-ink, var(--sc-ink)); border-radius: 999px; background: var(--sc-surface); }
+#activity-map .tm-graph svg { min-width: 0; max-height: 460px; }
+#activity-map .tm-edge path { fill: none; stroke: var(--sc-action); opacity: .85; }
+#activity-map .tm-edge text { font: 700 11px var(--sc-mono); fill: var(--toon-ink, var(--sc-ink)); paint-order: stroke; stroke: var(--sc-surface); stroke-width: 4px; }
+#activity-map .tm-edge:hover path { stroke: var(--copper, var(--sc-action)); opacity: 1; }
+#activity-map #tm-arrow path { fill: var(--sc-action); }
+#activity-map .tm-node circle { fill: var(--sc-mint); stroke: var(--toon-ink, var(--sc-ink)); stroke-width: 2.5; }
+#activity-map .tm-node .tm-shade { fill: var(--toon-ink, var(--sc-ink)); stroke: none; }
+#activity-map .tm-node text { font: 700 13px var(--sc-sans); fill: var(--toon-ink, var(--sc-ink)); }
+#activity-map .tm-node text.sub { font-size: 11px; font-weight: 600; }
+#activity-map .tm-talk > summary { gap: 6px 10px; }
+#activity-map .tm-msgs { list-style: none; margin: 0; padding: 6px 14px 12px; display: grid; gap: 10px; }
+#activity-map .tm-msgs li { display: grid; gap: 4px; overflow-wrap: anywhere; border-top: 1px dashed var(--sc-line); padding-top: 8px; }
+#activity-map .tm-msgs time { font: .76rem var(--sc-mono); color: var(--sc-muted); }
+#activity-map .tm-msgs p, #activity-map .tm-last { margin: 0; }
+#activity-map .tm-msgs blockquote { margin: 0; padding-left: 10px; border-left: 3px solid var(--sc-line); color: var(--sc-muted); font-size: .86rem; }
+#activity-map .tm-tasks { margin: 0 0 6px; padding-left: 1.1em; display: grid; gap: 4px; font-size: .86rem; }
+#activity-map .tm-msgs .ap-evidence, #activity-map .tm-msgs time { justify-self: start; }
+#activity-map .tm-reason { margin: 2px 0 0; font-size: .86rem; color: var(--sc-muted); }

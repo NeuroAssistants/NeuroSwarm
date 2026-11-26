@@ -179,6 +179,30 @@ class PortableScopeTests(unittest.TestCase):
         self.assertIn("brand-tokens.css", names)
         self.assertNotIn(".env", names)
 
+    def test_console_machine_and_remote_observers_share_the_map(self):
+        """A first remote observer must not hide the console machine's own agents (the map looked empty in production
+        once a Windows observer connected). A remote observer with the same host ID wins for that host."""
+        self.fx.claude(self.fx.alpha)
+        local = self.snap(self.fx.scope(self.fx.alpha, host="console-box"))
+        (self.fx.home / ".claude").rename(self.fx.home / ".claude-a")
+        self.fx.codex(self.fx.demo)
+        remote = self.snap(self.fx.scope(self.fx.demo, host="win-box"))
+        tenant = Database(Path(self.tmp.name) / "tenant-merge.sqlite3")
+        remote_activity.ingest_remote_activity(tenant, remote)
+        d = remote_activity.build_tenant_activity_map(tenant, local_snapshot=local)
+        self.assertEqual({h["host_id"] for h in d["hosts"]}, {"console-box", "win-box"})
+        self.assertEqual({(s["host_id"], s["agent_name"]) for s in d["sessions"]},
+                         {("console-box", "project-alpha"), ("win-box", "equipo-demo")})
+        self.assertEqual(d["summary"]["sessions"], 2)
+        self.assertEqual(next(h for h in d["hosts"] if h["host_id"] == "console-box")["capture_reader"], "console")
+        # Same host ID reported by a remote observer: the observer's snapshot is used, not a duplicate.
+        local_same = {**local, "hosts": [{**local["hosts"][0], "host_id": "win-box"}]}
+        d2 = remote_activity.build_tenant_activity_map(tenant, local_snapshot=local_same)
+        self.assertEqual([h["host_id"] for h in d2["hosts"]], ["win-box"])
+        # No remote observers: unchanged behaviour (the local snapshot is the map).
+        empty = Database(Path(self.tmp.name) / "tenant-empty.sqlite3")
+        self.assertIs(remote_activity.build_tenant_activity_map(empty, local_fallback=local, local_snapshot=local), local)
+
     def test_snapshot_is_accepted_by_remote_ingestion_for_two_hosts(self):
         """Two machines, two generic folders, one organization map; nothing from the server's own disk."""
         self.fx.claude(self.fx.alpha)

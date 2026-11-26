@@ -342,10 +342,16 @@ class TenantHTTPTests(unittest.TestCase):
                 self.assertEqual(self.api(200, "GET", "activity", cookie=legacy)[0], marker)
                 ingest = self.machine(legacy, "observer")["token"]
                 self.api(200, "POST", "ingest/activity", {"host_id": "enrolled-machine"}, token=ingest)
+                # The console machine's own agents stay on the map next to the first enrolled observer
+                # (replacing them made the map look empty once a remote machine connected).
+                merged = self.api(200, "GET", "activity", cookie=legacy)[0]
+                self.assertEqual({h["hostname"] for h in merged["hosts"]}, {"enrolled-machine", "legacy-local-marker"})
+                # Another organization still never receives the local scan.
                 self.assertNotIn(
-                    "legacy-local-marker", json.dumps(self.api(200, "GET", "activity", cookie=legacy)[0])
+                    "legacy-local-marker",
+                    json.dumps(self.api(200, "GET", "work-board?include=activity", cookie=customer)[0]),
                 )
-                local_scan.assert_called_once()
+                self.assertEqual(local_scan.call_count, 2)
 
     def test_expired_invite_and_session_and_failed_bind_rollback(self):
         _, cookie = self.register("team-north")

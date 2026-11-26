@@ -29,7 +29,7 @@
   const CAT_LABEL = { file_edit: "Edit files", file_read: "Read files", shell: "Run commands", web: "Web & browser",
     coordination: "Coordinate", plan: "Plan", think: "Reason", visual: "Images", other: "Other" };
   const SUBSTANTIVE = new Set(["file_edit", "shell", "file_read", "web", "visual"]);
-  const VIEWS = [["overview", "Overview"], ["timeline", "Timeline"], ["sessions", "Sessions"], ["folders", "Folders"]];
+  const VIEWS = [["overview", "Overview"], ["team", "Team"], ["timeline", "Timeline"], ["sessions", "Sessions"], ["folders", "Folders"]];
   const WINDOWS = [[900, "15 min"], [3600, "1 h"], [21600, "6 h"], [86400, "24 h"]];
   const _initParams = new URLSearchParams(window.location.search);
   const _initView = VIEWS.some(([v]) => v === _initParams.get("am_view")) ? _initParams.get("am_view") : (_initParams.get("am_session") ? "sessions" : "overview");
@@ -601,10 +601,96 @@
       ${state.query ? `<p class="ap-matchline" role="status">${shown} of ${total} sessions match “${H(state.query)}” <button type="button" class="ap-link" data-clear>Clear</button></p>` : ""}`;
   }
 
+  /* ---------- team: who talks to whom, about which mission, with which task ----------
+     Built only from recorded messages (/api/v1/missions): a reply names its recipient, a task names its owner.
+     Nothing is inferred from timing. */
+  const team = { data: null, at: 0, loading: false, status: "", mission: "all" };
+  function loadTeam(force = false) {
+    if (team.loading || (!force && team.data && Date.now() - team.at < 30000)) return;
+    team.loading = true;
+    fetch("/api/v1/missions", { credentials: "same-origin", cache: "no-store" })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(String(r.status))))
+      .then(j => { team.data = j; team.status = j.shared_channel || "connected"; })
+      .catch(() => { team.data = team.data || { missions: [] }; team.status = "unavailable"; })
+      .finally(() => { team.loading = false; team.at = Date.now(); if (state.view === "team") render(state.data, true); });
+  }
+  function teamView() {
+    if (!team.data) { loadTeam(); return `<div class="ap-skeleton" role="status" aria-label="Loading team conversations"><span></span><span></span></div>`; }
+    loadTeam();
+    const missions = (team.data.missions || []).filter(m => (m.events || []).length);
+    if (!missions.length) {
+      return `<div class="ap-empty ap-empty--soft" role="status"><h3>No agent conversation recorded yet</h3>
+        <p>Replies between agents appear here when a shared OpenBot channel is connected (<code>SWARMCONTROL_OPENBOT_CHANNEL_ID</code> with <code>SWARMCONTROL_SHARE_MISSION_UPDATES=1</code>) or when agents report <code>agent_message</code> events.${team.status && team.status !== "connected" ? ` Shared channel: ${H(team.status)}.` : ""}</p></div>`;
+    }
+    const chosen = team.mission === "all" ? missions : missions.filter(m => m.id === team.mission);
+    const events = chosen.flatMap(m => m.events.map(e => ({ ...e, mission: m })));
+    const agents = new Map();
+    const touch = (name) => { if (!name) return null; if (!agents.has(name)) agents.set(name, { name, sent: 0, received: 0, tasks: new Map(), last: null }); return agents.get(name); };
+    const edges = new Map();
+    for (const e of events) {
+      const a = touch(e.agent);
+      if (!a) continue;
+      a.sent += 1;
+      if (!a.last || e.time > a.last.time) a.last = e;
+      if (e.owner && e.task) touch(e.owner).tasks.set(e.task_id || e.task, { task: e.task, state: e.state || "" });
+      if (e.to && e.to !== e.agent) {
+        touch(e.to).received += 1;
+        const k = `${e.agent}→${e.to}`;
+        const edge = edges.get(k) || { from: e.agent, to: e.to, msgs: [] };
+        edge.msgs.push(e);
+        edges.set(k, edge);
+      }
+    }
+    const names = [...agents.keys()].sort((x, y) => (agents.get(y).sent + agents.get(y).received) - (agents.get(x).sent + agents.get(x).received)).slice(0, 12);
+    const W = 640, Hh = 420, cx = W / 2, cy = Hh / 2, R = Math.min(cx, cy) - 70;
+    const pos = Object.fromEntries(names.map((n, i) => { const t = -Math.PI / 2 + i * 2 * Math.PI / Math.max(1, names.length);
+      return [n, [cx + R * Math.cos(t), cy + R * Math.sin(t)]]; }));
+    const maxCount = Math.max(1, ...[...edges.values()].map(e => e.msgs.length));
+    const arrows = [...edges.values()].filter(e => pos[e.from] && pos[e.to]).map(e => {
+      const [x1, y1] = pos[e.from], [x2, y2] = pos[e.to];
+      const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1, nx = -dy / len, ny = dx / len;
+      const bend = 26, mx = (x1 + x2) / 2 + nx * bend, my = (y1 + y2) / 2 + ny * bend;  // both directions stay apart
+      const r = 30, sx = x1 + dx / len * r, sy = y1 + dy / len * r, ex = x2 - dx / len * (r + 6), ey = y2 - dy / len * (r + 6);
+      const w = (1.6 + 3.4 * e.msgs.length / maxCount).toFixed(1);
+      return `<g class="tm-edge" data-edge="${H(e.from)}→${H(e.to)}"><path d="M${sx.toFixed(1)} ${sy.toFixed(1)} Q${mx.toFixed(1)} ${my.toFixed(1)} ${ex.toFixed(1)} ${ey.toFixed(1)}" stroke-width="${w}" marker-end="url(#tm-arrow)"/>
+        <text x="${mx.toFixed(1)}" y="${(my + 4).toFixed(1)}" text-anchor="middle">${e.msgs.length}</text><title>${H(e.from)} → ${H(e.to)}: ${e.msgs.length} message${e.msgs.length === 1 ? "" : "s"}</title></g>`;
+    }).join("");
+    const nodes = names.map(n => {
+      const a = agents.get(n), [x, y] = pos[n], label = short(n);
+      return `<g class="tm-node" transform="translate(${x.toFixed(1)} ${y.toFixed(1)})"><circle class="tm-shade" cx="3" cy="3" r="28"/><circle r="28"/>
+        <text y="4" text-anchor="middle">${H(label.slice(0, 2).toUpperCase())}</text>
+        <text class="sub" y="46" text-anchor="middle">${H(label.length > 18 ? label.slice(0, 17) + "…" : label)}</text><title>${H(n)} · sent ${a.sent}, received ${a.received}</title></g>`;
+    }).join("");
+    const graph = names.length ? `<div class="am-flow tm-graph"><svg viewBox="0 0 ${W} ${Hh}" role="img" aria-label="Who replied to whom">
+      <defs><marker id="tm-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z"/></marker></defs>${arrows}${nodes}</svg></div>` : "";
+    const fmt = t => t ? new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+    const missionHref = m => `/missions?mission=${encodeURIComponent(m.id)}`;
+    const roster = names.map(n => { const a = agents.get(n);
+      const tasks = [...a.tasks.values()].slice(0, 3).map(t => `<li>${H(t.task)}${t.state ? ` <span class="ap-evidence">${H(t.state)}</span>` : ""}</li>`).join("");
+      return `<article class="am-ws tm-agent"><header><strong>${H(n)}</strong><span class="muted small">${a.sent} sent · ${a.received} received${a.last ? ` · last ${H(fmt(a.last.time))}` : ""}</span></header>
+        ${tasks ? `<h5>Working on</h5><ul class="tm-tasks">${tasks}</ul>` : ""}
+        ${a.last ? `<h5>Latest</h5><p class="tm-last"><span class="ap-evidence">${H(a.last.kind || "Update")}</span> ${H(a.last.text || "")}</p>${a.last.reason ? `<p class="tm-reason">Stated reason: ${H(a.last.reason)}</p>` : ""}` : ""}</article>`; }).join("");
+    const talks = [...edges.values()].sort((x, y) => Math.max(...y.msgs.map(m => m.time)) - Math.max(...x.msgs.map(m => m.time))).slice(0, 12).map((e, idx) => {
+      const msgs = e.msgs.sort((x, y) => y.time - x.time).slice(0, 4).map(m => `<li><time>${H(fmt(m.time))}</time> <span class="ap-evidence">${H(m.kind || "Reply")}</span>
+          ${m.parent_text ? `<blockquote>${H(m.to)}: ${H(m.parent_text)}</blockquote>` : ""}<p>${H(m.text || "")}</p>${m.reason ? `<p class="tm-reason">Stated reason: ${H(m.reason)}</p>` : ""}
+          <a class="ap-link" href="${missionHref(m.mission)}">${H(m.mission.title || "Mission")} →</a></li>`).join("");
+      return `<details class="am-session tm-talk"${idx === 0 ? " open" : ""}><summary><strong>${H(e.from)}</strong> → <strong>${H(e.to)}</strong><span class="muted small">${e.msgs.length} message${e.msgs.length === 1 ? "" : "s"}</span></summary>
+        <ol class="tm-msgs">${msgs}</ol></details>`; }).join("");
+    const picker = `<label class="tm-pick">Mission <select data-team-mission><option value="all">All recent missions (${missions.length})</option>${missions.slice(0, 30)
+      .map(m => `<option value="${H(m.id)}"${team.mission === m.id ? " selected" : ""}>${H((m.title || m.id).slice(0, 90))}</option>`).join("")}</select></label>`;
+    return `<div class="tm-head">${picker}<a class="ap-link" href="/missions${team.mission !== "all" ? `?mission=${encodeURIComponent(team.mission)}` : ""}">Mission timeline →</a></div>
+      ${graph}
+      <div class="ap-section-head"><h3>Conversations</h3><span class="muted small">Replies with a named recipient, newest first</span></div>
+      <div class="am-sessions">${talks || '<p class="muted">No reply between two agents in this selection yet.</p>'}</div>
+      <h3>Who does what</h3><div class="am-ws-grid">${roster}</div>
+      <p class="muted small">Only what agents posted and replied to is shown. Reasons and decisions appear as the agents wrote them; nothing is inferred from timing.</p>`;
+  }
+
   function render(d = state.data, force = false) {
     if (!d) return;
     const print = JSON.stringify([d.sessions.map(s => [s.session_id, s.updated_at, s.status, s.steps.length]), d.hosts.map(h => [h.host_id, h.activity_enabled, h.activity_roots.length]),
-      d.workspaces.map(w => [w.id, w.last_modified]), state.host, state.agent, state.view, state.query, state.span, [...state.open], state.highlightSession, state.fromTaskId, Object.keys(state.linksBySession).sort()]);
+      d.workspaces.map(w => [w.id, w.last_modified]), state.host, state.agent, state.view, state.query, state.span, [...state.open], state.highlightSession, state.fromTaskId, Object.keys(state.linksBySession).sort(),
+      state.view === "team" ? [team.at, team.mission, team.status] : 0]);
     if (!force && print === state.print) { tick(); return; }  // nothing changed: keep hover, focus and scroll
     state.print = print;
     const searchHadFocus = document.activeElement?.dataset?.role === "search";
@@ -630,7 +716,8 @@
     const cards = list => list.map((s, i) => card(s, d).replace('<article class="am-agent-card"',
       `<article class="am-agent-card${state.fresh.size && s.steps.some(st => state.fresh.has(stepKey(s, st))) ? " is-new" : ""}" style="--i:${Math.min(i, 12)}"`)).join("");
     let body;
-    if (!scoped.length && state.view !== "folders") body = emptyState(d);
+    if (state.view === "team") body = teamView();
+    else if (!scoped.length && state.view !== "folders") body = emptyState(d);
     else if (state.view === "timeline") body = hostChips + chips + timeline(d, sessions);
     else if (state.view === "folders") body = hostChips + (workspaces(d) || '<p class="muted">No shared folder reported yet.</p>');
     else if (state.view === "sessions") body = `${hostChips}${chips}<div class="am-sessions">${cards(recent) || '<p class="muted">No session in the last 24 hours for this filter.</p>'}
@@ -679,6 +766,12 @@
     if (!svg) return;
     svg.classList.toggle("ap-hovering", Boolean(node));
     for (const p of svg.querySelectorAll(".am-link")) p.classList.toggle("ap-hl", Boolean(node) && (p.dataset.from === node.dataset.node || p.dataset.to === node.dataset.node));
+  });
+  root.addEventListener("change", e => {
+    if (!e.target.matches("[data-team-mission]")) return;
+    team.mission = e.target.value || "all";
+    render(state.data, true);
+    root.querySelector("[data-team-mission]")?.focus();
   });
   root.addEventListener("input", e => {
     if (e.target.dataset.role !== "search") return;

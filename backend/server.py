@@ -376,11 +376,13 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
                 "head": head, "broken_at": failed["broken_at"] if failed else None, "streams": streams}
 
     def _activity_view(self):
-        snapshot = build_tenant_activity_map(self.resources.db)
-        if (self.resources.org_id == 1 and not snapshot.get("hosts") and
-                (os.environ.get("SWARMCONTROL_ACTIVITY_ROOTS", "").strip() or
-                 os.environ.get("SWARMCONTROL_ACTIVITY_ADAPTERS", "").strip())):
-            return event_evidence.link_map_steps(self.resources.db, self.resources.org_id, ACTIVITY.get())
+        # The console's own machine (local roots or adapters) and remote observers appear together on the map.
+        local = ACTIVITY.get() if (self.resources.org_id == 1 and (
+            os.environ.get("SWARMCONTROL_ACTIVITY_ROOTS", "").strip() or
+            os.environ.get("SWARMCONTROL_ACTIVITY_ADAPTERS", "").strip())) else None
+        snapshot = build_tenant_activity_map(self.resources.db, local_snapshot=local)
+        if local is not None and not snapshot.get("hosts"):
+            return event_evidence.link_map_steps(self.resources.db, self.resources.org_id, local)
         active_ids = {h["host_id"] for h in snapshot.get("hosts", [])}
         health_only = [
             {**dict(h), "activity_enabled": False, "activity_roots": []}

@@ -694,10 +694,26 @@ def ingest_remote_activity(db: Any, body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_tenant_activity_map(db: Any, local_fallback: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Aggregate all remote host_activity snapshots for the current tenant into GET /api/v1/activity format."""
+def build_tenant_activity_map(db: Any, local_fallback: dict[str, Any] | None = None,
+                              local_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Aggregate all remote host_activity snapshots for the current tenant into GET /api/v1/activity format.
+
+    `local_snapshot` is the console machine's own collection (local roots or adapters). It is merged with the remote
+    observers instead of being replaced by them, so connecting a first remote machine does not hide local agents. A
+    remote observer that reports the same host ID wins over the local collection for that host."""
     ensure_remote_activity_table(db)
-    rows = db.query_all("SELECT host_id, hostname, payload_json, updated_at FROM host_activity ORDER BY updated_at DESC")
+    rows = [dict(r) for r in db.query_all("SELECT host_id, hostname, payload_json, updated_at FROM host_activity ORDER BY updated_at DESC")]
+    if rows and isinstance(local_snapshot, dict) and (local_snapshot.get("sessions") or local_snapshot.get("hosts")):
+        local_host = ((local_snapshot.get("hosts") or [{}])[0] or {})
+        local_id = local_host.get("host_id") or local_snapshot.get("host_id") or local_snapshot.get("host") or "local"
+        if local_id not in {r["host_id"] for r in rows}:
+            rows.append({"host_id": local_id, "hostname": local_host.get("hostname") or local_id,
+                         "payload_json": json.dumps({**local_snapshot, "hostname": local_host.get("hostname") or local_id,
+                                                     "activity_roots": local_host.get("activity_roots", local_snapshot.get("activity_roots") or []),
+                                                     "activity_enabled": local_host.get("activity_enabled", local_snapshot.get("activity_enabled", True)),
+                                                     "sources": local_host.get("sources", local_snapshot.get("sources") or []),
+                                                     "capture_reader": "console"}),
+                         "updated_at": float(local_snapshot.get("collected_at") or time.time())})
     if not rows:
         if local_fallback is not None:
             return local_fallback
