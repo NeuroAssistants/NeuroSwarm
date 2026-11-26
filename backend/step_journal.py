@@ -213,6 +213,10 @@ def detect_forward_clock_skew(snapshot: dict[str, Any], now: float) -> tuple[flo
     return (skew, skew > FUTURE_GRACE_SEC)
 
 
+def _is_file_uri(value: Any) -> bool:
+    return isinstance(value, str) and value[:7].lower() == "file://"
+
+
 def _file_uri_path(uri: str) -> str:
     """Decode a reporter's local file URI without using the server's path conventions."""
     if any(ord(c) < 32 for c in uri):
@@ -240,7 +244,7 @@ def _file_uri_path(uri: str) -> str:
 def norm_abs_path(raw: Any) -> str:
     """Normalize POSIX or Windows absolute paths safely without resolving remote symlinks."""
     s = str(raw or "").strip().strip('"').strip("'")
-    if s[:7].lower() == "file://":
+    if _is_file_uri(s):
         s = _file_uri_path(s)
     if not s or any(ord(c) < 32 for c in s):
         return ""
@@ -766,12 +770,16 @@ def project_rows(
             # A session started in an agent's own folder can still run a command inside a shared folder: that command's
             # evidence is shared when it ran there, or when the files it named resolve inside the shared folders.
             step_scoped = scoped
-            if step.get("cwd") and (project is not None or scoped):
+            paths = step.get("files") or []
+            uri_location = _is_file_uri(workspace_str) or _is_file_uri(step_cwd)
+            # Current observers check native directories on the host, which can resolve Windows 8.3 aliases.
+            # Older reports can leave URI directories or operands for the receiving journal to interpret.
+            if step.get("cwd") and (project is not None or (scoped and uri_location)):
                 step_scoped = _step_in_scope(step["cwd"], project, extra_scope, root_index)
             output_scoped = step_scoped
-            if step_scoped:
+            if step_scoped and (project is not None or uri_location or any(_is_file_uri(path) for path in paths)):
                 # A mixed read's output cannot be partitioned by file, even if one operand is visible.
-                for path in step.get("files") or []:
+                for path in paths:
                     if project is None:
                         primary, extra, _, _ = resolve_step_files([path], root_index, step_cwd)
                     else:
