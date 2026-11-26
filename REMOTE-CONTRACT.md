@@ -36,6 +36,14 @@ All installer and agent source routes are public (`GET`, no cookie required) so 
     $env:SWARMCONTROL_TOKEN="<token>"; irm <public_url>/install.ps1 | iex
     ```
 
+    The Windows installer checks for Python 3.10+ with SQLite and TLS. If needed it installs Python 3.13 for the current user through WinGet and checks again. If WinGet is unavailable it gives manual recovery steps. Rerunning the installer backs up and replaces the managed runtime, preserves saved project settings, and restarts the observer. On failure during replacement it attempts to restore the previous runtime. The installer then confirms whether the server accepted this host's heartbeat. The installer posts one **Windows observer connection verified** event and prints its Live link when the server returns an event ID. The final line identifies the scheduled task, a process limited to this sign-in, or one-time mode. The installation log is saved alongside `agent.env`, by default:
+
+    ```powershell
+    Get-Content "$env:LOCALAPPDATA\SwarmControl\install.log" -Tail 25
+    ```
+
+    To monitor agent activity, set `$env:SWARMCONTROL_ACTIVITY_ROOTS` to an existing project folder before installing. Separate multiple Windows paths with semicolons. Hosts can check in with zero shared folders. Agent activity requires a supported session with work inside a shared folder.
+
 ---
 
 ## 2. Authenticated Agent Ingestion Routes (`Authorization: Bearer <ingest_token>`)

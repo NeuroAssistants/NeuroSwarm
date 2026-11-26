@@ -173,11 +173,15 @@ function buildInstallSnippet(created, platform) {
   }
 
   const unixRoots = sanitizeRoots(rawRoots, ":");
-  const winRoots = sanitizeRoots(rawRoots, ";");
-
   if (platform === "windows") {
-    const rootsPart = winRoots ? `$env:SWARMCONTROL_ACTIVITY_ROOTS="${winRoots}"; ` : "";
-    return `$env:SWARMCONTROL_TOKEN="${token}"; ${rootsPart}irm ${baseUrl}/install.ps1 | iex`;
+    const quote = (value) => "'" + value.replace(/'/g, "''") + "'";
+    const roots = rawRoots.split(/[,;\r\n]+/).map((path) => path.trim()).filter(Boolean);
+    return [
+      'Write-Host "[NeuroSwarm] Downloading the Windows installer..."',
+      `$env:SWARMCONTROL_TOKEN=${quote(token)}`,
+      ...(roots.length ? [`$env:SWARMCONTROL_ACTIVITY_ROOTS=${quote(roots.join(";"))}`] : []),
+      `irm -ErrorAction Stop ${quote(baseUrl + "/install.ps1")} | iex`,
+    ].join("\n");
   }
   if (platform === "repo") {
     const rootsFlag = unixRoots ? ` --activity-roots "${unixRoots}"` : "";

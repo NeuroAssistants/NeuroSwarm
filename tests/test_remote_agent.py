@@ -427,6 +427,50 @@ class OptInActivityShipperTests(unittest.TestCase):
             db_t2.close()
 
 
+class HeartbeatReceiptTests(unittest.TestCase):
+    def test_once_rejects_unconfirmed_host_before_shipping_activity(self):
+        import threading
+
+        requests = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                requests.append((self.path, payload.get("host_id")))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(receipt)
+
+        receipts = (
+            b"", b"null", b'{"ok":true}', b'{"ok":true,"host_id":"other-host"}',
+            b'{"ok":false,"host_id":"win-qa"}', b'{"ok":1,"host_id":"win-qa"}',
+            b'{"ok":"true","host_id":"win-qa"}',
+        )
+        with tempfile.TemporaryDirectory() as tmp, ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                for receipt in receipts:
+                    with self.subTest(receipt=receipt):
+                        requests.clear()
+                        run = subprocess.run(
+                            [sys.executable, str(ROOT / "agent" / "swarmcontrol_agent.py"), "--once",
+                             "--server", f"http://127.0.0.1:{server.server_port}", "--host-id", "win-qa",
+                             "--activity-roots", tmp, "--state-dir", str(Path(tmp) / "state")],
+                            env=dict(os.environ, HOME=tmp, USERPROFILE=tmp, SWARMCONTROL_TOKEN="receipt-test-only"),
+                            capture_output=True, text=True, timeout=20,
+                        )
+                        self.assertEqual(run.returncode, 1, run.stdout)
+                        self.assertIn("heartbeat", run.stderr.lower())
+                        self.assertEqual(requests, [("/api/v1/ingest/heartbeat", "win-qa")])
+            finally:
+                server.shutdown()
+                thread.join()
+
+
 class AgentTransitionTests(unittest.TestCase):
     def test_build_harness_transition_events(self):
         prev: dict[str, tuple[str, int]] = {}
@@ -503,11 +547,13 @@ class InstallerEndToEndTests(unittest.TestCase):
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", "0"))
                 body = json.loads(self.rfile.read(length).decode("utf-8"))
+                response = {"ok": True}
                 if self.path == "/api/v1/ingest/heartbeat":
                     received_heartbeats.append(body)
+                    response["host_id"] = body["host_id"]
                 elif self.path == "/api/v1/ingest/activity":
                     received_activities.append(body)
-                out = b'{"ok": true}'
+                out = json.dumps(response).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(out)))
@@ -762,8 +808,10 @@ class InstallerEndToEndTests(unittest.TestCase):
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", "0"))
                 body = json.loads(self.rfile.read(length).decode("utf-8"))
+                response = {"ok": True, "commit_offsets": True}
                 if self.path == "/api/v1/ingest/heartbeat":
                     state["heartbeats"].append(body)
+                    response["host_id"] = body["host_id"]
                     if state["fail_heartbeat"]:
                         err = b'{"error": "injected upgrade failure"}'
                         self.send_response(500)
@@ -772,7 +820,7 @@ class InstallerEndToEndTests(unittest.TestCase):
                         self.end_headers()
                         self.wfile.write(err)
                         return
-                out = b'{"ok": true, "commit_offsets": true}'
+                out = json.dumps(response).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(out)))

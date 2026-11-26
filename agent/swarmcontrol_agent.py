@@ -788,6 +788,15 @@ def main() -> int:
             snap["fallback_reason"] = "activity_core_missing"
         try:
             res = post_json(f"{server}/api/v1/ingest/heartbeat", args.token, snap)
+            if args.once and (
+                not isinstance(res, dict) or res.get("ok") is not True or res.get("host_id") != snap["host_id"]
+            ):
+                print(
+                    "[swarmcontrol-agent] Heartbeat unconfirmed. The console must return ok=true "
+                    "and the same host_id. Check the server address.",
+                    file=sys.stderr, flush=True,
+                )
+                return 1
             for transition_ev in build_harness_transition_events(snap, prev_harness_state):
                 try:
                     post_json(f"{server}/api/v1/ingest/event", args.token, transition_ev)
