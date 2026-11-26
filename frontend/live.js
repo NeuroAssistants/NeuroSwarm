@@ -1782,7 +1782,9 @@
         domMutated = true;
       }
       while (tbody.children.length > state.renderLimit) {
-        tbody.lastElementChild.remove();
+        const last = tbody.lastElementChild;
+        const previous = last.previousElementSibling;
+        (last.dataset.key === state.selectedKey && previous ? previous : last).remove();
       }
       if (!state.selectedKey && toInsert.length) {
         selectRowKey(toInsert[0].key);
@@ -1838,7 +1840,7 @@
     if (filtered.length > state.renderLimit) {
       visible = filtered.slice(0, state.renderLimit);
       const selected = filtered.find(r => r.key === state.selectedKey);
-      if (selected && !visible.includes(selected)) visible.push(selected);
+      if (selected && !visible.includes(selected)) visible[visible.length - 1] = selected;
     }
 
     const prevSelKey = state.selectedKey;

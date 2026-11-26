@@ -1263,7 +1263,7 @@ def _codex_change(changes: Any, status: str, ts: Any, cwd: str) -> dict[str, Any
             if not isinstance(entry, dict):
                 continue
             for target in (raw, entry.get("move_path")):
-                safe = _codex_target(target, cwd)
+                safe = _shared_file_target(target, cwd)
                 if safe and safe not in paths:
                     paths.append(safe)
                     verbs.add("move" if entry.get("move_path") else str(entry.get("type")).lower())
@@ -1476,7 +1476,7 @@ def _codex_local_path(raw) -> str:
         return ""
 
 
-def _codex_target(raw, cwd) -> str:
+def _shared_file_target(raw, cwd) -> str:
     """Use the call's directory and the same root-relative visibility rule as Files & Workspace."""
     raw = _codex_local_path(raw)
     cwd = _codex_local_path(cwd)
@@ -1681,7 +1681,7 @@ def _codex_command_step(item, cwd, stamp, read):
         if moved and not entry.get("cwd") and not Path(operand.removeprefix("file://")).is_absolute():
             withheld = True
             continue
-        target = _codex_target(operand, entry.get("cwd") or cwd)
+        target = _shared_file_target(operand, entry.get("cwd") or cwd)
         if not target:
             withheld = True
         elif len(files) < 12 and target not in files:
@@ -1700,7 +1700,7 @@ def _codex_command_step(item, cwd, stamp, read):
         if operand.startswith("file://") or operand.strip(" \t'\"") != operand:
             withheld = True
             continue
-        target = _codex_target(operand, cwd)
+        target = _shared_file_target(operand, cwd)
         if not target:
             withheld = True
         elif len(files) < 12 and target not in files:
@@ -1842,7 +1842,7 @@ def codex_sessions(limit: int = 8) -> list[dict[str, Any]]:
                         directory = args.get("workdir") or args.get("cwd") or it.get("cwd") or session_cwd
                         raw = (args.get("file_path") or args.get("path") or args.get("Path") or
                                args.get("target_file") or args.get("notebook_path"))
-                        target = _codex_target(raw, directory)
+                        target = _shared_file_target(raw, directory)
                         if not target:
                             continue
                         if editing and (args.get("dryRun") is True or args.get("dry_run") is True):
@@ -2510,7 +2510,7 @@ def _pi_result(name, argument, message, timestamp, card):
         path = ""
         if (target and target == target.strip() and target[0] not in "~\"'" and target[-1] not in "\"'"
                 and not re.match(r"^[a-zA-Z]+://", target) and not any(ord(c) < 32 for c in target)):
-            path = _recorded_file(target, card)
+            path = _shared_file_target(target, card.get("current_folder") or card.get("workspace"))
         step = _step(name, _file_label(name, path) if path else "File path unavailable", timestamp)
         if path:
             step["files"] = [path]
