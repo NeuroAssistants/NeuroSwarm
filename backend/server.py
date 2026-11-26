@@ -34,6 +34,7 @@ from db import Database  # noqa: E402
 import incidents
 import event_evidence
 import capture_settings
+import output_coverage
 import edit_verification
 import needs_attention
 import line_survival
@@ -77,7 +78,7 @@ def _trusted_proxy_networks() -> list[ipaddress._BaseNetwork]:
 
 
 MONITORING_ROUTES = {"/api/v1/" + path for path in
-                     ("live-records", "event-feed", "activity", "work-board", "links", "needs-attention",
+                     ("live-records", "event-feed", "output-coverage", "activity", "work-board", "links", "needs-attention",
                       "digest", "hosts", "alerts", "events", "overview", "repro-cases")}
 EVENT_DETAIL = re.compile(r"/api/v1/events/([0-9]{1,19})/(?:evidence|images/([a-f0-9]{64}))")
 LINE_SURVIVAL = re.compile(r"/api/v1/events/([0-9]{1,19})/line-survival")
@@ -606,6 +607,17 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
 
             if path == "/api/v1/live-records":
                 self._send_json(history(self.resources.db, self.resources.org_id, qs))
+                return
+            if path == "/api/v1/output-coverage":
+                org = self.resources.org_id
+                if "organization_id" in qs and qs["organization_id"] != [str(org)]:
+                    raise IdentityError(409, "Active organization changed")
+                with self.resources.db.transaction(write=False) as conn:
+                    try:
+                        result = output_coverage.report(conn, org, qs)
+                    except output_coverage.CoverageChanged as exc:
+                        raise IdentityError(409, str(exc)) from exc
+                self._send_inventory(result)
                 return
             if path == "/api/v1/event-feed":
                 limit = qs.get("limit", [None])[0]

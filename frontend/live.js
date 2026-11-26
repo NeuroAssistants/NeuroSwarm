@@ -2691,6 +2691,8 @@
 
   /* ---------- Cursor Feed + Multi-Stream Polling ---------- */
   function clearState() {
+    const coverage = el("output-coverage");
+    if (coverage?.open) coverage.close();
     closeIncident();
     closeEventPopup({ skipFocus: true });
     state.generation++;
@@ -3799,5 +3801,10 @@
     if (!document.hidden && !state.paused) poll(false);
   });
   window.addEventListener("focus", () => { if (!state.paused && !document.hidden) poll(false); });
+  window.bindOutputCoverage?.({
+    api,
+    activeOrg: () => state.org,
+    openEvent: (button, id, org) => openVerificationTest(button, id, org),
+  });
   boot();
 })();

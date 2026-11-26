@@ -133,7 +133,18 @@ HTTP fields per agent runtime (verified by `tests/test_http_all_adapters.py` wit
 
 Web tools other than shell commands (browser visits, searches, page captures) carry `kind` for every runtime; their address and query are extracted for Codex and Claude Code only.
 
-Which commands lose evidence most often:
+In **Live → View Explorer → Output coverage**, choose the last hour, day or week.
+The report pins the time bounds and uses the active organization's history. Select a
+count to list the matching events, then open an event to inspect its original evidence.
+Refreshing counts keeps the same time bounds. If a late result changes a group, Live
+asks you to refresh before opening its revised list.
+
+A stored empty output counts as recorded. Explicitly pending calls are excluded
+from output counts. Older calls without a final status, output or exit code are
+identified as **Completion unconfirmed**. A missing output with an unknown reason
+appears under **Not recorded**. File previews are counted separately.
+
+To inspect the reasons recorded by the collector directly:
 
 ```sql
 SELECT json_extract(metadata_json, '$.program') AS program,
