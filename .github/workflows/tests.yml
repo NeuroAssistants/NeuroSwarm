@@ -1,0 +1,54 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  product:
+    name: Product and browser tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Find or download Chromium
+        run: |
+          browser="$(python3 deploy/fetch_test_browser.py --pinned)"
+          "$browser" --version
+          echo "SWARMCONTROL_CHROMIUM=$browser" >> "$GITHUB_ENV"
+      - name: Confirm the browser responds
+        run: |
+          PYTHONPATH=tests python3 - <<'PYTHON'
+          import browser_cdp
+          browser = browser_cdp.Browser(browser_cdp.find_browser())
+          try:
+              print(browser.version)
+          finally:
+              browser.close()
+          PYTHON
+      - name: Run product and browser tests
+        run: python3 -m unittest discover -s tests -v
+
+  integrations:
+    name: Integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Run integration tests
+        run: python3 -m unittest discover -s integrations/tests -t . -v
