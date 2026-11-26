@@ -33,6 +33,7 @@ from auth import LoginRateLimiter, SESSION_TTL_SECONDS, token_organization  # no
 from db import Database  # noqa: E402
 import incidents
 import event_evidence
+import capture_settings
 import edit_verification
 import needs_attention
 import line_survival
@@ -576,6 +577,7 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/hosts":
                 self.resources.guardrails.check_stale_hosts()
                 rows = self.resources.db.query_all("SELECT * FROM hosts ORDER BY last_seen_at DESC")
+                reported = capture_settings.by_host(self.resources.db)
                 hosts = []
                 for r in rows:
                     hosts.append(
@@ -596,6 +598,7 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
                             "status": r["status"],
                             "first_seen_at": r["first_seen_at"],
                             "last_seen_at": r["last_seen_at"],
+                            "capture_settings": reported.get(r["host_id"], []),
                         }
                     )
                 self._send_json({"hosts": hosts})
@@ -741,11 +744,13 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
                 self.resources.maybe_prune(EVENT_RETENTION_SEC, PRUNE_INTERVAL_SEC)
                 digest = self.resources.guardrails.build_executive_digest()
                 hosts_raw = self.resources.db.query_all("SELECT * FROM hosts ORDER BY last_seen_at DESC")
+                reported = capture_settings.by_host(self.resources.db)
                 hosts = [
                     {
                         **{k: v for k, v in h.items() if k not in {"harnesses_json", "processes_json"}},
                         "harnesses": json.loads(h["harnesses_json"] or "[]"),
                         "processes": json.loads(h["processes_json"] or "[]"),
+                        "capture_settings": reported.get(h["host_id"], []),
                     }
                     for h in hosts_raw
                 ]
@@ -845,6 +850,7 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
                 rules.resolve_stale(clean["host_id"])
                 status, alerts = rules.evaluate_heartbeat(clean, measured=body)
                 db.upsert_host_heartbeat(clean, status)
+                capture_settings.store(conn, clean["host_id"], "observer", body.get("capture_settings"))
                 telemetry = inspect_heartbeat_telemetry(conn, clean["host_id"], body, time.time())
                 result = {"ok": True, "host_id": clean["host_id"], "status": status, "alerts_triggered": alerts, **telemetry}
             elif path == "/api/v1/ingest/event":

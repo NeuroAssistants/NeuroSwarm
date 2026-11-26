@@ -44,9 +44,13 @@ Every ingest token belongs to a single tenant/organization (resolved by `auth.ve
 
 | Method & Path | Auth | Handler Helper | Purpose |
 | :--- | :--- | :--- | :--- |
-| `POST /api/v1/ingest/heartbeat` | `Bearer <ingest_token>` | `validation.sanitize_heartbeat` + `remote_activity.inspect_heartbeat_telemetry` | Stores host CPU/RAM, detected harnesses, `capture_reader` (`core`/`fallback`), and clock telemetry (`server_time`, `clock_skew_sec`, rate-limited `WARNING` events). |
+| `POST /api/v1/ingest/heartbeat` | `Bearer <ingest_token>` | `validation.sanitize_heartbeat` + `remote_activity.inspect_heartbeat_telemetry` + `capture_settings.store` | Stores host CPU/RAM, detected harnesses, `capture_reader` (`core`/`fallback`), clock telemetry (`server_time`, `clock_skew_sec`, rate-limited `WARNING` events) and `capture_settings` (see below). |
 | `POST /api/v1/ingest/event` | `Bearer <ingest_token>` | Existing event flow | Stores structured runtime events (`plan`, `work_started`, `work_done`, `tool_error`, `rate_limit`, etc.). |
 | `POST /api/v1/ingest/activity` | `Bearer <ingest_token>` | `remote_activity.ingest_remote_activity(db, body)` | Stores redacted activity map (`host_activity`) + unified journal steps; returns HTTP `422` (`commit_offsets: false`) on non-expired clock/timestamp rejections. |
+
+### Capture settings reported with each heartbeat
+
+Observers since this version add `capture_settings` to the heartbeat: `activity`, `commands`, `command_output`, `file_previews` and `line_survival` as booleans, and `shared_folders` as a count. They come from the observer's own `SWARMCONTROL_SHARE_*` settings and `--activity-roots`; no path, command or value is sent. The server keeps only those keys (other keys and non-boolean values are dropped). A local activity journal next to the console reports the same switches for the host it records, as source `journal`. `GET /api/v1/hosts` and the overview list them per host in `capture_settings` with `source` and `reported_at`; the Hosts section shows each switch as On, Off or Unknown, and an observer that predates this report as Unknown.
 
 ### `POST /api/v1/ingest/activity` Request Schema
 ```json

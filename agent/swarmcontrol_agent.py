@@ -777,6 +777,13 @@ def main() -> int:
     while not stop:
         snap = collect_host_snapshot(agent_version=AGENT_VERSION, host_id=args.host_id or None)
         snap["capture_reader"] = "core" if _load_activity_core() is not None else "fallback"
+        # What this observer may share (issue #11): on/off switches and a folder count, never a path.
+        shared = len(parse_activity_roots(args.activity_roots)) if args.activity_roots else 0
+        snap["capture_settings"] = {
+            "activity": shared > 0, "shared_folders": shared,
+            **{key: os.environ.get(var) == "1" for key, var in (
+                ("commands", "SWARMCONTROL_SHARE_COMMANDS"), ("command_output", "SWARMCONTROL_SHARE_COMMAND_OUTPUT"),
+                ("file_previews", "SWARMCONTROL_SHARE_FILE_PREVIEWS"), ("line_survival", "SWARMCONTROL_SHARE_LINE_SURVIVAL"))}}
         if snap["capture_reader"] == "fallback":
             snap["fallback_reason"] = "activity_core_missing"
         try:
