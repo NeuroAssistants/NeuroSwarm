@@ -86,9 +86,10 @@ class ReleaseManifestHTTPS(unittest.TestCase):
         self.assertEqual(json.loads(self.request("GET", "/health")[1])["version_url"], VERSION_PATH)
 
         expected_paths = {"/": {"/instrument-serif.ttf", "/identity.css", "/swarm-fold.webp", "/toon-workshop.webp", "/app.js", "/activity.js", "/activity-product.css", "/needs-attention.js", "/needs-attention.css", "/repro-cases.js", "/repro-cases.css", "/styles.css"},
+                          "/missions": {"/missions.js", "/missions.css", "/styles.css"},
                           "/live": {"/identity.css", "/live.js", "/live.css", "/output-coverage.js"}}
         self.assertEqual(set(manifest["pages"]), set(expected_paths))
-        self.assertEqual(set(manifest["assets"]), expected_paths["/"] | expected_paths["/live"])
+        self.assertEqual(set(manifest["assets"]), set.union(*expected_paths.values()))
         for page, paths in expected_paths.items():
             _, html = self.request("GET", page)
             self.assertEqual(manifest["pages"][page], {"bytes": len(html), "sha256": hashlib.sha256(html).hexdigest()})
@@ -102,7 +103,7 @@ class ReleaseManifestHTTPS(unittest.TestCase):
         cmd = self.verify()
         self.assertEqual(cmd.returncode, 0, cmd.stderr + cmd.stdout)
         self.assertIn("PASS Published manifest", cmd.stdout)
-        self.assertEqual(cmd.stdout.count("PASS Published bytes "), 17)
+        self.assertEqual(cmd.stdout.count("PASS Published bytes "), 20)
         self.assertIn("PASS Anonymous monitoring API denied", cmd.stdout)
 
     def test_matching_manifest_and_stale_cached_asset_fails(self):
@@ -145,7 +146,7 @@ class ReleaseManifestHTTPS(unittest.TestCase):
             cmd = self.verify(other)
         self.assertEqual(cmd.returncode, 1, cmd.stderr + cmd.stdout)
         self.assertIn("FAIL Published manifest", cmd.stdout)
-        self.assertEqual(cmd.stdout.count("PASS Published bytes "), 17)
+        self.assertEqual(cmd.stdout.count("PASS Published bytes "), 20)
 
 
 if __name__ == "__main__":

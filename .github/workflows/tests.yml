@@ -69,3 +69,10 @@ jobs:
         env:
           NEUROSWARM_TEST_NATIVE_TASK: "1"
         run: python -m unittest discover -s tests -p test_windows_installer_output.py -v
+      - name: Verify PowerShell output and confirmed files in Live
+        shell: powershell
+        run: python -m unittest discover -s tests -p test_native_live_evidence.py -v
+      - name: Verify OpenBot Pi tool results and file changes in Windows Live
+        working-directory: tests
+        shell: powershell
+        run: python -m unittest test_pi_activity.PiLiveTests -v

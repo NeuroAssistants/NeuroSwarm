@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mission timeline · NeuroSwarm</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/missions.css">
+  <script defer src="/missions.js"></script>
+</head>
+<body>
+  <main class="missions">
+    <nav aria-label="Console"><a href="/#activity">← Activity map</a><a href="/live">Live events</a></nav>
+    <header><h1>Mission timeline</h1><button id="refresh" type="button">Refresh</button></header>
+    <p id="status" role="status">Loading recent missions…</p>
+    <section id="view" hidden>
+      <label for="mission">Mission</label>
+      <select id="mission"></select>
+      <h2 id="objective"></h2>
+      <p id="participants"></p>
+      <ol id="events" aria-label="Most recent evidence first"></ol>
+    </section>
+    <p id="signin" hidden><a href="/#access">Sign in to the control room</a></p>
+  </main>
+</body>
+</html>

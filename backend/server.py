@@ -34,6 +34,7 @@ from db import Database  # noqa: E402
 import incidents
 import event_evidence
 import capture_settings
+import mission_activity
 import output_coverage
 import edit_verification
 import needs_attention
@@ -49,7 +50,7 @@ from release_manifest import ASSETS, PAGES, VERSION_PATH, build_manifest, render
 from remote_activity import build_tenant_activity_map, ingest_remote_activity, inspect_heartbeat_telemetry
 from tenant_resources import ResourceStores
 from installer import render_install_script, render_powershell_install_script  # noqa: E402
-from validation import ValidationError, sanitize_event, sanitize_heartbeat, validate_host_id  # noqa: E402
+from validation import ValidationError, public_event_metadata, sanitize_event, sanitize_heartbeat, validate_host_id  # noqa: E402
 
 
 SESSION_COOKIE = "sc_session"
@@ -545,8 +546,34 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/activity":
                 self._send_inventory(self._activity_view())
                 return
+            if path == "/api/v1/missions":
+                payload = mission_activity.activity(self.resources.db, self.resources.org_id)
+                task = (qs.get("task") or [""])[0]
+                if task:
+                    if not clean_task_id(task):
+                        raise ValidationError("Invalid task identifier")
+                    changes = []
+                    for mission in payload["missions"]:
+                        tasks = {e["task_id"]: {"id": e["task_id"]} for e in mission["events"] if e["task_id"]}
+                        changes.append({"id": mission["id"], "tasks": list(tasks.values())})
+                    matches = sum(any(t["id"] == task for t in c["tasks"]) for c in changes)
+                    if not matches:
+                        self._send_json({"error": "Unknown mission task"}, status=404)
+                        return
+                    if matches > 1:
+                        self._send_inventory({"organization": payload["organization"], "link": {
+                            "status": "ambiguous", "reason": "Several missions use this task ID. Open an individual source event."}})
+                        return
+                    links = self._resolve_links({"changes": changes}, [], filter_task_id=task)
+                    self._send_inventory({"organization": payload["organization"], "link": links["by_task"].get(task)})
+                    return
+                self._send_inventory(payload)
+                return
             if path == "/api/v1/work-board":
-                self._send_inventory(self._read_board(user, qs.get("include") == ["activity"]))
+                board = self._read_board(user, qs.get("include") == ["activity"])
+                if qs.get("missions") == ["1"] and "Authorization" not in self.headers:
+                    board["missions"] = mission_activity.activity(self.resources.db, self.resources.org_id)["missions"]
+                self._send_inventory(board)
                 return
             if path == "/api/v1/links":
                 raw_tid = (qs.get("task_id") or [""])[0]
@@ -731,7 +758,7 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/events":
                 rows = self.resources.db.query_all("SELECT * FROM events ORDER BY created_at DESC LIMIT 50")
                 for r in rows:
-                    r["metadata"] = json.loads(r.pop("metadata_json") or "{}")
+                    r["metadata"] = public_event_metadata(r["event_type"], json.loads(r.pop("metadata_json") or "{}"))
                 self._send_json({"events": rows})
                 return
 
@@ -770,7 +797,7 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
                 alerts = [incidents.present(a) for a in alerts]
                 events = self.resources.db.query_all("SELECT * FROM events ORDER BY created_at DESC LIMIT 30")
                 for e in events:
-                    e["metadata"] = json.loads(e.pop("metadata_json") or "{}")
+                    e["metadata"] = public_event_metadata(e["event_type"], json.loads(e.pop("metadata_json") or "{}"))
                 audit = self._audit_rows(30) if user["role"] == "admin" else []
                 self._send_json(
                     {

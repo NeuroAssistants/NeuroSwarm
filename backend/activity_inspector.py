@@ -92,7 +92,7 @@ class Scope:
     def root_of(self, path: Any) -> Path | None:
         s = str(path or "")
         if s.startswith("file://"):
-            s = s[7:]
+            s = _codex_local_path(s)
         if not Path(s).is_absolute():
             return None
         try:
@@ -202,7 +202,7 @@ def clean_path(raw: Any) -> str:
     for _ in range(3):
         s = s.strip().strip('"').strip("'").rstrip("\\")
     if s.startswith("file://"):
-        s = s[7:]
+        s = _codex_local_path(s)
     if not Path(s).is_absolute() or "\n" in s or len(s) > 400:
         return ""
     if ".system_generated/" in s or is_sensitive_path(s):
@@ -1239,7 +1239,9 @@ def _recorded_file(raw: Any, card: dict[str, Any]) -> str:
     supplied = raw.strip()
     if len(supplied) > 1 and supplied[0] == supplied[-1] and supplied[0] in ("'", '"'):
         supplied = supplied[1:-1]
-    supplied = supplied.removeprefix("file://")
+    supplied = _codex_local_path(supplied)
+    if not supplied:
+        return ""
     base = clean_path(card.get("current_folder") or card.get("workspace"))
     if not Path(supplied).is_absolute() and (not base or re.match(r"^(?:[A-Za-z][\w+.-]*:|~|\\\\)", supplied)):
         return ""
@@ -1261,7 +1263,7 @@ def _codex_change(changes: Any, status: str, ts: Any, cwd: str) -> dict[str, Any
             if not isinstance(entry, dict):
                 continue
             for target in (raw, entry.get("move_path")):
-                safe = _codex_target(target, cwd)
+                safe = _shared_file_target(target, cwd)
                 if safe and safe not in paths:
                     paths.append(safe)
                     verbs.add("move" if entry.get("move_path") else str(entry.get("type")).lower())
@@ -1474,7 +1476,7 @@ def _codex_local_path(raw) -> str:
         return ""
 
 
-def _codex_target(raw, cwd) -> str:
+def _shared_file_target(raw, cwd) -> str:
     """Use the call's directory and the same root-relative visibility rule as Files & Workspace."""
     raw = _codex_local_path(raw)
     cwd = _codex_local_path(cwd)
@@ -1488,13 +1490,27 @@ def _codex_target(raw, cwd) -> str:
     if root is None:
         return ""
     try:
-        for spelling in (path, path.resolve()):
-            parts = spelling.relative_to(root).parts
+        resolved = path.resolve()
+        lexical_root = root
+        if os.name == "nt" and not path.is_relative_to(root):
+            # Windows can record TEMP or a user directory in DOS 8.3 form.
+            # Expand only the directory name; do not resolve junctions here.
+            import ctypes
+            expand = ctypes.windll.kernel32.GetLongPathNameW
+            for parent in path.parents:
+                size = expand(str(parent), None, 0)
+                if size:
+                    expanded = ctypes.create_unicode_buffer(size)
+                    if expand(str(parent), expanded, size) and Path(expanded.value) == root:
+                        lexical_root = parent
+                        break
+        for spelling, base in ((path, lexical_root), (resolved, root)):
+            parts = spelling.relative_to(base).parts
             if not parts or any(part.startswith(".") for part in parts):
                 return ""
     except (ValueError, RuntimeError, OSError):
         return ""
-    return target
+    return str(resolved)
 
 
 # A standard POSIX shell reports a failed literal cd on stderr. Codex records
@@ -1603,6 +1619,7 @@ def _guarded_operands_local(argv, directory):
 
 
 def _codex_command_step(item, cwd, stamp, read):
+    cwd = _codex_local_path(cwd)
     parsed = [p for p in item.get("parsed_cmd") or [] if isinstance(p, dict)]
     kinds = {p.get("type") for p in parsed}
     command, words = _codex_command_parts(item.get("command"), parsed)
@@ -1664,7 +1681,7 @@ def _codex_command_step(item, cwd, stamp, read):
         if moved and not entry.get("cwd") and not Path(operand.removeprefix("file://")).is_absolute():
             withheld = True
             continue
-        target = _codex_target(operand, entry.get("cwd") or cwd)
+        target = _shared_file_target(operand, entry.get("cwd") or cwd)
         if not target:
             withheld = True
         elif len(files) < 12 and target not in files:
@@ -1683,7 +1700,7 @@ def _codex_command_step(item, cwd, stamp, read):
         if operand.startswith("file://") or operand.strip(" \t'\"") != operand:
             withheld = True
             continue
-        target = _codex_target(operand, cwd)
+        target = _shared_file_target(operand, cwd)
         if not target:
             withheld = True
         elif len(files) < 12 and target not in files:
@@ -1825,7 +1842,7 @@ def codex_sessions(limit: int = 8) -> list[dict[str, Any]]:
                         directory = args.get("workdir") or args.get("cwd") or it.get("cwd") or session_cwd
                         raw = (args.get("file_path") or args.get("path") or args.get("Path") or
                                args.get("target_file") or args.get("notebook_path"))
-                        target = _codex_target(raw, directory)
+                        target = _shared_file_target(raw, directory)
                         if not target:
                             continue
                         if editing and (args.get("dryRun") is True or args.get("dry_run") is True):
@@ -2493,7 +2510,7 @@ def _pi_result(name, argument, message, timestamp, card):
         path = ""
         if (target and target == target.strip() and target[0] not in "~\"'" and target[-1] not in "\"'"
                 and not re.match(r"^[a-zA-Z]+://", target) and not any(ord(c) < 32 for c in target)):
-            path = _recorded_file(target, card)
+            path = _shared_file_target(target, card.get("current_folder") or card.get("workspace"))
         step = _step(name, _file_label(name, path) if path else "File path unavailable", timestamp)
         if path:
             step["files"] = [path]

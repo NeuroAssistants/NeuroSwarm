@@ -152,3 +152,22 @@ SELECT json_extract(metadata_json, '$.program') AS program,
 FROM events WHERE event_type = 'observed_step' AND json_extract(metadata_json, '$.action') = 'shell'
 GROUP BY 1, 2 ORDER BY steps DESC;
 ```
+
+### Mission timeline
+
+The Activity map and Live link to `/missions`. Enrolled reporters can use
+`integrations/report_work.py` with `decision`, `blocker`, `memory_saved` or
+`agent_message`, a task or mission ID, and a public summary. Use `--to-agent`
+for an intended recipient and `--reason` for an explicitly shared rationale.
+Reports link back to their persisted Live event.
+
+For the organization already configured to share an OpenBot channel, the operator
+can set `SWARMCONTROL_SHARE_MISSION_UPDATES=1` on the console to display bounded,
+redacted excerpts from its published agent updates, replies, results and shared
+memories. Roots that originate from the same request appear together. A reply
+identifies the author of the referenced message. Saving a channel memory requires
+an explicit turn-to-assignment link to appear on that mission. Provider reasoning
+traces and personal memory stores are excluded. The view requires an operator
+session. The channel window covers the latest 1,500 messages, up to 240 matching
+updates, and up to 50 linked memory records; reported events have a separate
+240-event window. Expand a task for its latest correlated action or confirmed edit.

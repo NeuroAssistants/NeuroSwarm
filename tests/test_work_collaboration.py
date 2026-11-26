@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 from adapters import openbot_collaboration as source
 from server import create_server
+import mission_activity
 
 
 class WorkCollaborationTests(unittest.TestCase):
@@ -195,6 +196,37 @@ class WorkCollaborationTests(unittest.TestCase):
         self.db.execute("DROP TABLE projection_channel_tasks")
         self.assertEqual(source.collaboration(1), {"changes": []})
 
+    def test_mission_excerpts_replies_and_shared_memories_are_scoped(self):
+        def post(key, author, body, reply="", item_type="commentary", superseded=False):
+            self.message(self.A, key, "rA-qa", body, "2026-01-01T00:10:00Z", superseded=superseded)
+            self.db.execute("""UPDATE projection_channel_messages SET message_json=json_set(message_json,
+                '$.author.name', ?, '$.message.itemType', ?, '$.message.replyToMessageId', ?) WHERE message_id=?""",
+                (author, item_type, reply, key))
+
+        post("msg_first", "Builder", "The report is ready.")
+        post("channel-reply-second", "Reviewer", "I checked the totals.", "msg_first")
+        post("msg_choice", "Reviewer", "Decision: keep the totals together.")
+        post("rs_hidden", "Reviewer", "Private deliberation.")
+        post("msg_private", "Reviewer", "Internal text.", item_type="reasoning")
+        post("msg_retired", "Reviewer", "Retracted content.", superseded=True)
+        self.db.execute("CREATE TABLE projection_channel_memories(memory_id, channel_id, text, source_turn_id, updated_at, last_event_sequence)")
+        self.db.execute("UPDATE projection_channel_assignments SET assignment_json=json_set(assignment_json,'$.turnId','turn') WHERE task_id='rA-api'")
+        self.db.executemany("INSERT INTO projection_channel_memories VALUES (?,?,?,?,?,?)", [
+            ("shared-note", self.A, "Keep the agreed review order.", "turn", 42, 8),
+            ("other", self.B, "Other private memory.", "turn", 42, 7),
+            ("unlinked", self.A, "Unrelated private memory.", "different", 42, 6)])
+        with patch.dict(os.environ, SWARMCONTROL_SHARE_MISSION_UPDATES="1"):
+            missions, status = mission_activity.shared_updates(1)
+            self.assertEqual(status, "connected")
+            self.assertEqual(mission_activity.shared_updates(2), ([], "disabled"))
+        events = {e["id"]: e for m in missions for e in m["events"]}
+        reply = events["channel-reply-second"]
+        self.assertEqual((reply["agent"], reply["to"], reply["parent_text"]), ("Reviewer","Builder","The report is ready."))
+        self.assertEqual(events["msg_choice"]["kind"], "Decision")
+        self.assertEqual(events["shared-note"]["text"], "Keep the agreed review order.")
+        self.assertTrue({"rs_hidden","msg_private","msg_retired","other","unlinked"}.isdisjoint(events))
+        self.assertNotIn("warehouse", json.dumps(missions))
+
     def test_authenticated_http_org_and_channel_cannot_be_overridden(self):
         password = secrets.token_urlsafe(18)
         server, _ = create_server(port=0, db_path=str(self.config.parent / "app.db"), admin_pass=password)
@@ -213,12 +245,17 @@ class WorkCollaborationTests(unittest.TestCase):
                 return json.loads(res.read()), res.getheader("Set-Cookie", "").split(";")[0]
 
         request("GET", "work-board", status=401)
+        request("GET", "missions", status=401)
         _, legacy = request("POST", "auth/login", {"username": "admin", "password": password})
         _, other = request("POST", "auth/register", {"username": "tenant-b", "password": password,
                                                      "organization": "Other team"}, status=201)
         for cookie, expected in ((legacy, ["rA"]), (other, [])):
             headers = {"Cookie": cookie}
             token, _ = request("POST", "tokens", {"name": "service", "scope": "read"}, headers, status=201)
+            with patch.dict(os.environ, SWARMCONTROL_SHARE_MISSION_UPDATES="1"):
+                missions, _ = request("GET", "missions", headers=headers)
+                self.assertEqual(bool(missions["missions"]), bool(expected))
+                request("GET", "missions", headers={"Authorization": "Bearer " + token["token"]}, status=403)
             for auth in (headers, {"Authorization": "Bearer " + token["token"]}):
                 board, _ = request("GET", "work-board?include=activity&channel_id=channel-beta&org_id=1",
                                    headers={**auth, "X-Organization-ID": "1", "X-OpenBot-Channel": self.B})

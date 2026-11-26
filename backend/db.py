@@ -105,6 +105,8 @@ CREATE INDEX IF NOT EXISTS idx_events_host_time ON events(host_id, created_at DE
 CREATE INDEX IF NOT EXISTS idx_alerts_status_time ON alerts(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_time ON events(created_at);
+CREATE INDEX IF NOT EXISTS idx_mission_report_time ON events(created_at DESC, id DESC)
+    WHERE event_type IN ('plan','task_plan','work_started','work_done','decision','blocker','memory_saved','agent_message');
 CREATE INDEX IF NOT EXISTS idx_work_reports_time ON events(created_at DESC, id DESC)
     WHERE event_type IN ('plan', 'task_plan', 'work_started', 'work_done');
 """

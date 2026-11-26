@@ -130,6 +130,22 @@ def sanitize_heartbeat(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+MISSION_REPORT_TYPES = {"agent_message", "decision", "blocker", "memory_saved"}
+
+
+def public_event_metadata(event_type, metadata):
+    """Apply the same field boundary on ingest and on reads of pre-existing reports."""
+    if event_type not in MISSION_REPORT_TYPES:
+        return metadata
+    if not isinstance(metadata, dict):
+        return {}
+    fields = {"workspace": 192, "method": 160, "mission_id": 96, "task_id": 96, "to_agent": 64, "reason": 500}
+    clean = {k: _text(metadata[k], limit) for k, limit in fields.items() if isinstance(metadata.get(k), str)}
+    if isinstance(metadata.get("files"), list):
+        clean["files"] = [_text(path, 320) for path in metadata["files"][:12] if isinstance(path, str)]
+    return clean
+
+
 def sanitize_event(body: dict[str, Any]) -> dict[str, Any]:
     host_id = validate_host_id(body.get("host_id"))
     metadata = body.get("metadata", {})
@@ -143,6 +159,8 @@ def sanitize_event(body: dict[str, Any]) -> dict[str, Any]:
         raise ValidationError("metadata must not contain NaN or Infinity") from None
     if len(encoded.encode("utf-8")) > MAX_EVENT_METADATA_BYTES:
         raise ValidationError(f"metadata too large (max {MAX_EVENT_METADATA_BYTES} bytes)")
+    event_type = _text(body.get("event_type"), 64, "info")
+    metadata = public_event_metadata(event_type, metadata)
     severity = _text(body.get("severity"), 16, "INFO").upper()
     if severity not in ALLOWED_SEVERITIES:
         severity = "INFO"
@@ -150,7 +168,7 @@ def sanitize_event(body: dict[str, Any]) -> dict[str, Any]:
         "host_id": host_id,
         "harness": _text(body.get("harness"), 64, "unknown"),
         "agent_name": _text(body.get("agent_name"), 128, "unknown"),
-        "event_type": _text(body.get("event_type"), 64, "info"),
+        "event_type": event_type,
         "severity": severity,
         "message": _text(body.get("message"), 1000),
         "metadata": metadata,
