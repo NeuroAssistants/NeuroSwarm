@@ -21,6 +21,7 @@ const statusToast = document.getElementById("status-toast");
 
 let refreshTimer = null;
 let sectionNav = null;   // set by initSectionNav below
+const nextFrame = (fn) => (typeof requestAnimationFrame === "function" ? requestAnimationFrame(fn) : setTimeout(fn, 16));
 let toastTimer = null;
 let viewGeneration = 0;
 let workBoardRequest = 0;
@@ -450,8 +451,8 @@ function showApp(sessionPayload, notifyOrgSwitch = false) {
   refreshTimer = setInterval(loadAll, 10000);
   // Opened at a section (for example /#activity from the mission timeline): land there and stay while it loads.
   const section = location.hash.slice(1);
-  if (entering && section) requestAnimationFrame(() => sectionNav?.go(section, { push: false, instant: true, effect: false }));
-  requestAnimationFrame(() => sectionNav?.refresh());
+  if (entering && section) nextFrame(() => sectionNav?.go(section, { push: false, instant: true, effect: false }));
+  nextFrame(() => sectionNav?.refresh());
 }
 
 async function checkAuth() {
@@ -1852,7 +1853,7 @@ sectionNav = (function initSectionNav() {
     pinned = null;
     setActive(sectionAtLine());
   }
-  const schedule = () => { if (!frame) frame = requestAnimationFrame(update); };
+  const schedule = () => { if (!frame) frame = nextFrame(update); };
 
   // Panels above the target finish loading after the click and push it down. While the choice is pinned and the
   // person has not scrolled on their own, follow the target to its final place.
@@ -1862,6 +1863,9 @@ sectionNav = (function initSectionNav() {
     if (!el) return;
     const top = targetTop(el);
     if (Math.abs(top - pinned.lastTop) <= 4) return;
+    if (Math.abs(window.scrollY - top) <= 4) { pinned.lastTop = top; return; }   // the browser kept it in place
+    // Away from where we were heading and not on our way there: the person moved on; stop following.
+    if (performance.now() - pinned.issuedAt > 1200 && Math.abs(window.scrollY - pinned.lastTop) > 24) { release(); return; }
     pinned.prevTop = pinned.lastTop;
     pinned.lastTop = top;
     pinned.movedAt = pinned.issuedAt = performance.now();
@@ -1907,6 +1911,8 @@ sectionNav = (function initSectionNav() {
     const id = location.hash.slice(1);
     if (byId.has(id)) go(id, { push: false });
   });
+  // Pressing anything in the page (a tab, a button) also ends the navigation.
+  document.addEventListener("pointerdown", (e) => { if (!e.target.closest?.(".section-nav")) release(); }, { passive: true });
   ["wheel", "touchmove", "keydown"].forEach((type) =>
     window.addEventListener(type, (e) => {
       if (type === "keydown" && !["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) return;
