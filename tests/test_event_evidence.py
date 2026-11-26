@@ -201,10 +201,12 @@ class EvidenceHTTPTests(ServerHarness):
         files = [
             "file://localhost/c:/Proyecto/caf%C3%A9%20%231.txt",
             "file:///C:/Proyecto/literal%2520name.txt",
+            '"file:///C:/Proyecto/quoted%20name.txt"',
             r"file://C:\Proyecto\legacy.txt",
             "file:///D:/Proyecto/another-drive.txt",
             "file:///C:/Proyecto-extra/sibling.txt",
             "file://another-host/C:/Proyecto/remote.txt",
+            '"file://another-host/C:/Proyecto/remote.txt"',
             "file:////another-host/C:/Proyecto/network.txt",
             "file:///C:/Proyecto/mi%20archivo.txt?query",
             "file:///C:/Proyecto/mi%20archivo.txt#fragment",
@@ -216,7 +218,7 @@ class EvidenceHTTPTests(ServerHarness):
             "file:///C:/Proyecto/control%00name.txt",
         ]
         primary, extra, _, _ = step_journal.resolve_step_files(files, index, root)
-        self.assertEqual(primary, ["café #1.txt", "literal%20name.txt", "legacy.txt"])
+        self.assertEqual(primary, ["café #1.txt", "literal%20name.txt", "quoted name.txt", "legacy.txt"])
         self.assertEqual(extra, [])
         self.assertEqual(step_journal.norm_abs_path("file:///home/team/file%20name"), "/home/team/file name")
         self.assertEqual(step_journal.norm_abs_path("/home/team/file%20name"), "/home/team/file%20name")

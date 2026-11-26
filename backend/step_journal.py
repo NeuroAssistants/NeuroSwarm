@@ -214,7 +214,7 @@ def detect_forward_clock_skew(snapshot: dict[str, Any], now: float) -> tuple[flo
 
 
 def _is_file_uri(value: Any) -> bool:
-    return isinstance(value, str) and value[:7].lower() == "file://"
+    return isinstance(value, str) and value.lstrip().lstrip("\"'")[:7].lower() == "file://"
 
 
 def _file_uri_path(uri: str) -> str:
@@ -299,7 +299,7 @@ def recorded_path(raw, cwd):
     if not isinstance(raw, str) or len(raw) > 1024 or raw.startswith(("\\", "//")):
         return ""
     absolute = norm_abs_path(raw)
-    if absolute:
+    if absolute or _is_file_uri(raw):
         return absolute
     if not cwd or not raw.strip() or re.match(r"^(?:[A-Za-z][\w+.-]*:|~)", raw):
         return ""
