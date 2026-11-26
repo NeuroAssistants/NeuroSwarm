@@ -15,6 +15,7 @@ import re
 import time
 from typing import Any
 
+from validation import public_event_metadata
 from event_evidence import work_summary
 from step_journal import command_form
 
@@ -57,7 +58,7 @@ def _event(r: dict[str, Any]) -> dict[str, Any]:
             if command:
                 details["command"] = command
     else:
-        details = _json(raw)
+        details = public_event_metadata(r["event_type"], _json(raw))
     return {"key": f"event:{r['id']}", "kind": "event", "id": r["id"], "ts": r["created_at"],
             "created_at": r["created_at"], "updated_at": r["created_at"], "severity": _sev(r["severity"]),
             "state": "RECORDED", "host_id": r["host_id"], "harness": r["harness"], "agent": r["agent_name"],

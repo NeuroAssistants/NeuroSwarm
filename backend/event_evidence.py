@@ -9,6 +9,7 @@ import re
 import zlib
 
 import edit_verification
+from validation import MISSION_REPORT_TYPES, public_event_metadata
 
 from activity_inspector import clean_location, clean_url, evidence_text, is_sensitive_path, protected_command
 
@@ -336,8 +337,11 @@ def detail(db, org, event_id):
     for key in ("evidence_reason", "output_reason", "files_reason", "redaction_reason", "web_resource"):
         if key in work:
             extra[key] = work[key]
+    record = {**event, "kind": "Event", "work": work} if work else None
+    if event["source"] in MISSION_REPORT_TYPES:
+        record = {**event, "kind": "Event", "details": public_event_metadata(event["source"], json.loads(metadata))}
     return {"organization": org, "event_id": event_id, "files": work.get("files", []), **verification, **extra,
-            "record": {**event, "kind": "Event", "work": work} if work else None,
+            "record": record,
             "workspace": work.get("workspace"), "session": work.get("session"), "program": work.get("program"),
             "command_input": execution.get("command_input"), "command_output": execution.get("command_output"),
             "exit_code": execution.get("exit_code"), "output_truncated": bool(execution.get("output_truncated")),

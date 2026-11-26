@@ -4,7 +4,7 @@ import math
 
 from event_evidence import work_summary
 from correlation import clean_task_id
-from validation import ValidationError
+from validation import MISSION_REPORT_TYPES, ValidationError, public_event_metadata
 from work_journal import command_form
 
 ROWS = """
@@ -88,6 +88,8 @@ def history(db, organization, query):
                 row["agent"] = evidence["agent_name"]
             if not row.get("runtime") and isinstance(evidence.get("harness"), str) and evidence["harness"]:
                 row["runtime"] = evidence["harness"]
+        elif row["source"] in MISSION_REPORT_TYPES:
+            row["details"] = public_event_metadata(row["source"], _safe_json_obj(raw))
         elif row["source"] == "observed_step" and raw:
             metadata = json.loads(raw)
             if isinstance(metadata, dict):

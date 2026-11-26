@@ -92,7 +92,7 @@ class Scope:
     def root_of(self, path: Any) -> Path | None:
         s = str(path or "")
         if s.startswith("file://"):
-            s = s[7:]
+            s = _codex_local_path(s)
         if not Path(s).is_absolute():
             return None
         try:
@@ -202,7 +202,7 @@ def clean_path(raw: Any) -> str:
     for _ in range(3):
         s = s.strip().strip('"').strip("'").rstrip("\\")
     if s.startswith("file://"):
-        s = s[7:]
+        s = _codex_local_path(s)
     if not Path(s).is_absolute() or "\n" in s or len(s) > 400:
         return ""
     if ".system_generated/" in s or is_sensitive_path(s):
@@ -1239,7 +1239,9 @@ def _recorded_file(raw: Any, card: dict[str, Any]) -> str:
     supplied = raw.strip()
     if len(supplied) > 1 and supplied[0] == supplied[-1] and supplied[0] in ("'", '"'):
         supplied = supplied[1:-1]
-    supplied = supplied.removeprefix("file://")
+    supplied = _codex_local_path(supplied)
+    if not supplied:
+        return ""
     base = clean_path(card.get("current_folder") or card.get("workspace"))
     if not Path(supplied).is_absolute() and (not base or re.match(r"^(?:[A-Za-z][\w+.-]*:|~|\\\\)", supplied)):
         return ""
@@ -1488,13 +1490,27 @@ def _codex_target(raw, cwd) -> str:
     if root is None:
         return ""
     try:
-        for spelling in (path, path.resolve()):
-            parts = spelling.relative_to(root).parts
+        resolved = path.resolve()
+        lexical_root = root
+        if os.name == "nt" and not path.is_relative_to(root):
+            # Windows can record TEMP or a user directory in DOS 8.3 form.
+            # Expand only the directory name; do not resolve junctions here.
+            import ctypes
+            expand = ctypes.windll.kernel32.GetLongPathNameW
+            for parent in path.parents:
+                size = expand(str(parent), None, 0)
+                if size:
+                    expanded = ctypes.create_unicode_buffer(size)
+                    if expand(str(parent), expanded, size) and Path(expanded.value) == root:
+                        lexical_root = parent
+                        break
+        for spelling, base in ((path, lexical_root), (resolved, root)):
+            parts = spelling.relative_to(base).parts
             if not parts or any(part.startswith(".") for part in parts):
                 return ""
     except (ValueError, RuntimeError, OSError):
         return ""
-    return target
+    return str(resolved)
 
 
 # A standard POSIX shell reports a failed literal cd on stderr. Codex records
@@ -1603,6 +1619,7 @@ def _guarded_operands_local(argv, directory):
 
 
 def _codex_command_step(item, cwd, stamp, read):
+    cwd = _codex_local_path(cwd)
     parsed = [p for p in item.get("parsed_cmd") or [] if isinstance(p, dict)]
     kinds = {p.get("type") for p in parsed}
     command, words = _codex_command_parts(item.get("command"), parsed)

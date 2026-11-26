@@ -50,7 +50,7 @@ from release_manifest import ASSETS, PAGES, VERSION_PATH, build_manifest, render
 from remote_activity import build_tenant_activity_map, ingest_remote_activity, inspect_heartbeat_telemetry
 from tenant_resources import ResourceStores
 from installer import render_install_script, render_powershell_install_script  # noqa: E402
-from validation import ValidationError, sanitize_event, sanitize_heartbeat, validate_host_id  # noqa: E402
+from validation import ValidationError, public_event_metadata, sanitize_event, sanitize_heartbeat, validate_host_id  # noqa: E402
 
 
 SESSION_COOKIE = "sc_session"
@@ -758,7 +758,7 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/events":
                 rows = self.resources.db.query_all("SELECT * FROM events ORDER BY created_at DESC LIMIT 50")
                 for r in rows:
-                    r["metadata"] = json.loads(r.pop("metadata_json") or "{}")
+                    r["metadata"] = public_event_metadata(r["event_type"], json.loads(r.pop("metadata_json") or "{}"))
                 self._send_json({"events": rows})
                 return
 
@@ -797,7 +797,7 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
                 alerts = [incidents.present(a) for a in alerts]
                 events = self.resources.db.query_all("SELECT * FROM events ORDER BY created_at DESC LIMIT 30")
                 for e in events:
-                    e["metadata"] = json.loads(e.pop("metadata_json") or "{}")
+                    e["metadata"] = public_event_metadata(e["event_type"], json.loads(e.pop("metadata_json") or "{}"))
                 audit = self._audit_rows(30) if user["role"] == "admin" else []
                 self._send_json(
                     {

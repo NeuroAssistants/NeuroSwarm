@@ -130,6 +130,22 @@ def sanitize_heartbeat(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+MISSION_REPORT_TYPES = {"agent_message", "decision", "blocker", "memory_saved"}
+
+
+def public_event_metadata(event_type, metadata):
+    """Apply the same field boundary on ingest and on reads of pre-existing reports."""
+    if event_type not in MISSION_REPORT_TYPES:
+        return metadata
+    if not isinstance(metadata, dict):
+        return {}
+    fields = {"workspace": 192, "method": 160, "mission_id": 96, "task_id": 96, "to_agent": 64, "reason": 500}
+    clean = {k: _text(metadata[k], limit) for k, limit in fields.items() if isinstance(metadata.get(k), str)}
+    if isinstance(metadata.get("files"), list):
+        clean["files"] = [_text(path, 320) for path in metadata["files"][:12] if isinstance(path, str)]
+    return clean
+
+
 def sanitize_event(body: dict[str, Any]) -> dict[str, Any]:
     host_id = validate_host_id(body.get("host_id"))
     metadata = body.get("metadata", {})
@@ -144,13 +160,7 @@ def sanitize_event(body: dict[str, Any]) -> dict[str, Any]:
     if len(encoded.encode("utf-8")) > MAX_EVENT_METADATA_BYTES:
         raise ValidationError(f"metadata too large (max {MAX_EVENT_METADATA_BYTES} bytes)")
     event_type = _text(body.get("event_type"), 64, "info")
-    if event_type in {"agent_message", "decision", "blocker", "memory_saved"}:
-        # These reports carry explicitly shared prose only. Unknown metadata can contain private runtime traces.
-        fields = {"workspace": 192, "method": 160, "mission_id": 96, "task_id": 96, "to_agent": 64, "reason": 500}
-        clean = {k: _text(metadata[k], limit) for k, limit in fields.items() if isinstance(metadata.get(k), str)}
-        if isinstance(metadata.get("files"), list):
-            clean["files"] = [_text(path, 320) for path in metadata["files"][:12] if isinstance(path, str)]
-        metadata = clean
+    metadata = public_event_metadata(event_type, metadata)
     severity = _text(body.get("severity"), 16, "INFO").upper()
     if severity not in ALLOWED_SEVERITIES:
         severity = "INFO"

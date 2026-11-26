@@ -1837,6 +1837,8 @@
     let visible = filtered;
     if (filtered.length > state.renderLimit) {
       visible = filtered.slice(0, state.renderLimit);
+      const selected = filtered.find(r => r.key === state.selectedKey);
+      if (selected && !visible.includes(selected)) visible.push(selected);
     }
 
     const prevSelKey = state.selectedKey;
