@@ -24,9 +24,9 @@ PINNED_VERSION = "158.0.8127.88"
 CACHE_ROOT = Path(os.environ.get("SWARMCONTROL_BROWSER_CACHE", Path.home() / ".cache" / "swarmcontrol" / "chrome-headless-shell"))
 
 
-def find_browser() -> str | None:
+def find_browser(*, pinned_only: bool = False) -> str | None:
     env = os.environ.get("SWARMCONTROL_CHROMIUM", "").strip()
-    if env:
+    if env and not pinned_only:
         return env if os.access(env, os.X_OK) else None
     for sub in ("chrome-headless-shell-linux64/chrome-headless-shell",
                 "chrome-headless-shell-mac-arm64/chrome-headless-shell",
@@ -35,6 +35,8 @@ def find_browser() -> str | None:
         p = CACHE_ROOT / PINNED_VERSION / sub
         if p.is_file() and os.access(p, os.X_OK):
             return str(p)
+    if pinned_only:
+        return None
     for name in ("chrome-headless-shell", "chromium", "chromium-browser", "google-chrome", "google-chrome-stable"):
         found = shutil.which(name)
         if found:
@@ -70,20 +72,27 @@ class Browser:
                 f"--user-data-dir={self.profile.name}", "about:blank"]
         if hasattr(os, "geteuid") and os.geteuid() == 0:
             args.insert(1, "--no-sandbox")
-        self.proc = subprocess.Popen(args, preexec_fn=child_fds, pass_fds=(3, 4),
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        os.close(cmd_r)
-        os.close(out_w)
-        self._w = os.fdopen(cmd_w, "wb", buffering=0)
-        self._r = os.fdopen(out_r, "rb", buffering=0)
-        self._id = 0
-        self._lock = threading.Lock()
-        self._cond = threading.Condition()
-        self._results: dict[int, dict] = {}
-        self._listeners: dict[str, list] = {}
-        self._reader = threading.Thread(target=self._read_loop, daemon=True)
-        self._reader.start()
-        self.version = self.send("Browser.getVersion")["product"]
+        with tempfile.TemporaryFile() as startup_log:
+            self.proc = subprocess.Popen(args, preexec_fn=child_fds, pass_fds=(3, 4),
+                                         stdout=subprocess.DEVNULL, stderr=startup_log)
+            os.close(cmd_r)
+            os.close(out_w)
+            self._w = os.fdopen(cmd_w, "wb", buffering=0)
+            self._r = os.fdopen(out_r, "rb", buffering=0)
+            self._id = 0
+            self._lock = threading.Lock()
+            self._cond = threading.Condition()
+            self._results: dict[int, dict] = {}
+            self._listeners: dict[str, list] = {}
+            self._reader = threading.Thread(target=self._read_loop, daemon=True)
+            self._reader.start()
+            try:
+                self.version = self.send("Browser.getVersion")["product"]
+            except (CDPError, OSError) as err:
+                self.close()
+                startup_log.seek(0)
+                diagnostics = startup_log.read(4096).decode("utf-8", errors="replace").strip()
+                raise CDPError(f"Could not start Chromium: {err}\n{diagnostics}") from err
 
     # -- transport -------------------------------------------------------
     def _read_loop(self) -> None:
