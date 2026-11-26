@@ -701,3 +701,80 @@ body {
     fill: none;
   }
 }
+
+/* ---------- Section navigation that follows the page ----------
+   One mint "cel" slides behind the current section's button, the menu stays on screen while scrolling (a sidebar
+   on wide screens, a sticky strip on narrow ones) and the chosen section arrives with a short ink pop. */
+.app-shell .section-nav { position: sticky; top: 16px; z-index: 20; isolation: isolate; }
+@media (min-width: 1051px) {
+  .app-shell .section-nav { max-height: calc(100vh - 32px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+}
+.section-nav .nav-indicator {
+  position: absolute; left: 0; top: 0; z-index: -1; width: 0; height: 0; opacity: 0; pointer-events: none;
+  background: var(--toon-mint); border: 1.5px solid var(--toon-ink); border-radius: var(--toon-r-md);
+  box-shadow: var(--toon-sh-sm);
+}
+.app-shell .section-nav.has-indicator a.is-active {
+  background: transparent; border-color: transparent; box-shadow: none; color: var(--toon-ink);
+}
+.app-shell .section-nav a.is-active .ns-icon { color: var(--toon-ink); }
+.section-nav .nav-live-link { margin-top: 6px; border-top: 1.5px dashed color-mix(in srgb, var(--toon-ink) 35%, transparent); }
+@media (prefers-reduced-motion: no-preference) {
+  .section-nav .nav-indicator {
+    transition: transform 360ms var(--toon-spring), width 260ms ease, height 260ms ease, opacity 160ms ease;
+  }
+}
+
+@media (max-width: 1050px) {
+  .app-shell .section-nav {
+    top: 0; display: flex; flex-wrap: nowrap; gap: 4px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+    overscroll-behavior-x: contain; margin: 0 calc(-1 * clamp(16px, 3.6vw, 60px)) 18px;
+    padding: 8px clamp(16px, 3.6vw, 60px); border-top: 0; border-bottom: 2px solid var(--toon-ink);
+    background: color-mix(in srgb, var(--toon-paper) 94%, transparent);
+    box-shadow: 0 3px 0 color-mix(in srgb, var(--toon-ink) 12%, transparent);
+    backdrop-filter: blur(6px);
+  }
+  .app-shell .section-nav::-webkit-scrollbar { display: none; }
+  .app-shell .section-nav a { flex: 0 0 auto; white-space: nowrap; min-height: 38px; border: 1.5px solid transparent; }
+  .section-nav .nav-live-link { margin-top: 0; border-top: 0; border-left: 1.5px dashed color-mix(in srgb, var(--toon-ink) 35%, transparent); }
+}
+
+/* Arrival: the section lifts in and an ink-and-mint ring fades out around it. */
+.app-shell #main-content > section, .app-shell .grid-2 > section { position: relative; }
+.app-shell .is-arriving::after {
+  content: ""; position: absolute; inset: -7px; border-radius: calc(var(--toon-r-lg) + 6px); pointer-events: none;
+  border: 3px solid var(--toon-mint); box-shadow: 0 0 0 2px var(--toon-ink);
+  opacity: 0;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .app-shell .is-arriving { animation: ns-arrive 620ms var(--toon-spring) both; }
+  .app-shell .is-arriving::after { animation: ns-ring 1000ms ease-out both; }
+  .app-shell .is-arriving :is(.card-head h2, .section-fold-title h2, .overview-head h1) {
+    width: fit-content; max-width: 100%;
+    background: linear-gradient(transparent 68%, var(--toon-mint) 68% 96%, transparent 96%) no-repeat 0 0 / 0% 100%;
+    animation: ns-ink 980ms 80ms ease-in-out both;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-shell .is-arriving::after { opacity: 1; }
+}
+@keyframes ns-arrive {
+  0% { transform: translateY(18px) scale(.985); }
+  60% { transform: translateY(-3px) scale(1.003); }
+  100% { transform: none; }
+}
+@keyframes ns-ring {
+  0% { opacity: 0; transform: scale(.97); }
+  25% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.012); }
+}
+@keyframes ns-ink { 0% { background-size: 0% 100%; background-position: 0 0; } 45%, 70% { background-size: 100% 100%; background-position: 0 0; } 100% { background-size: 0% 100%; background-position: 100% 0; } }
+
+/* The end cap doubles as the room that lets the last sections scroll to the top. */
+.app-shell .console-end {
+  box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 10px;
+  padding: 28px 12px 40px; border-top: 2px dashed color-mix(in srgb, var(--toon-ink) 30%, transparent);
+  color: var(--sc-muted); text-align: center; font-size: .86rem;
+}
+.app-shell .console-end p { margin: 0; }
+.app-shell .console-end .foil-mark { width: 22px; height: 20px; background: repeating-linear-gradient(to bottom, var(--toon-ink) 0 4px, transparent 4px 8px); opacity: .5; }

@@ -258,7 +258,7 @@ class TestFrontendProduct(unittest.TestCase):
         self.assertIn(".host-meters", self.css)
         self.assertIn(".cmdk-card", self.css)
         self.assertIn("prefers-reduced-motion", self.css)
-        self.assertIn("initScrollSpy", self.js)
+        self.assertIn("initSectionNav", self.js)  # scroll-spy, menu marker and section arrival
         self.assertIn("initCommandPalette", self.js)
         self.assertIn('id="cmdk-overlay"', self.html)
 
