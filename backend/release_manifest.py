@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 VERSION_PATH = "/api/v1/version"
-PAGES = {"/": "index.html", "/live": "live.html"}
+PAGES = {"/": "index.html", "/live": "live.html", "/missions": "missions.html"}
 # This is also the server's allowlist of public scripts and styles.
 ASSETS = {
     "/instrument-serif.ttf": "font/ttf",
@@ -19,6 +19,8 @@ ASSETS = {
     "/activity.js": "application/javascript",
     "/needs-attention.js": "application/javascript",
     "/repro-cases.js": "application/javascript",
+    "/missions.js": "application/javascript",
+    "/missions.css": "text/css",
     "/live.js": "application/javascript",
     "/output-coverage.js": "application/javascript",
     "/styles.css": "text/css",

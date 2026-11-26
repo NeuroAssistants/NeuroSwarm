@@ -34,6 +34,7 @@ from db import Database  # noqa: E402
 import incidents
 import event_evidence
 import capture_settings
+import mission_activity
 import output_coverage
 import edit_verification
 import needs_attention
@@ -545,8 +546,29 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/activity":
                 self._send_inventory(self._activity_view())
                 return
+            if path == "/api/v1/missions":
+                payload = mission_activity.activity(self.resources.db, self.resources.org_id)
+                task = (qs.get("task") or [""])[0]
+                if task:
+                    if not clean_task_id(task):
+                        raise ValidationError("Invalid task identifier")
+                    changes = []
+                    for mission in payload["missions"]:
+                        tasks = {e["task_id"]: {"id": e["task_id"]} for e in mission["events"] if e["task_id"]}
+                        changes.append({"id": mission["id"], "tasks": list(tasks.values())})
+                    if not any(t["id"] == task for c in changes for t in c["tasks"]):
+                        self._send_json({"error": "Unknown mission task"}, status=404)
+                        return
+                    links = self._resolve_links({"changes": changes}, [], filter_task_id=task)
+                    self._send_inventory({"organization": payload["organization"], "link": links["by_task"].get(task)})
+                    return
+                self._send_inventory(payload)
+                return
             if path == "/api/v1/work-board":
-                self._send_inventory(self._read_board(user, qs.get("include") == ["activity"]))
+                board = self._read_board(user, qs.get("include") == ["activity"])
+                if qs.get("missions") == ["1"] and "Authorization" not in self.headers:
+                    board["missions"] = mission_activity.activity(self.resources.db, self.resources.org_id)["missions"]
+                self._send_inventory(board)
                 return
             if path == "/api/v1/links":
                 raw_tid = (qs.get("task_id") or [""])[0]

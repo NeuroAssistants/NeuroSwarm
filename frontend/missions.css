@@ -1,0 +1,14 @@
+.missions { max-width: 56rem; margin: auto; padding: clamp(1rem, 4vw, 3rem); }
+.missions nav,.missions header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .8rem; }
+.missions nav { padding-bottom: 1rem; border-bottom: 1px solid var(--sc-line,#93978e); }
+.missions h1 { font: 400 clamp(2.2rem,6vw,4.5rem)/1.1 Georgia,serif; margin: 1.2rem 0; }
+.missions select { display: block; margin: .4rem 0; padding: .6rem; width: 100%; }
+.missions h2,.missions p,.missions li { overflow-wrap: anywhere; }
+.missions button { padding: .45rem .7rem; cursor: pointer; }
+.missions ol { padding: 0; list-style: none; }
+.missions li { border-top: 1px solid var(--sc-line,#93978e); padding: 1rem 0; }
+.missions li p { margin: .5rem 0; }
+.missions .byline { font-size: .9rem; }
+.missions .task-info { margin-top: .6rem; font-size: .88rem; }
+.missions summary { cursor: pointer; }
+.missions a:focus-visible,.missions button:focus-visible,.missions select:focus-visible { outline: 3px solid currentColor; outline-offset: 3px; }

@@ -533,6 +533,7 @@
     const alertCommand = String(details.command || "");
     const cat = isAlert
       ? "guardrail"
+      : ["decision", "blocker", "agent_message", "memory_saved"].includes(src) ? "coordination"
       : src.includes("work_") || src === "plan"
         ? "plan"
         : src.includes("error")
@@ -562,7 +563,9 @@
       command: alertCommand,
       httpStatus,
       message: String(r.title || r.message || src || "Record"),
-      summary: String(r.summary || r.detail || r.message || ""),
+      summary: cat === "coordination" ? [details.to_agent && "To " + details.to_agent,
+        r.message || r.title, details.reason && "Reported reason: " + details.reason].filter(Boolean).join(" · ")
+        : String(r.summary || r.detail || r.message || ""),
       ackedBy: String(r.acked_by || ""),
       ackedAt: parseTs(r.acked_at),
       owner: r.owner || "",
@@ -707,6 +710,20 @@
 
   function normalizeCollaboration(workBoard) {
     const next = new Map();
+    for (const mission of workBoard?.missions || []) {
+      if (mission.source !== "Shared channel") continue; // Reported events already arrive in the persisted feed.
+      for (const event of mission.events) {
+        const key = "channel:" + event.id;
+        const details = {mission: mission.title, task_id: event.task_id, recipient: event.to,
+          reply_to: event.reply, replied_to_excerpt: event.parent_text, source_message: event.id};
+        const item = normalizeFeedRecord({key, kind: "event", source: event.kind, ts: event.time,
+          agent: event.agent, host_id: "channel", harness: "OpenBot", message: event.text || event.kind, details});
+        Object.assign(item, {kind: "Collaboration", category: "coordination", categoryLabel: "Coordinate",
+          changeId: mission.id, taskId: event.task_id, where: mission.title,
+          summary: [event.to && "To " + event.to, event.text].filter(Boolean).join(" · ")});
+        next.set(key, item);
+      }
+    }
     const changes = Array.isArray(workBoard?.collaboration?.changes) ? workBoard.collaboration.changes : [];
     for (const ch of changes) {
       const tasks = Array.isArray(ch.tasks) ? ch.tasks : [];
@@ -3011,7 +3028,7 @@
         const [overview, activity, workBoard] = await Promise.all([
           fetchOverview ? api("/api/v1/overview").catch((e) => (e.status === 401 ? Promise.reject(e) : null)) : Promise.resolve(null),
           fetchRich ? api("/api/v1/activity").catch((e) => (e.status === 401 ? Promise.reject(e) : null)) : Promise.resolve(null),
-          fetchRich ? api("/api/v1/work-board").catch((e) => (e.status === 401 ? Promise.reject(e) : null)) : Promise.resolve(null),
+          fetchRich ? api("/api/v1/work-board?missions=1").catch((e) => (e.status === 401 ? Promise.reject(e) : null)) : Promise.resolve(null),
         ]);
         if (gen !== state.generation) return;
         if (fetchOverview && overview) {

@@ -116,6 +116,7 @@ class BrowserUITests(unittest.TestCase):
                 "harnesses": [{"id": "codex", "name": "Codex CLI", "status": "running", "process_count": 1}], "processes": []},
                 headers={"Authorization": f"Bearer {tok['token']}"})
             assert st == 200, (st, body)
+        cls.mission_ingest = tok["token"]
         now = time.time()
         step = lambda tool, cat, label, ago, files=(), program=None: {  # noqa: E731
             "tool": tool, "category": cat, "label": label, "time": _iso(now - ago), "status": "completed",
@@ -287,6 +288,31 @@ class BrowserUITests(unittest.TestCase):
         self.assert_clean(pg, f"{view} /live org B")
 
     # ------------------------------------------------------------------ tests
+    def test_mission_messages_decisions_blockers_and_memories_link_to_live(self):
+        admin = HttpClient(self.srv.base_url)
+        for kind, text in (("agent_message", "Please review the totals."), ("decision", "Keep one subtotal."),
+                           ("blocker", "The source ledger is missing."), ("memory_saved", "Use the agreed review order.")):
+            status, _, body = admin.json("POST", "/api/v1/ingest/event", {
+                "host_id": "qa-box-02", "harness": "test", "agent_name": "Builder", "severity": "INFO",
+                "event_type": kind, "message": text, "metadata": {"mission_id": "monthly-review",
+                "task_id": "check-totals", "to_agent": "Reviewer" if kind == "agent_message" else "",
+                "reason": "Both sources use one currency." if kind == "decision" else ""}},
+                headers={"Authorization": "Bearer " + self.mission_ingest})
+            self.assertEqual(status, 200, body)
+        for view in VIEWPORTS:
+            pg = self.page(view)
+            self.login(pg)
+            pg.wait("document.querySelector('#mission-preview').textContent.includes('monthly-review')", what="map mission")
+            pg.click("#mission-preview a")
+            pg.wait("document.querySelector('#events').textContent.includes('Builder → Reviewer')", what="message direction")
+            panel = pg.eval("document.querySelector('#events').innerText")
+            for content in ("Both sources use one currency.", "The source ledger is missing.", "Use the agreed review order."):
+                self.assertIn(content, panel)
+            self.assert_clean(pg, view + " mission timeline")
+            pg.click("#events li a")
+            pg.wait("document.querySelector('#detail')?.textContent.includes('Use the agreed review order.')",
+                    what="persisted source event")
+
     def test_desktop_console_and_activity_map(self):
         self._console_and_map("desktop")
 

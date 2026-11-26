@@ -283,6 +283,7 @@ function readInviteFromUrl() {
 }
 
 function clearOrgViews() {
+  document.getElementById("mission-preview")?.replaceChildren();
   workBoardRequest++;
   sessionState.collabInitialized = false;
   sessionState.links = { version: "1", by_task: {}, by_session: {} };
@@ -1279,9 +1280,21 @@ async function loadWorkBoard(events) {
   const el = document.getElementById("work-board");
   if (!el) return;
   try {
-    const board = await api("/api/v1/work-board" + (appView.dataset.includeActivity ? "?include=activity" : ""));
+    const board = await api("/api/v1/work-board?missions=1" + (appView.dataset.includeActivity ? "&include=activity" : ""));
     if (request !== workBoardRequest || appView.classList.contains("hidden")) return;
     sessionState.links = board.links && typeof board.links === "object" ? board.links : { version: "1", by_task: {}, by_session: {} };
+    const preview = document.getElementById("mission-preview");
+    if (preview) {
+      preview.replaceChildren(...(board.missions || []).slice(0, 3).map(mission => {
+        const event = mission.events[0];
+        const row = document.createElement("p");
+        const link = document.createElement("a");
+        link.href = "/missions?" + new URLSearchParams({mission: mission.source + "/" + mission.id});
+        link.textContent = mission.title;
+        row.append(link, " · ", event.agent, event.to ? " → " + event.to : "", " · ", event.text || event.kind);
+        return row;
+      }));
+    }
     const urlTask = new URLSearchParams(window.location.search).get("task") || "";
     if (urlTask && !sessionState.focusedTaskId) sessionState.focusedTaskId = urlTask;
     renderReturnBanner();
