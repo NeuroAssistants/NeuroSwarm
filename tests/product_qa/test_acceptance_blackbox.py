@@ -13,6 +13,7 @@ Exercises a real spawned server process against disposable state directories wit
 from __future__ import annotations
 
 import base64
+from contextlib import closing
 import gzip
 import hashlib
 import hmac
@@ -269,7 +270,7 @@ def _seed_generic_agent_records(
         },
     ]
     rollout.write_text("\n".join(json.dumps(r) for r in codex_records) + "\n", encoding="utf-8")
-    with sqlite3.connect(codex_dir / "state_5.sqlite") as conn:
+    with closing(sqlite3.connect(codex_dir / "state_5.sqlite")) as conn, conn:
         conn.execute(
             "CREATE TABLE threads("
             "id TEXT, cwd TEXT, model TEXT, tokens_used INT, updated_at INT, rollout_path TEXT, model_provider TEXT)"
@@ -1100,7 +1101,7 @@ class ProductAcceptanceBlackBoxTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            with sqlite3.connect(codex_dir / "state_5.sqlite") as conn:
+            with closing(sqlite3.connect(codex_dir / "state_5.sqlite")) as conn, conn:
                 conn.execute(
                     "CREATE TABLE threads("
                     "id TEXT, cwd TEXT, model TEXT, tokens_used INT, updated_at INT, rollout_path TEXT, model_provider TEXT)"

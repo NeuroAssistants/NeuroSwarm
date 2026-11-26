@@ -179,7 +179,7 @@ class WindowsInstallerOutputTests(ServerHarness):
         self.assertIn("alpha-project", output)
         self.assertNotIn(".hidden", output)
         suggestion = next(line for line in output.splitlines() if "SWARMCONTROL_ACTIVITY_ROOTS=" in line)
-        self.assertIn(str(profile / "OpenBot" / "Shared"), suggestion)
+        self.assertIn(str((profile / "OpenBot" / "Shared").resolve()), suggestion)
         self.assertIn(f"http://127.0.0.1:{self.port}/install.ps1 | iex", suggestion)
         status, activity, _ = self.req("GET", "/api/v1/activity")
         self.assertEqual(status, 200)
