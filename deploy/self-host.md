@@ -16,6 +16,37 @@ docker compose -f compose.yaml -f compose.https.yaml up --build -d
 
 Caddy handles certificates and forwards requests to the console. The console's direct port is bound to loopback. Run one application instance per state volume. SQLite and the threaded HTTP application still require load testing before setting a supported concurrency limit.
 
+## Verify a clean Docker installation
+
+The following smoke test passed on Linux with Docker Engine 29.1.3 and Docker Compose 2.40.3. From a clean checkout, use a separate Compose project and an unused loopback port so the test has its own state:
+
+```sh
+export SWARMCONTROL_PORT=18790
+docker compose -p neuroswarm-smoke up --build -d
+docker compose -p neuroswarm-smoke ps
+curl -fsS http://127.0.0.1:18790/health
+docker compose -p neuroswarm-smoke exec -T console cat /data/initial-password
+```
+
+Wait for the console to show `healthy`. Open `http://127.0.0.1:18790`, sign in as `admin` with the bootstrap password, and generate a test enrollment token under **Install & enroll**. On the same Linux machine, run these commands in Bash and enter the token when prompted:
+
+```bash
+observer_dir=$(mktemp -d)
+base_url=http://127.0.0.1:18790
+read -rsp 'Enrollment token: ' SWARMCONTROL_TOKEN
+printf '\n'
+export SWARMCONTROL_TOKEN
+curl -fsS "$base_url/install.sh" |
+  SWARMCONTROL_SERVER="$base_url" SWARMCONTROL_HOST_ID=docker-smoke-observer \
+  SWARMCONTROL_INSTALL_DIR="$observer_dir" bash -s -- --no-service
+SWARMCONTROL_SERVER="$base_url" SWARMCONTROL_HOST_ID=docker-smoke-observer \
+  python3 "$observer_dir/swarmcontrol_agent.py" --emit-event \
+  --event-type docker_smoke --message "Docker smoke observer event"
+unset SWARMCONTROL_TOKEN
+```
+
+Verify that Hosts lists `docker-smoke-observer` and Live Events shows `Docker smoke observer event` from that host. Revoke the test token and remove the temporary observer directory when finished. Use `docker compose -p neuroswarm-smoke down --volumes` to remove the isolated test stack and its disposable data.
+
 ## Account registration
 
 To close public workspace registration, set `SWARMCONTROL_REGISTRATION=closed` in the environment of the console before starting it. With Compose, put the setting in a local `.env` beside `compose.yaml` and run `docker compose up -d` to apply the change. Existing users can sign in, and administrators can invite members. The default is `open`.
