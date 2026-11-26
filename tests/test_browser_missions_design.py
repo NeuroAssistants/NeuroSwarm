@@ -19,6 +19,12 @@ class MissionDesignTests(fixtures.MissionBrowserAcceptanceTests):
                 page.wait("!document.querySelector('#app-view').classList.contains('hidden')")
                 page.goto(self.srv.base_url + '/missions?mission=Reported%20events%2Freconcile')
                 page.wait("document.querySelector('#events li') !== null")
+                page.eval("document.querySelector('.skip-link').focus()")
+                self.assertTrue(page.eval("""(() => {
+                    const link = document.querySelector('.skip-link');
+                    const rect = link.getBoundingClientRect();
+                    return rect.top >= 0 && rect.width > 20 && getComputedStyle(link).clipPath === 'none';
+                })()"""))
                 # Use the real select/change path; preserve the selector focus and its shareable URL.
                 page.eval("""(() => {
                     const select = document.querySelector('#mission');
