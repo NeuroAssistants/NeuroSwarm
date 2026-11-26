@@ -1,0 +1,40 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  product:
+    name: Product and browser tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Find or download Chromium
+        run: |
+          browser="$(python3 deploy/fetch_test_browser.py)"
+          echo "SWARMCONTROL_CHROMIUM=$browser" >> "$GITHUB_ENV"
+      - name: Run product and browser tests
+        run: python3 -m unittest discover -s tests -v
+
+  integrations:
+    name: Integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Run integration tests
+        run: python3 -m unittest discover -s integrations/tests -t . -v
