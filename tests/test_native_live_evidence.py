@@ -118,3 +118,68 @@ class NativeLiveEvidenceTests(ServerHarness):
 
     def test_file_uris_arrive_with_output_and_confirmed_edit(self):
         self.assert_live_evidence(use_uri=True)
+
+    def test_legacy_windows_paths_reach_live_without_observer_normalization(self):
+        self.assertEqual(self.login()[0], 200)
+        sender = self.bearer(self.token())
+        native = r"C:\Proyecto"
+        uri = "file:///C:/Proyecto"
+        sessions = []
+        for session, cwd, target in (
+            ("pi:native", native, native + r"\mi archivo.txt"),
+            ("pi:uri", uri, uri + "/mi%20archivo.txt"),
+        ):
+            edit = {"tool": "edit", "category": "file_edit", "time": stamp(), "status": "completed",
+                    "file_basis": "confirmed", "files": [target]}
+            read = {"tool": "read", "category": "file_read", "time": stamp(1), "files": [target],
+                    "command_output": session + " output", "exit_code": 0}
+            sessions.append({"session_id": session, "harness": "pi", "workspace": cwd, "capture_steps": [edit, read]})
+        payload = {"host_id": HOST, "os_name": "Windows", "activity_roots": [native], "sessions": sessions}
+        status, ack, _ = self.req("POST", "/api/v1/ingest/activity", payload, headers=sender, cookie=False)
+        self.assertEqual(status, 200)
+        self.assertEqual(ack["steps_persisted"], 4)
+        status, retry, _ = self.req("POST", "/api/v1/ingest/activity", payload, headers=sender, cookie=False)
+        self.assertEqual(status, 200)
+        self.assertEqual(retry["steps_persisted"], 0)
+
+        status, history, _ = self.req("GET", "/api/v1/live-records")
+        self.assertEqual(status, 200)
+        records = [r for r in history["records"] if r["host_id"] == HOST and r["source"] == "observed_step"]
+        self.assertCountEqual([(r["work"]["session"], r["work"]["action"]) for r in records],
+                              [(s, a) for s in ("pi:native", "pi:uri") for a in ("file_edit", "file_read")])
+        for record in records:
+            with self.subTest(session=record["work"]["session"], action=record["work"]["action"]):
+                self.assertEqual(record["work"]["files"], ["mi archivo.txt"])
+                status, detail, _ = self.req("GET", f"/api/v1/events/{record['id']}/evidence")
+                self.assertEqual(status, 200)
+                self.assertEqual(detail["files"], ["mi archivo.txt"])
+                if record["work"]["action"] == "file_read":
+                    self.assertEqual(detail["command_output"], record["work"]["session"] + " output")
+                    self.assertEqual(detail["exit_code"], 0)
+
+    def test_legacy_file_uri_results_respect_the_shared_directory(self):
+        self.assertEqual(self.login()[0], 200)
+        shared = "file:///C:/Proyecto"
+        other = "file:///C:/Other"
+        steps = []
+        for cwd, targets in (
+            (shared, [shared + "/visible.txt", other + "/private.txt"]),
+            (other, []),
+            (shared, [shared + "/%2eenv"]),
+        ):
+            steps.append({"tool": "read", "category": "file_read", "cwd": cwd, "time": stamp(len(steps)),
+                          "files": targets, "command_output": PROTECTED_OUTPUT, "exit_code": 0})
+        payload = {"host_id": HOST, "activity_roots": [r"C:\Proyecto"],
+                   "sessions": [{"workspace": shared, "session_id": "pi:mixed", "capture_steps": steps}]}
+        status, ack, _ = self.req("POST", "/api/v1/ingest/activity", payload, headers=self.bearer(self.token()), cookie=False)
+        self.assertEqual(status, 200)
+        self.assertEqual(ack["steps_persisted"], len(steps))
+        status, history, _ = self.req("GET", "/api/v1/live-records")
+        self.assertEqual(status, 200)
+        records = [r for r in history["records"] if r["host_id"] == HOST and r["source"] == "observed_step"]
+        self.assertCountEqual([r["work"]["files"] for r in records], [["visible.txt"], [], []])
+        for record in records:
+            status, detail, _ = self.req("GET", f"/api/v1/events/{record['id']}/evidence")
+            self.assertEqual(status, 200)
+            self.assertIsNone(detail["command_output"])
+            self.assertEqual(detail["output_reason"], "outside_scope")
