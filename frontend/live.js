@@ -3803,6 +3803,10 @@
         dBtn.classList.add("active");
         dBtn.setAttribute("aria-pressed", "true");
       }
+      if (initial.has("event") && initial.has("organization") && !sameActiveOrg(initial.get("organization"))) {
+        state.pendingEventKey = "";
+        toast("This event belongs to a different organization.");
+      }
       await poll(true);
       if (initial.has("incident") && initial.get("organization") === String(state.org?.id)) {
         openIncident(initial.get("incident"));

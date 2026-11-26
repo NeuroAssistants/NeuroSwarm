@@ -701,9 +701,19 @@ function renderCaptureSettings(h) {
       return `<li class="capture-switch is-${cls}" data-capture="${esc(key)}"><span>${esc(label)}</span><strong>${esc(text)}</strong></li>`;
     }).join("");
     const note = s ? "" : `<p class="muted small">This collector did not report its capture settings. Update it to the current version to see them.</p>`;
+    const windows = /windows/i.test(h.os_name || "") && r.source === "observer" && s?.activity;
+    const example = [];
+    if (windows && s.commands === false) example.push("$env:SWARMCONTROL_SHARE_COMMANDS='1'");
+    if (windows && s.command_output === false) example.push("$env:SWARMCONTROL_SHARE_COMMAND_OUTPUT='1'");
+    if (windows && s.file_previews === false) example.push("$env:SWARMCONTROL_SHARE_FILE_PREVIEWS='1'");
+    const guide = example.length ? `<details><summary>Enable more evidence on this Windows host</summary>
+      <p>Run the lines for the evidence you choose, then rerun the installer as the enrolled Windows user.
+      It reuses the saved project folders and host token. These settings apply to future activity.</p>
+      <pre>${esc(example.join("\n") + "\n" + "irm -ErrorAction Stop '" +
+        String(sessionState.publicUrl || window.location.origin).replace(/\/+$/, "").replace(/'/g, "''") + "/install.ps1' | iex")}</pre></details>` : "";
     return `<div class="capture-source" data-capture-source="${esc(r.source)}">
         <div class="capture-source-head"><strong>${esc(CAPTURE_SOURCES[r.source])}</strong><span class="muted small">${esc(when)}${esc(folders)}</span></div>
-        <ul class="capture-switches" aria-label="${esc(CAPTURE_SOURCES[r.source])} capture settings">${chips}</ul>${note}
+        <ul class="capture-switches" aria-label="${esc(CAPTURE_SOURCES[r.source])} capture settings">${chips}</ul>${note}${guide}
       </div>`;
   }).join("");
   return `<h4 class="host-subhead">Capture settings</h4><div class="capture-settings">${rows}</div>`;

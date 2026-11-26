@@ -10,7 +10,7 @@ let organization;
 let generation = 0;
 const sourceEvent = (id, label) => {
   const link = node("a", label);
-  link.href = "/live?" + new URLSearchParams({event: "event:" + id});
+  link.href = "/live?" + new URLSearchParams({event: "event:" + id, organization: String(organization)});
   return link;
 };
 

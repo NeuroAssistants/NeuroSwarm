@@ -556,8 +556,13 @@ class SwarmControlHandler(BaseHTTPRequestHandler):
                     for mission in payload["missions"]:
                         tasks = {e["task_id"]: {"id": e["task_id"]} for e in mission["events"] if e["task_id"]}
                         changes.append({"id": mission["id"], "tasks": list(tasks.values())})
-                    if not any(t["id"] == task for c in changes for t in c["tasks"]):
+                    matches = sum(any(t["id"] == task for t in c["tasks"]) for c in changes)
+                    if not matches:
                         self._send_json({"error": "Unknown mission task"}, status=404)
+                        return
+                    if matches > 1:
+                        self._send_inventory({"organization": payload["organization"], "link": {
+                            "status": "ambiguous", "reason": "Several missions use this task ID. Open an individual source event."}})
                         return
                     links = self._resolve_links({"changes": changes}, [], filter_task_id=task)
                     self._send_inventory({"organization": payload["organization"], "link": links["by_task"].get(task)})
