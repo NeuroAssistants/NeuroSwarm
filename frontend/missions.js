@@ -8,6 +8,12 @@ const node = (tag, value) => {
 let missions = [];
 let organization;
 let generation = 0;
+const kindLabels = {agent_message: "Message", reply: "Reply", decision: "Decision", blocker: "Blocker", memory_saved: "Shared memory", shared_memory_saved: "Shared memory", update: "Update", result: "Result"};
+const styledNode = (tag, value, className) => {
+  const element = node(tag, value);
+  element.className = className;
+  return element;
+};
 const sourceEvent = (id, label) => {
   const link = node("a", label);
   link.href = "/live?" + new URLSearchParams({event: "event:" + id, organization: String(organization)});
@@ -40,17 +46,31 @@ function render() {
   if (!mission) return;
   el("objective").textContent = mission.title;
   const agents = new Set(mission.events.flatMap(event => [event.agent, event.to]).filter(Boolean));
-  el("participants").textContent = [...agents].join(" · ");
+  el("participants").replaceChildren(...[...agents].map(agent => node("span", agent)));
+  el("event-count").textContent = mission.events.length;
+  el("agent-count").textContent = agents.size;
   const nodes = mission.events.map(event => {
-    const row = node("li", "");
+    const row = styledNode("li", "", "mission-card timeline-card");
+    const kind = String(event.kind || "Update").toLowerCase().replace(/\s+/g, "_");
+    row.dataset.kind = kind;
     const stamp = new Date(event.time * 1000);
     const date = event.time ? stamp.toLocaleString() : "Time unavailable";
-    row.append(node("strong", event.agent + (event.to ? " → " + event.to : "")));
-    row.append(node("p", event.kind + " · " + date + " · " + mission.source));
-    if (event.parent_text) row.append(node("blockquote", event.parent_text));
-    row.append(node("p", event.text || "Content unavailable for this event."));
-    if (event.reason) row.append(node("p", "Reported reason: " + event.reason));
-    if (event.event_id) row.append(sourceEvent(event.event_id, "Open source event in Live"));
+    const meta = styledNode("div", "", "timeline-meta");
+    const time = node("time", date);
+    if (event.time && !Number.isNaN(stamp.getTime())) time.dateTime = stamp.toISOString();
+    meta.append(styledNode("span", kindLabels[kind] || event.kind || "Update", "timeline-kind"), time);
+    row.append(meta, styledNode("strong", event.agent + (event.to ? " → " + event.to : ""), "timeline-agent"));
+    if (event.parent_text) {
+      const reply = styledNode("div", "", "timeline-reply");
+      reply.append(node("span", "In reply to"), node("blockquote", event.parent_text));
+      row.append(reply);
+    }
+    row.append(styledNode("p", event.text || "Content unavailable for this event.", "timeline-text"));
+    if (event.reason) row.append(styledNode("p", "Reported reason: " + event.reason, "timeline-reason"));
+    const source = styledNode("div", "", "timeline-source");
+    source.append(node("span", mission.source));
+    if (event.event_id) source.append(sourceEvent(event.event_id, "Open source event in Live"));
+    row.append(source);
     if (event.task_id) {
       const details = document.createElement("details");
       details.className = "task-info";
@@ -66,6 +86,7 @@ function render() {
 
 async function refresh() {
   const version = ++generation;
+  el("refresh").disabled = true;
   const previous = el("mission").value || new URLSearchParams(location.search).get("mission");
   el("signin").hidden = true;
   try {
@@ -91,9 +112,20 @@ async function refresh() {
     el("events").replaceChildren();
     el("view").hidden = true;
     el("status").textContent = el("signin").hidden ? "Could not load mission evidence. Refresh to retry." : "An operator session is required.";
+  } finally {
+    if (version === generation) el("refresh").disabled = false;
   }
 }
-el("mission").addEventListener("change", render);
+el("mission").addEventListener("change", () => {
+  render();
+  const url = new URL(location.href);
+  url.searchParams.set("mission", el("mission").value);
+  history.replaceState(null, "", url);
+  const stream = document.querySelector(".mission-stream");
+  stream.classList.remove("is-arriving");
+  void stream.offsetWidth;
+  stream.classList.add("is-arriving");
+});
 el("refresh").addEventListener("click", refresh);
 window.addEventListener("pageshow", refresh);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
