@@ -24,9 +24,9 @@ PINNED_VERSION = "158.0.8127.88"
 CACHE_ROOT = Path(os.environ.get("SWARMCONTROL_BROWSER_CACHE", Path.home() / ".cache" / "swarmcontrol" / "chrome-headless-shell"))
 
 
-def find_browser() -> str | None:
+def find_browser(*, pinned_only: bool = False) -> str | None:
     env = os.environ.get("SWARMCONTROL_CHROMIUM", "").strip()
-    if env:
+    if env and not pinned_only:
         return env if os.access(env, os.X_OK) else None
     for sub in ("chrome-headless-shell-linux64/chrome-headless-shell",
                 "chrome-headless-shell-mac-arm64/chrome-headless-shell",
@@ -35,6 +35,8 @@ def find_browser() -> str | None:
         p = CACHE_ROOT / PINNED_VERSION / sub
         if p.is_file() and os.access(p, os.X_OK):
             return str(p)
+    if pinned_only:
+        return None
     for name in ("chrome-headless-shell", "chromium", "chromium-browser", "google-chrome", "google-chrome-stable"):
         found = shutil.which(name)
         if found:

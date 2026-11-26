@@ -21,8 +21,19 @@ jobs:
           persist-credentials: false
       - name: Find or download Chromium
         run: |
-          browser="$(python3 deploy/fetch_test_browser.py)"
+          browser="$(python3 deploy/fetch_test_browser.py --pinned)"
+          "$browser" --version
           echo "SWARMCONTROL_CHROMIUM=$browser" >> "$GITHUB_ENV"
+      - name: Confirm the browser responds
+        run: |
+          PYTHONPATH=tests python3 - <<'PYTHON'
+          import browser_cdp
+          browser = browser_cdp.Browser(browser_cdp.find_browser())
+          try:
+              print(browser.version)
+          finally:
+              browser.close()
+          PYTHON
       - name: Run product and browser tests
         run: python3 -m unittest discover -s tests -v
 

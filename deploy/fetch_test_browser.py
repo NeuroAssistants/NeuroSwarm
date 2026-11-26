@@ -47,8 +47,9 @@ def platform_key() -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--check", action="store_true", help="only report whether a browser is available")
+    ap.add_argument("--pinned", action="store_true", help="use the pinned download even if another browser is installed")
     args = ap.parse_args()
-    found = browser_cdp.find_browser()
+    found = browser_cdp.find_browser(pinned_only=args.pinned)
     if found or args.check:
         print(found or "missing: run python3 deploy/fetch_test_browser.py")
         return 0 if found else 1
@@ -76,7 +77,7 @@ def main() -> int:
                 mode = member.external_attr >> 16
                 if mode:
                     os.chmod(target, mode)
-    found = browser_cdp.find_browser()
+    found = browser_cdp.find_browser(pinned_only=args.pinned)
     if not found:
         raise SystemExit("Download finished but no executable was found; set SWARMCONTROL_CHROMIUM.")
     print(found)
