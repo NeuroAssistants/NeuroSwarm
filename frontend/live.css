@@ -1401,3 +1401,18 @@ dialog :focus-visible {
   .toolbar { max-height: 140px; overflow-y: auto; }
   .table-wrap { min-height: 80px; }
 }
+
+/* Output coverage uses the same event inspector for each matched call. */
+#open-output-coverage { margin: 5px 8px; }
+#output-coverage [hidden], #coverage-status:empty { display: none; }
+#coverage-status, #coverage-summary p { margin: 0 0 6px; }
+.coverage-scroll { min-width: 0; max-width: 100%; overflow-x: auto; }
+.coverage-table { width: 100%; border-collapse: collapse; }
+.coverage-table th, .coverage-table td {
+  padding: 7px 8px; text-align: start; vertical-align: top; border-bottom: 1px solid var(--sc-line);
+}
+.coverage-table thead, .coverage-table tbody tr:first-child { background: var(--sc-paper); }
+.coverage-table button { margin: 1px 3px 2px 0; }
+.coverage-table tbody th { max-width: 16em; overflow-wrap: anywhere; }
+#coverage-events { padding: 0; list-style: none; }
+#coverage-events li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin-block: 5px; }

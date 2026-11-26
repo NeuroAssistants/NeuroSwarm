@@ -67,6 +67,7 @@
           <div class="tree-group">
             <div class="tree-heading">Perspectives</div>
             <ul id="perspectives" class="tree-list" aria-label="Event perspectives"></ul>
+            <button type="button" id="open-output-coverage" class="btn small" aria-haspopup="dialog">Output coverage</button>
           </div>
           <div class="tree-group">
             <div class="tree-heading">Hosts &amp; Nodes</div>
@@ -262,6 +263,43 @@
     </div>
   </div>
 
+  <dialog id="output-coverage" class="event-dialog" aria-labelledby="coverage-title">
+    <header class="event-dialog-head">
+      <div class="event-dialog-title-wrap">
+        <h2 id="coverage-title">Output coverage</h2>
+        <p id="coverage-period" class="event-dialog-sub"></p>
+      </div>
+      <form method="dialog"><button class="btn" autofocus>Close</button></form>
+    </header>
+    <div class="event-dialog-body">
+      <div class="incident-controls">
+        <label for="coverage-window">Time window</label>
+        <select id="coverage-window">
+          <option value="3600">Last hour</option>
+          <option value="86400">Last 24 hours</option>
+          <option value="604800">Last 7 days</option>
+        </select>
+        <button id="coverage-refresh" type="button" class="btn small">Refresh counts</button>
+      </div>
+      <p id="coverage-status" role="status" aria-live="polite"></p>
+      <section id="coverage-summary" aria-label="Counts by program">
+        <p>Completed calls have a final status, output or exit code. Recorded output includes empty results. Pending calls are excluded from output counts. File previews are counted separately.</p>
+        <div class="coverage-scroll" role="region" aria-label="Program counts" tabindex="0">
+          <table class="coverage-table">
+            <thead><tr><th scope="col">Program or tool</th><th scope="col">Completed</th><th scope="col">Output recorded</th><th scope="col">Output missing</th><th scope="col">Breakdown</th></tr></thead>
+            <tbody id="coverage-counts"></tbody>
+          </table>
+        </div>
+      </section>
+      <section id="coverage-detail" aria-labelledby="coverage-selection" hidden>
+        <button id="coverage-back" type="button" class="btn small">Back to counts</button>
+        <h3 id="coverage-selection" tabindex="-1"></h3>
+        <ol id="coverage-events"></ol>
+        <button id="coverage-more" type="button" class="btn small" hidden>Show more events</button>
+      </section>
+    </div>
+  </dialog>
+
   <dialog id="incident-dialog" aria-labelledby="incident-heading">
     <header class="incident-head">
       <h2 id="incident-heading">Incident</h2>
@@ -288,6 +326,7 @@
 
   <div id="a11y-announce" class="sr-only" aria-live="polite" aria-atomic="true"></div>
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  <script defer src="/output-coverage.js"></script>
   <script defer src="/live.js"></script>
 </body>
 </html>

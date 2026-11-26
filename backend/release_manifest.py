@@ -20,6 +20,7 @@ ASSETS = {
     "/needs-attention.js": "application/javascript",
     "/repro-cases.js": "application/javascript",
     "/live.js": "application/javascript",
+    "/output-coverage.js": "application/javascript",
     "/styles.css": "text/css",
     "/activity-product.css": "text/css",
     "/needs-attention.css": "text/css",
