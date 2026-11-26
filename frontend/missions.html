@@ -3,24 +3,50 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#192823">
   <title>Mission timeline · NeuroSwarm</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/identity.css">
   <link rel="stylesheet" href="/missions.css">
   <script defer src="/missions.js"></script>
 </head>
-<body>
+<body class="mission-page">
+  <a href="#mission" class="skip-link sr-only">Skip to mission selector</a>
+  <header class="topbar mission-topbar">
+    <div class="topbar-inner">
+      <a href="/" class="desk-brand" aria-label="NeuroSwarm control room"><span class="foil-mark" aria-hidden="true"></span>NeuroSwarm</a>
+      <nav class="mission-nav" aria-label="Console">
+        <a href="/#activity">Activity map</a>
+        <a href="/missions" aria-current="page">Missions</a>
+        <a href="/live">Live events</a>
+      </nav>
+    </div>
+  </header>
   <main class="missions">
-    <nav aria-label="Console"><a href="/#activity">← Activity map</a><a href="/live">Live events</a></nav>
-    <header><h1>Mission timeline</h1><button id="refresh" type="button">Refresh</button></header>
-    <p id="status" role="status">Loading recent missions…</p>
-    <section id="view" hidden>
-      <label for="mission">Mission</label>
-      <select id="mission"></select>
-      <h2 id="objective"></h2>
-      <p id="participants"></p>
-      <ol id="events" aria-label="Most recent evidence first"></ol>
-    </section>
-    <p id="signin" hidden><a href="/#access">Sign in to the control room</a></p>
+    <header class="mission-heading">
+      <div><p class="mission-eyebrow">TEAM ACTIVITY / MISSIONS</p><h1>Mission timeline<span aria-hidden="true">.</span></h1>
+      <p class="mission-deck">Follow the conversation. See the decisions and the work behind them.</p></div>
+      <button id="refresh" class="btn" type="button">Refresh</button>
+    </header>
+    <p id="status" class="mission-status" role="status">Loading recent missions…</p>
+    <div id="view" class="mission-layout" hidden>
+      <aside class="mission-context" aria-label="Selected mission">
+        <section class="mission-card mission-picker">
+          <label for="mission">Choose a mission</label>
+          <select id="mission" aria-describedby="mission-help"></select>
+          <p id="mission-help" class="muted small">Recent missions with recorded activity.</p>
+          <div class="mission-objective"><p class="mission-eyebrow">THE OBJECTIVE</p><h2 id="objective"></h2></div>
+          <dl class="mission-stats"><div><dt>Updates</dt><dd id="event-count">0</dd></div><div><dt>Participants</dt><dd id="agent-count">0</dd></div></dl>
+          <h3 class="mission-eyebrow">IN THIS MISSION</h3><div id="participants" class="mission-participants"></div>
+        </section>
+        <p class="mission-note">From shared reports and messages. Each linked event opens its original evidence in Live.</p>
+      </aside>
+      <section class="mission-stream" aria-labelledby="timeline-title">
+        <div class="timeline-heading"><h2 id="timeline-title">The story so far</h2><span>Newest first</span></div>
+        <ol id="events" aria-label="Most recent evidence first"></ol>
+      </section>
+    </div>
+    <section id="signin" class="mission-card mission-signin" hidden><h2>Step into the control room</h2><p>Sign in to see your team's missions and shared activity.</p><a href="/#access" class="btn primary">Sign in to the control room →</a></section>
   </main>
 </body>
 </html>
