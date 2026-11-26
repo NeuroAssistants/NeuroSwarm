@@ -195,6 +195,34 @@ class EvidenceHTTPTests(ServerHarness):
         self.assertIsNone(event_evidence.image_type(b"<svg></svg>"))
         self.assertIsNone(event_evidence.image_type(base64.b64decode(PNG)[:-1]))
 
+    def test_remote_file_uris_remain_inside_the_reporters_shared_roots(self):
+        root = r"C:\Proyecto"
+        index = step_journal.build_root_index([root])
+        files = [
+            "file://localhost/c:/Proyecto/caf%C3%A9%20%231.txt",
+            "file:///C:/Proyecto/literal%2520name.txt",
+            '"file:///C:/Proyecto/quoted%20name.txt"',
+            r"file://C:\Proyecto\legacy.txt",
+            "file:///D:/Proyecto/another-drive.txt",
+            "file:///C:/Proyecto-extra/sibling.txt",
+            "file://another-host/C:/Proyecto/remote.txt",
+            '"file://another-host/C:/Proyecto/remote.txt"',
+            "file:////another-host/C:/Proyecto/network.txt",
+            "file:///C:/Proyecto/mi%20archivo.txt?query",
+            "file:///C:/Proyecto/mi%20archivo.txt#fragment",
+            "file:///C:/Proyecto/%2eenv",
+            "file:///C:/Proyecto/%2e%2e/other.txt",
+            "file:///C:/Proyecto/encoded%2Fseparator.txt",
+            "file:///C:/Proyecto/encoded%5Cseparator.txt",
+            "file:///C:/Proyecto/invalid%FFname.txt",
+            "file:///C:/Proyecto/control%00name.txt",
+        ]
+        primary, extra, _, _ = step_journal.resolve_step_files(files, index, root)
+        self.assertEqual(primary, ["café #1.txt", "literal%20name.txt", "quoted name.txt", "legacy.txt"])
+        self.assertEqual(extra, [])
+        self.assertEqual(step_journal.norm_abs_path("file:///home/team/file%20name"), "/home/team/file name")
+        self.assertEqual(step_journal.norm_abs_path("/home/team/file%20name"), "/home/team/file%20name")
+
 
 class SourceEvidenceTests(CaptureHarness):
     def test_both_source_readers_hide_private_windows_and_relative_file_names(self):

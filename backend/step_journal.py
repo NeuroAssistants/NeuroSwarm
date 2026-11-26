@@ -17,6 +17,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 import event_evidence
 import line_survival
@@ -212,12 +213,40 @@ def detect_forward_clock_skew(snapshot: dict[str, Any], now: float) -> tuple[flo
     return (skew, skew > FUTURE_GRACE_SEC)
 
 
+def _is_file_uri(value: Any) -> bool:
+    return isinstance(value, str) and value.lstrip().lstrip("\"'")[:7].lower() == "file://"
+
+
+def _file_uri_path(uri: str) -> str:
+    """Decode a reporter's local file URI without using the server's path conventions."""
+    if any(ord(c) < 32 for c in uri):
+        return ""  # urlsplit would silently discard embedded tabs and newlines.
+    native = uri[7:]
+    if re.match(r"^[A-Za-z]:[/\\]", native):
+        # Early observers sometimes prefixed a native drive path verbatim.
+        return native
+    try:
+        parts = urlsplit(uri)
+        if parts.netloc.lower() not in ("", "localhost") or parts.query or parts.fragment:
+            return ""
+        path = parts.path
+        if not path.startswith("/") or path.startswith("//") or "\\" in path:
+            return ""
+        if re.search(r"%(?:2f|5c)", path, re.IGNORECASE) or re.search(r"%(?![0-9a-fA-F]{2})", path):
+            return ""
+        path = unquote(path, errors="strict")
+    except ValueError:
+        return ""
+    # /C:/ is a drive in a file URI, even when the receiving console runs on Linux.
+    return path[1:] if re.match(r"^/[A-Za-z]:/", path) else path
+
+
 def norm_abs_path(raw: Any) -> str:
     """Normalize POSIX or Windows absolute paths safely without resolving remote symlinks."""
     s = str(raw or "").strip().strip('"').strip("'")
-    if s.startswith("file://"):
-        s = s[7:]
-    if not s or "\0" in s or any(ord(c) < 32 for c in s):
+    if _is_file_uri(s):
+        s = _file_uri_path(s)
+    if not s or any(ord(c) < 32 for c in s):
         return ""
     s = re.sub(r"/+", "/", s.replace("\\", "/"))
     if s != "/" and not re.fullmatch(r"[A-Za-z]:/", s):
@@ -270,7 +299,7 @@ def recorded_path(raw, cwd):
     if not isinstance(raw, str) or len(raw) > 1024 or raw.startswith(("\\", "//")):
         return ""
     absolute = norm_abs_path(raw)
-    if absolute:
+    if absolute or _is_file_uri(raw):
         return absolute
     if not cwd or not raw.strip() or re.match(r"^(?:[A-Za-z][\w+.-]*:|~)", raw):
         return ""
@@ -382,7 +411,8 @@ def _step_in_scope(cwd: Any, project: Any, extra_scope: Any, root_index: Any) ->
         if project is not None:
             resolved = Path(norm_abs_path(cwd) or cwd).resolve()
             return resolved.is_relative_to(project) or bool(extra_scope and extra_scope.contains(str(resolved)))
-        return bool(root_index and _match_root(norm_abs_path(cwd), root_index))
+        normalized = norm_abs_path(cwd)
+        return bool(normalized and not is_sensitive_path(normalized) and _match_root(normalized, root_index))
     except (OSError, ValueError, RuntimeError):
         return False
 
@@ -574,7 +604,7 @@ def project_rows(
             except (ValueError, OSError, RuntimeError):
                 scoped = False
         else:
-            scoped = bool(activity_enabled and global_roots and _match_root(norm_abs_path(workspace_str), root_index))
+            scoped = bool(activity_enabled and global_roots and _step_in_scope(workspace_str, None, None, root_index))
         seen: collections.Counter[tuple[Any, ...]] = collections.Counter()
         legacy_seen: collections.Counter[tuple[Any, ...]] = collections.Counter()
         steps = session.get("capture_steps") if session.get("capture_steps") is not None else session.get("steps", [])
@@ -740,17 +770,24 @@ def project_rows(
             # A session started in an agent's own folder can still run a command inside a shared folder: that command's
             # evidence is shared when it ran there, or when the files it named resolve inside the shared folders.
             step_scoped = scoped
-            if project is not None:
-                if step.get("cwd"):
-                    step_scoped = _step_in_scope(step["cwd"], project, extra_scope, root_index)
-                # The inspector can see more than the journal may share. A mixed read's
-                # output cannot be partitioned by file, even if one operand is visible.
-                for path in step.get("files") or []:
-                    primary, extra, _ = journal_files([path], project, extra_scope, step_cwd)
+            paths = step.get("files") or []
+            uri_location = _is_file_uri(workspace_str) or _is_file_uri(step_cwd)
+            # Current observers check native directories on the host, which can resolve Windows 8.3 aliases.
+            # Older reports can leave URI directories or operands for the receiving journal to interpret.
+            if step.get("cwd") and (project is not None or (scoped and uri_location)):
+                step_scoped = _step_in_scope(step["cwd"], project, extra_scope, root_index)
+            output_scoped = step_scoped
+            if step_scoped and (project is not None or uri_location or any(_is_file_uri(path) for path in paths)):
+                # A mixed read's output cannot be partitioned by file, even if one operand is visible.
+                for path in paths:
+                    if project is None:
+                        primary, extra, _, _ = resolve_step_files([path], root_index, step_cwd)
+                    else:
+                        primary, extra, _ = journal_files([path], project, extra_scope, step_cwd)
                     if not (primary or extra):
-                        step_scoped = False
+                        output_scoped = False
                         break
-            if step_scoped and evidence_by_key is not None:
+            if step_scoped and (project is None or output_scoped) and evidence_by_key is not None:
                 ref = event_evidence.step_reference(host_id, session_id, step)
                 shared_paths = []
                 previews = [(field, item) for field in ("image_previews", "text_previews")
@@ -769,8 +806,12 @@ def project_rows(
                         if display and display[0] in all_files:
                             shared_paths.append((field, item, display[0]))
                 if ref or shared_paths or any(k in step for k in ("command_input", "command_output", "exit_code", "native_call_ref")):
-                    evidence_by_key.setdefault(key, (step, shared_paths, ref))
-            if evidence_reasons(context, step, category, step_scoped, all_files, harness):
+                    # Remote previews attach to individually checked files. The command result covers every operand.
+                    stored = step if output_scoped else dict(
+                        step, command_input=None, command_output=None, exit_code=None, output_truncated=False
+                    )
+                    evidence_by_key.setdefault(key, (stored, shared_paths, ref))
+            if evidence_reasons(context, step, category, output_scoped, all_files, harness):
                 final_metadata = json.dumps(context, sort_keys=True, ensure_ascii=False)
             # Labels may change without changing a legacy event's deduplication keys.
             raw_command = step.get("command_input") or step.get("command")
