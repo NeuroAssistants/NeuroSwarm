@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import time
 
+import capture_settings
 from activity_inspector import Capture, Scope, collect_activity
 from step_journal import (
     ACTIONS,
@@ -69,7 +70,14 @@ def capture_once(db, agents, project, now=None, extra_scope=None, scope=None):
     started = time.perf_counter()
     capture = Capture(load_offsets(db))
     snapshot = collect_activity(scope, capture)
-    return record(db, snapshot, agents, project, now or time.time(), extra_scope, capture, started)
+    result = record(db, snapshot, agents, project, now or time.time(), extra_scope, capture, started)
+    # What this journal may share for its host (issue #11): switches and a folder count, never a path.
+    host_id = snapshot.get("host_id")
+    if host_id:
+        folders = 1 + len(getattr(extra_scope, "roots", []) or [])
+        with db:
+            capture_settings.store(db, host_id, "journal", capture_settings.local_settings(folders), now)
+    return result
 
 
 def main():

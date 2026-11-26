@@ -674,6 +674,36 @@ function renderProcessFolders(processes) {
     <p class="muted small">A process was seen in each folder. This observation does not identify who edited a file.</p>`;
 }
 
+/* What each collector on a host may share, as it last reported it (issue #11). Older collectors report nothing: Unknown. */
+const CAPTURE_SWITCHES = [
+  ["activity", "Agent activity"], ["commands", "Command text"], ["command_output", "Command output"],
+  ["file_previews", "File previews"], ["line_survival", "Lines still in the code"],
+];
+const CAPTURE_SOURCES = { observer: "Observer", journal: "Local activity journal" };
+function renderCaptureSettings(h) {
+  const reports = Array.isArray(h.capture_settings) ? h.capture_settings.filter((r) => r && CAPTURE_SOURCES[r.source]) : [];
+  if (!reports.some((r) => r.source === "observer")) reports.unshift({ source: "observer", settings: null, reported_at: null });
+  const state = (settings, key) => {
+    const v = settings && typeof settings[key] === "boolean" ? settings[key] : null;
+    return v === null ? ["unknown", "Unknown"] : v ? ["on", "On"] : ["off", "Off"];
+  };
+  const rows = reports.map((r) => {
+    const s = r.settings && typeof r.settings === "object" ? r.settings : null;
+    const folders = s && Number.isInteger(s.shared_folders) ? ` · ${s.shared_folders} shared folder${s.shared_folders === 1 ? "" : "s"}` : "";
+    const when = r.reported_at ? `reported ${fmtAge(r.reported_at)}` : "never reported";
+    const chips = CAPTURE_SWITCHES.map(([key, label]) => {
+      const [cls, text] = state(s, key);
+      return `<li class="capture-switch is-${cls}" data-capture="${esc(key)}"><span>${esc(label)}</span><strong>${esc(text)}</strong></li>`;
+    }).join("");
+    const note = s ? "" : `<p class="muted small">This collector did not report its capture settings. Update it to the current version to see them.</p>`;
+    return `<div class="capture-source" data-capture-source="${esc(r.source)}">
+        <div class="capture-source-head"><strong>${esc(CAPTURE_SOURCES[r.source])}</strong><span class="muted small">${esc(when)}${esc(folders)}</span></div>
+        <ul class="capture-switches" aria-label="${esc(CAPTURE_SOURCES[r.source])} capture settings">${chips}</ul>${note}
+      </div>`;
+  }).join("");
+  return `<h4 class="host-subhead">Capture settings</h4><div class="capture-settings">${rows}</div>`;
+}
+
 function renderHosts(hosts) {
   const el = document.getElementById("hosts-list");
   if (!hosts.length) {
@@ -735,6 +765,7 @@ function renderHosts(hosts) {
           <div class="item-meta">
             Observer: ${esc(h.agent_rss_mb)} MB / ${esc(h.scan_duration_ms)} ms · Seen ${fmtAge(h.last_seen_at)}
           </div>
+          ${renderCaptureSettings(h)}
           <h4 class="host-subhead">Runtime inventory</h4>
           <div class="runtime-inventory">${harnessesHtml || '<span class="muted small">No harnesses detected</span>'}</div>
           ${renderProcessFolders(h.processes || [])}
