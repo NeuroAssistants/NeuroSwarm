@@ -284,8 +284,12 @@ function readInviteFromUrl() {
   }
 }
 
+// The preview keeps its height while it loads, so the map's tabs below it do not jump when the missions arrive.
+const MISSION_PREVIEW_LOADING = '<h3 class="mp-heading">Latest missions</h3><ol class="mp-grid" aria-busy="true"><li class="mp-card mp-skeleton" aria-hidden="true"></li><li class="mp-card mp-skeleton" aria-hidden="true"></li><li class="mp-card mp-skeleton" aria-hidden="true"></li></ol>';
+
 function clearOrgViews() {
-  document.getElementById("mission-preview")?.replaceChildren();
+  const preview = document.getElementById("mission-preview");
+  if (preview) { preview.classList.remove("hidden"); preview.innerHTML = MISSION_PREVIEW_LOADING; delete preview.dataset.rendered; }
   workBoardRequest++;
   sessionState.collabInitialized = false;
   sessionState.links = { version: "1", by_task: {}, by_session: {} };
@@ -1299,7 +1303,7 @@ function renderMissionPreview(missions) {
   if (!preview) return;
   const list = missions.filter((m) => m && Array.isArray(m.events) && m.events.length).slice(0, 3);
   preview.classList.toggle("hidden", !list.length);
-  if (!list.length) { preview.replaceChildren(); return; }
+  if (!list.length) { preview.replaceChildren(); delete preview.dataset.rendered; return; }
   const kindClass = (kind) => /block|problem/i.test(kind || "") ? "is-blocker" : /decision/i.test(kind || "") ? "is-decision"
     : /memory/i.test(kind || "") ? "is-memory" : /repl|message/i.test(kind || "") ? "is-message" : "";
   const cards = list.map((mission) => {
@@ -1321,7 +1325,12 @@ function renderMissionPreview(missions) {
       </a>
     </li>`;
   }).join("");
-  preview.innerHTML = `<h3 class="mp-heading">Latest missions</h3><ol class="mp-grid">${cards}</ol>`;
+  const html = `<h3 class="mp-heading">Latest missions</h3><ol class="mp-grid">${cards}</ol>`;
+  if (html === preview.dataset.rendered) return;          // the 10 s refresh changed nothing: keep hover and scroll
+  const left = preview.querySelector(".mp-grid")?.scrollLeft || 0;
+  preview.innerHTML = html;
+  preview.dataset.rendered = html;
+  preview.querySelector(".mp-grid").scrollLeft = left;
 }
 
 async function loadWorkBoard(events) {
@@ -1397,6 +1406,8 @@ async function loadWorkBoard(events) {
       showLogin();
       return;
     }
+    const preview = document.getElementById("mission-preview");
+    if (preview?.querySelector(".mp-skeleton")) preview.classList.add("hidden");   // no data: no empty placeholders
     document.dispatchEvent(new CustomEvent("agent-reports", { detail: { reports: events } }));
     el.innerHTML = renderCollaboration(null, new Set(), false) + "<h3>Recent agent reports</h3>" + renderWorkReports(events, new Set());
   }
@@ -1856,7 +1867,19 @@ sectionNav = (function initSectionNav() {
   const schedule = () => { if (!frame) frame = nextFrame(update); };
 
   // Panels above the target finish loading after the click and push it down. While the choice is pinned and the
-  // person has not scrolled on their own, follow the target to its final place.
+  // person has not scrolled on their own, follow the target to its final place. Every scroll we start is recorded,
+  // so a scroll by anyone else (wheel, scrollbar, a script) can be told apart.
+  const scrollFor = (top, smooth) => {
+    Object.assign(pinned, { from: window.scrollY, lastTop: top, smooth, issuedAt: performance.now() });
+    window.scrollTo({ top, behavior: smooth ? "smooth" : "instant" });
+  };
+  const onCourse = () => {
+    const y = window.scrollY, { from, lastTop } = pinned;
+    if (pinned.smooth && performance.now() - pinned.issuedAt < 1200) {
+      return y >= Math.min(from, lastTop) - 24 && y <= Math.max(from, lastTop) + 24;
+    }
+    return Math.abs(y - lastTop) <= 2;          // resting exactly where we put it: nobody else has scrolled
+  };
   const settle = () => {
     if (!pinned || performance.now() > pinned.until) return;
     const el = document.getElementById(pinned.id);
@@ -1864,12 +1887,10 @@ sectionNav = (function initSectionNav() {
     const top = targetTop(el);
     if (Math.abs(top - pinned.lastTop) <= 4) return;
     if (Math.abs(window.scrollY - top) <= 4) { pinned.lastTop = top; return; }   // the browser kept it in place
-    // Away from where we were heading and not on our way there: the person moved on; stop following.
-    if (performance.now() - pinned.issuedAt > 1200 && Math.abs(window.scrollY - pinned.lastTop) > 24) { release(); return; }
+    if (!onCourse()) { release(); return; }        // the person (or a script) scrolled elsewhere: stop following
     pinned.prevTop = pinned.lastTop;
-    pinned.lastTop = top;
-    pinned.movedAt = pinned.issuedAt = performance.now();
-    window.scrollTo({ top, behavior: reduceMotion() ? "instant" : "smooth" });
+    pinned.movedAt = performance.now();
+    scrollFor(top, !reduceMotion());
   };
   const release = () => { if (pinned) { pinned = null; schedule(); } };
 
@@ -1886,10 +1907,10 @@ sectionNav = (function initSectionNav() {
     if (!el || !byId.has(id)) return false;
     expandSectionFold(el);
     const top = targetTop(el);
-    pinned = { id, until: performance.now() + 4000, lastTop: top, movedAt: 0, issuedAt: performance.now() };
+    pinned = { id, until: performance.now() + 4000, movedAt: 0 };
     setActive(id);
     if (push && location.hash !== "#" + id) history.pushState(null, "", "#" + id);
-    window.scrollTo({ top, behavior: instant || reduceMotion() ? "instant" : "smooth" });
+    scrollFor(top, !(instant || reduceMotion()));
     if (effect) arrive(id === "main-content" ? el.querySelector(".digest") || el : el);
     return true;
   }
@@ -1926,9 +1947,8 @@ sectionNav = (function initSectionNav() {
     const el = document.getElementById(pinned.id);
     // Stopped where the target used to be, right after it moved: our own scroll ended early, so finish it.
     if (el && performance.now() - pinned.movedAt < 1500 && Math.abs(window.scrollY - pinned.prevTop) <= 24) {
-      pinned.lastTop = targetTop(el);
-      pinned.movedAt = pinned.issuedAt = performance.now();
-      window.scrollTo({ top: pinned.lastTop, behavior: reduceMotion() ? "instant" : "smooth" });
+      pinned.movedAt = performance.now();
+      scrollFor(targetTop(el), !reduceMotion());
     } else release();
   });
   window.addEventListener("resize", () => { syncPadding(); schedule(); });

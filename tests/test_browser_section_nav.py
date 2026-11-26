@@ -1,7 +1,7 @@
 """Console navigation in Chromium: every menu button lands on its own section, also while the panels above it are
 still loading; the menu stays on screen and marks exactly one section while scrolling (desktop sidebar, mobile
 strip); the chosen section plays an arrival effect (a static ring with reduced motion); and the Activity map shows
-the latest missions as cards that open the mission timeline.
+the latest missions as fixed-height cards that open the mission timeline.
 """
 import json
 import time
@@ -47,7 +47,7 @@ class SectionNavBrowserTests(unittest.TestCase):
         pg.type("#password", fixtures.ADMIN[1])
         pg.click("#login-form button[type=submit]")
         pg.wait("!document.querySelector('#app-view').classList.contains('hidden')")
-        pg.wait("document.querySelectorAll('#mission-preview .mp-card').length > 0", what="mission cards")
+        pg.wait("document.querySelectorAll('#mission-preview .mp-link').length > 0", what="mission cards")
         return pg
 
     def offset_of(self, pg, section):
@@ -130,7 +130,7 @@ class SectionNavBrowserTests(unittest.TestCase):
         for view in ("desktop", "mobile"):
             with self.subTest(view=view):
                 pg = self.page(view)
-                card = pg.eval("""(() => { const c = document.querySelector('#mission-preview .mp-card');
+                card = pg.eval("""(() => { const c = document.querySelector('#mission-preview .mp-card:not(.mp-skeleton)');
                     return {title: c.querySelector('.mp-title').textContent, who: c.querySelector('.mp-who').textContent,
                             kind: c.querySelector('.mp-kind').textContent, text: c.querySelector('.mp-text').textContent,
                             meta: c.querySelector('.mp-meta').textContent, href: c.querySelector('a').getAttribute('href')}; })()""")
@@ -142,6 +142,13 @@ class SectionNavBrowserTests(unittest.TestCase):
                 self.assertIn("2 agents", card["meta"])
                 self.assertTrue(card["href"].startswith("/missions?mission="))
                 self.assertIn("close-books", card["href"])
+                # The loading placeholder has the same height, so the map's tabs below do not move when cards arrive.
+                heights = pg.eval("""(() => { const grid = document.querySelector('#mission-preview .mp-grid');
+                    const ghost = document.createElement('li'); ghost.className = 'mp-card mp-skeleton'; grid.append(ghost);
+                    const out = [ghost.offsetHeight, grid.querySelector('.mp-card').offsetHeight]; ghost.remove(); return out; })()""")
+                self.assertEqual(heights[0], heights[1])
+                self.assertTrue(pg.eval("document.querySelector('#mission-preview .mp-link').scrollHeight <= document.querySelector('#mission-preview .mp-link').clientHeight + 1"),
+                                "card content fits its fixed height")
                 self.assert_clean(pg, view)
 
 
