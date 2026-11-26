@@ -20,6 +20,7 @@ const alertFilter = document.getElementById("alert-filter");
 const statusToast = document.getElementById("status-toast");
 
 let refreshTimer = null;
+let sectionNav = null;   // set by initSectionNav below
 let toastTimer = null;
 let viewGeneration = 0;
 let workBoardRequest = 0;
@@ -321,6 +322,7 @@ function showLogin(preferredTab) {
   sessionState.lastCreatedToken = null;
   appView.classList.add("hidden");
   loginView.classList.remove("hidden");
+  sectionNav?.refresh();
 
   const urlInvite = readInviteFromUrl();
   if (urlInvite || window.location.hash === "#access" || (window.location.hash && !publicSections.includes(window.location.hash))) {
@@ -446,6 +448,10 @@ function showApp(sessionPayload, notifyOrgSwitch = false) {
   loadAll();
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = setInterval(loadAll, 10000);
+  // Opened at a section (for example /#activity from the mission timeline): land there and stay while it loads.
+  const section = location.hash.slice(1);
+  if (entering && section) requestAnimationFrame(() => sectionNav?.go(section, { push: false, instant: true, effect: false }));
+  requestAnimationFrame(() => sectionNav?.refresh());
 }
 
 async function checkAuth() {
@@ -1285,6 +1291,38 @@ function renderCollaboration(collaboration, expandedChanges, initialized) {
   </section>`;
 }
 
+/* Activity map: the three most recent missions as small cards — what it is about, who takes part and the latest
+   recorded message, with the full story one click away in the mission timeline. */
+function renderMissionPreview(missions) {
+  const preview = document.getElementById("mission-preview");
+  if (!preview) return;
+  const list = missions.filter((m) => m && Array.isArray(m.events) && m.events.length).slice(0, 3);
+  preview.classList.toggle("hidden", !list.length);
+  if (!list.length) { preview.replaceChildren(); return; }
+  const kindClass = (kind) => /block|problem/i.test(kind || "") ? "is-blocker" : /decision/i.test(kind || "") ? "is-decision"
+    : /memory/i.test(kind || "") ? "is-memory" : /repl|message/i.test(kind || "") ? "is-message" : "";
+  const cards = list.map((mission) => {
+    const event = mission.events[0];
+    const people = new Set();
+    mission.events.forEach((e) => { if (e.agent) people.add(e.agent); if (e.to) people.add(e.to); });
+    const href = "/missions?" + new URLSearchParams({ mission: (mission.source || "") + "/" + mission.id });
+    const when = Number(event.time) ? fmtAge(Number(event.time)) : "";
+    return `<li class="mp-card">
+      <a class="mp-link" href="${esc(href)}">
+        <span class="mp-meta"><span>${esc(mission.source || "Mission")}</span><span>${mission.events.length} update${mission.events.length === 1 ? "" : "s"} · ${people.size} agent${people.size === 1 ? "" : "s"}</span></span>
+        <strong class="mp-title">${esc(mission.title || mission.id)}</strong>
+        <span class="mp-latest">
+          <span class="mp-who">${esc(event.agent || "Agent")}${event.to ? ` <span aria-label="to">→</span> ${esc(event.to)}` : ""}</span>
+          <span class="mp-kind ${kindClass(event.kind)}">${esc(event.kind || "Update")}</span>
+        </span>
+        <span class="mp-text">${esc(event.text || "")}</span>
+        <span class="mp-foot"><span>${esc(when)}</span><span class="mp-open">Open timeline <span aria-hidden="true">→</span></span></span>
+      </a>
+    </li>`;
+  }).join("");
+  preview.innerHTML = `<h3 class="mp-heading">Latest missions</h3><ol class="mp-grid">${cards}</ol>`;
+}
+
 async function loadWorkBoard(events) {
   const request = ++workBoardRequest;
   const el = document.getElementById("work-board");
@@ -1293,18 +1331,7 @@ async function loadWorkBoard(events) {
     const board = await api("/api/v1/work-board?missions=1" + (appView.dataset.includeActivity ? "&include=activity" : ""));
     if (request !== workBoardRequest || appView.classList.contains("hidden")) return;
     sessionState.links = board.links && typeof board.links === "object" ? board.links : { version: "1", by_task: {}, by_session: {} };
-    const preview = document.getElementById("mission-preview");
-    if (preview) {
-      preview.replaceChildren(...(board.missions || []).slice(0, 3).map(mission => {
-        const event = mission.events[0];
-        const row = document.createElement("p");
-        const link = document.createElement("a");
-        link.href = "/missions?" + new URLSearchParams({mission: mission.source + "/" + mission.id});
-        link.textContent = mission.title;
-        row.append(link, " · ", event.agent, event.to ? " → " + event.to : "", " · ", event.text || event.kind);
-        return row;
-      }));
-    }
+    renderMissionPreview(board.missions || []);
     const urlTask = new URLSearchParams(window.location.search).get("task") || "";
     if (urlTask && !sessionState.focusedTaskId) sessionState.focusedTaskId = urlTask;
     renderReturnBanner();
@@ -1722,23 +1749,191 @@ document.getElementById("mfa-disable-form")?.addEventListener("submit", async (e
 });
 
 /* ---------- Scroll-Spy Navigation & Quick Command Palette (Ctrl+K / Cmd+K) ---------- */
-(function initScrollSpy() {
-  const links = [...document.querySelectorAll('.section-nav a[href^="#"]')];
-  if (!links.length || typeof IntersectionObserver === "undefined") return;
-  const setActive = (id) => {
-    links.forEach((a) => a.classList.toggle("is-active", a.getAttribute("href") === `#${id}`));
+/* Section navigation: every button lands on its own section even while panels above it are still loading, the
+   current section follows the scroll (one highlighted button, also for two cards sharing a row), and the chosen
+   section plays a short arrival effect. */
+sectionNav = (function initSectionNav() {
+  const nav = document.querySelector(".section-nav");
+  if (!nav) return null;
+  const links = [...nav.querySelectorAll('a[href^="#"]')];
+  const byId = new Map(links.map((a) => [a.getAttribute("href").slice(1), a]));
+  const reduceMotion = () => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  const indicator = document.createElement("span");
+  indicator.className = "nav-indicator";
+  indicator.setAttribute("aria-hidden", "true");
+  nav.prepend(indicator);
+  nav.classList.add("has-indicator");
+  let current = "";
+  let pinned = null;        // {id, until}: a section chosen from the menu, kept while the page settles
+  let frame = 0;
+
+  const visible = (el) => el && el.getClientRects().length > 0 && !el.closest(".hidden");
+  const sections = () => [...byId.keys()].map((id) => document.getElementById(id)).filter(visible);
+  // The sticky menu sits above the content on narrow screens: sections must stop below it.
+  const offset = () => {
+    const r = nav.getBoundingClientRect();
+    const overlay = getComputedStyle(nav).position === "sticky" && r.width > window.innerWidth * 0.6;
+    return Math.round((overlay ? r.height : 0) + 16);
   };
-  const targets = links.map((a) => document.getElementById(a.getAttribute("href").slice(1))).filter(Boolean);
-  if (!targets.length) return;
-  setActive(targets[0].id);
-  const io = new IntersectionObserver(
-    (entries) => {
-      const visible = entries.filter((en) => en.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio);
-      if (visible[0]) setActive(visible[0].target.id);
-    },
-    { rootMargin: "-15% 0px -65% 0px", threshold: [0.05, 0.25, 0.5] }
-  );
-  targets.forEach((t) => io.observe(t));
+  // Room after the last section so that any section, even the last one, can rest at the top of the window.
+  const end = document.getElementById("console-end");
+  const syncPadding = () => {
+    if (document.getElementById("app-view")?.classList.contains("hidden")) {
+      document.documentElement.style.removeProperty("scroll-padding-top");   // the public pages keep their own
+      return;
+    }
+    document.documentElement.style.scrollPaddingTop = offset() + "px";
+    const last = sections().at(-1);
+    if (!end || !last || !visible(end)) return;
+    const tail = end.getBoundingClientRect().top - last.getBoundingClientRect().top;
+    const room = Math.max(96, Math.round(window.innerHeight - offset() - tail));
+    if (Math.abs(end.offsetHeight - room) > 2) end.style.minHeight = room + "px";
+  };
+
+  function placeIndicator(link) {
+    if (!link || !visible(link)) { indicator.style.opacity = "0"; return; }
+    indicator.style.opacity = "1";
+    indicator.style.width = link.offsetWidth + "px";
+    indicator.style.height = link.offsetHeight + "px";
+    indicator.style.transform = `translate(${link.offsetLeft}px, ${link.offsetTop}px)`;
+    // Keep the highlighted button visible inside a scrolling menu (horizontal strip or a short window); a button
+    // that is already visible does not move, so the menu never slides away under a finger.
+    const behavior = reduceMotion() ? "auto" : "smooth";
+    if (nav.scrollWidth > nav.clientWidth + 1) {
+      const left = link.offsetLeft, right = left + link.offsetWidth, pad = 24;
+      if (left < nav.scrollLeft + pad || right > nav.scrollLeft + nav.clientWidth - pad) {
+        nav.scrollTo({ left: Math.max(0, left - (nav.clientWidth - link.offsetWidth) / 2), behavior });
+      }
+    } else if (nav.scrollHeight > nav.clientHeight + 1) {
+      const top = link.offsetTop, bottom = top + link.offsetHeight;
+      if (top < nav.scrollTop || bottom > nav.scrollTop + nav.clientHeight) {
+        nav.scrollTo({ top: Math.max(0, top - (nav.clientHeight - link.offsetHeight) / 2), behavior });
+      }
+    }
+  }
+
+  function setActive(id) {
+    if (!byId.has(id)) return;
+    if (id !== current) {
+      current = id;
+      links.forEach((a) => {
+        const on = a === byId.get(id);
+        a.classList.toggle("is-active", on);
+        if (on) a.setAttribute("aria-current", "location");
+        else a.removeAttribute("aria-current");
+      });
+    }
+    placeIndicator(byId.get(id));
+  }
+
+  // The section under the reading line; when two cards share a row, the first one (left column) wins.
+  function sectionAtLine() {
+    const list = sections();
+    if (!list.length) return "";
+    const line = offset() + Math.min(window.innerHeight * 0.2, 120);
+    let best = list[0], bestTop = -Infinity;
+    for (const el of list) {
+      const top = el.getBoundingClientRect().top;
+      if (top <= line && top > bestTop + 8) { best = el; bestTop = top; }
+    }
+    return best.id;
+  }
+
+  function targetTop(el) {
+    const max = document.documentElement.scrollHeight - window.innerHeight;
+    let shift = 0;                                // ignore the arrival lift while it plays
+    try { shift = new DOMMatrixReadOnly(getComputedStyle(el).transform).m42 || 0; } catch (_) {}
+    return Math.max(0, Math.min(max, Math.round(el.getBoundingClientRect().top - shift + window.scrollY - offset())));
+  }
+
+  function update() {
+    frame = 0;
+    if (pinned && document.getElementById(pinned.id)) { setActive(pinned.id); return; }
+    pinned = null;
+    setActive(sectionAtLine());
+  }
+  const schedule = () => { if (!frame) frame = requestAnimationFrame(update); };
+
+  // Panels above the target finish loading after the click and push it down. While the choice is pinned and the
+  // person has not scrolled on their own, follow the target to its final place.
+  const settle = () => {
+    if (!pinned || performance.now() > pinned.until) return;
+    const el = document.getElementById(pinned.id);
+    if (!el) return;
+    const top = targetTop(el);
+    if (Math.abs(top - pinned.lastTop) <= 4) return;
+    pinned.prevTop = pinned.lastTop;
+    pinned.lastTop = top;
+    pinned.movedAt = pinned.issuedAt = performance.now();
+    window.scrollTo({ top, behavior: reduceMotion() ? "instant" : "smooth" });
+  };
+  const release = () => { if (pinned) { pinned = null; schedule(); } };
+
+  function arrive(el) {
+    el.classList.remove("is-arriving");
+    void el.offsetWidth;                       // restart the effect when the same section is chosen twice
+    el.classList.add("is-arriving");
+    clearTimeout(el._arriveTimer);
+    el._arriveTimer = setTimeout(() => el.classList.remove("is-arriving"), 1100);
+  }
+
+  function go(id, { push = true, instant = false, effect = true } = {}) {
+    const el = document.getElementById(id);
+    if (!el || !byId.has(id)) return false;
+    expandSectionFold(el);
+    const top = targetTop(el);
+    pinned = { id, until: performance.now() + 4000, lastTop: top, movedAt: 0, issuedAt: performance.now() };
+    setActive(id);
+    if (push && location.hash !== "#" + id) history.pushState(null, "", "#" + id);
+    window.scrollTo({ top, behavior: instant || reduceMotion() ? "instant" : "smooth" });
+    if (effect) arrive(id === "main-content" ? el.querySelector(".digest") || el : el);
+    return true;
+  }
+
+  document.addEventListener("click", (e) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const link = e.target.closest?.('a[href^="#"]');
+    if (!link || link.closest("#login-view")) return;
+    const id = link.getAttribute("href").slice(1);
+    if (!byId.has(id) || document.getElementById("app-view")?.classList.contains("hidden")) return;
+    e.preventDefault();
+    go(id);
+    if (link.closest(".section-nav")) { link.focus({ preventScroll: true }); return; }
+    const el = document.getElementById(id);             // skip link and in-page buttons: keyboard focus follows
+    if (!el.hasAttribute("tabindex")) el.setAttribute("tabindex", "-1");
+    el.focus({ preventScroll: true });
+  });
+  window.addEventListener("popstate", () => {
+    const id = location.hash.slice(1);
+    if (byId.has(id)) go(id, { push: false });
+  });
+  ["wheel", "touchmove", "keydown"].forEach((type) =>
+    window.addEventListener(type, (e) => {
+      if (type === "keydown" && !["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) return;
+      release();
+    }, { passive: true }));
+  window.addEventListener("scroll", schedule, { passive: true });
+  // A scroll that ends away from the chosen section (scrollbar drag, find in page) hands control back to the page.
+  window.addEventListener("scrollend", () => {
+    if (!pinned || Math.abs(window.scrollY - pinned.lastTop) <= 24) return;
+    if (performance.now() - pinned.issuedAt < 150) return;   // the end of a scroll that started before ours
+    const el = document.getElementById(pinned.id);
+    // Stopped where the target used to be, right after it moved: our own scroll ended early, so finish it.
+    if (el && performance.now() - pinned.movedAt < 1500 && Math.abs(window.scrollY - pinned.prevTop) <= 24) {
+      pinned.lastTop = targetTop(el);
+      pinned.movedAt = pinned.issuedAt = performance.now();
+      window.scrollTo({ top: pinned.lastTop, behavior: reduceMotion() ? "instant" : "smooth" });
+    } else release();
+  });
+  window.addEventListener("resize", () => { syncPadding(); schedule(); });
+  if (typeof ResizeObserver !== "undefined") {
+    const main = document.getElementById("main-content");
+    if (main) new ResizeObserver(() => { syncPadding(); settle(); schedule(); }).observe(main);
+    new ResizeObserver(() => placeIndicator(byId.get(current))).observe(nav);
+  }
+  syncPadding();
+  schedule();
+  return { go, refresh: () => { syncPadding(); schedule(); } };
 })();
 
 function expandSectionFold(target) {
@@ -1787,6 +1982,7 @@ function expandSectionFold(target) {
   let items = [];
 
   const jumpTo = (hash) => {
+    if (sectionNav?.go(hash.slice(1))) return;
     const target = document.querySelector(hash);
     if (target) {
       expandSectionFold(target);
